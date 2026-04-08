@@ -82,6 +82,16 @@ export type AuthBootstrapStatus = {
   allow_registration: boolean;
 };
 
+export type UpdateStatus = {
+  current_version: string;
+  latest_version: string;
+  update_available: boolean;
+  repository_url?: string | null;
+  update_command: string;
+  checked_at?: string | null;
+  error?: string | null;
+};
+
 export type VideoSummary = {
   id: number;
   watch_ref: string;
@@ -352,6 +362,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   bootstrapStatus: () => request<AuthBootstrapStatus>("/api/session/bootstrap"),
+  updateStatus: () => request<UpdateStatus>("/api/app/update-status"),
   profiles: () => request<Profile[]>("/api/session/profiles"),
   updateProfilePermissions: (userId: number, payload: { is_admin: boolean }) =>
     request<Profile>(`/api/session/profiles/${userId}/permissions`, { method: "PUT", body: JSON.stringify(payload) }),

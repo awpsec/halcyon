@@ -19,6 +19,8 @@ LEGACY_ENV_ALIASES = {
     "WAYTUBE_TRANSCODE_CACHE_LIMIT_MB": "HALCYON_TRANSCODE_CACHE_LIMIT_MB",
     "WAYTUBE_ALLOW_ORIGIN": "HALCYON_ALLOW_ORIGIN",
     "WAYTUBE_POSTGRES_HOST": "HALCYON_POSTGRES_HOST",
+    "WAYTUBE_UPDATE_MANIFEST_URL": "HALCYON_UPDATE_MANIFEST_URL",
+    "WAYTUBE_REPOSITORY_URL": "HALCYON_REPOSITORY_URL",
 }
 
 
@@ -43,6 +45,8 @@ class Settings(BaseSettings):
     background_tasks_enabled: bool = True
     transcode_cache_limit_mb: int = 20480
     allow_origin: str | None = None
+    update_manifest_url: str = "https://raw.githubusercontent.com/awpsec/halcyon/main/halcyon-release.json"
+    repository_url: str = "https://github.com/awpsec/halcyon"
 
     model_config = SettingsConfigDict(
         env_prefix="HALCYON_",

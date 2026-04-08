@@ -36,6 +36,16 @@ class AuthBootstrapOut(BaseModel):
     allow_registration: bool = True
 
 
+class UpdateStatusOut(BaseModel):
+    current_version: str
+    latest_version: str
+    update_available: bool = False
+    repository_url: str | None = None
+    update_command: str = "halcyon update"
+    checked_at: datetime | None = None
+    error: str | None = None
+
+
 class LoginIn(BaseModel):
     username: str
     password: str

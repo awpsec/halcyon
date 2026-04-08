@@ -7,6 +7,7 @@ import {
   type RetentionFolderBrowser,
   type RetentionLookupItem,
   type TranscodeItem,
+  type UpdateStatus,
   type VideoSummary,
 } from "../api/client";
 import { AvatarImage } from "../components/AvatarImage";
@@ -242,6 +243,22 @@ function storageFreeTone(value: number | null | undefined) {
   return "";
 }
 
+async function copyTextToClipboard(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const field = document.createElement("textarea");
+  field.value = value;
+  field.setAttribute("readonly", "true");
+  field.style.position = "absolute";
+  field.style.left = "-9999px";
+  document.body.appendChild(field);
+  field.select();
+  document.execCommand("copy");
+  document.body.removeChild(field);
+}
+
 function retentionTargetHref(targetType: "video" | "series" | "channel", targetId: number, subtitle?: string | null) {
   if (targetType === "channel") return `/channels/${subtitle || targetId}`;
   if (targetType === "series") return `/series/${targetId}`;
@@ -395,6 +412,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
   const jobsState = useAsyncData(() => (isAdmin ? api.jobs() : Promise.resolve([])), [isAdmin]);
   const logsState = useAsyncData(() => (isAdmin ? api.logs(1200) : Promise.resolve(null)), [isAdmin]);
   const transcodesState = useAsyncData(() => (isAdmin ? api.transcodes() : Promise.resolve(null)), [isAdmin]);
+  const updateStatusState = useAsyncData<UpdateStatus | null>(() => (isAdmin ? api.updateStatus() : Promise.resolve(null)), [isAdmin]);
   const uploadsState = useAsyncData(() => (isAdmin ? api.videos({ offset: 0, limit: INITIAL_UPLOAD_BATCH }) : Promise.resolve([])), [isAdmin]);
   const retentionState = useAsyncData(() => (isAdmin ? api.retentionSettings() : Promise.resolve(null)), [isAdmin]);
   const profilesState = useAsyncData(() => (isAdmin ? api.profiles() : Promise.resolve([])), [isAdmin]);
@@ -490,6 +508,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordSaving, setPasswordSaving] = useState(false);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
   const [profilePermissionDrafts, setProfilePermissionDrafts] = useState<Record<number, "user" | "admin">>({});
   const [profilePermissionsSaving, setProfilePermissionsSaving] = useState(false);
   const [deletingProfileId, setDeletingProfileId] = useState<number | null>(null);
@@ -1385,6 +1404,19 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
     return <SettingsPageSkeleton />;
   }
 
+  const updateStatus = updateStatusState.data;
+  const updateBadgeVisible = Boolean(isAdmin && updateStatus?.update_available);
+
+  async function handleUpdateAction() {
+    const command = updateStatus?.update_command?.trim() || "halcyon update";
+    try {
+      await copyTextToClipboard(command);
+      pushToast("info", "Update command copied", `Run "${command}" in a terminal on the machine hosting halcyon.`);
+    } catch (error) {
+      pushToast("error", "Unable to copy update command", error instanceof Error ? error.message : "Unknown clipboard error");
+    }
+  }
+
   return (
     <div className="page-stack settings-page">
       <div className="settings-shell">
@@ -1413,7 +1445,20 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                 </>
               ) : null}
             </div>
-            <div className="settings-version-note">Version {__APP_VERSION__}</div>
+            <div className="settings-version-note">
+              <span>Version {__APP_VERSION__}</span>
+              {updateBadgeVisible ? (
+                <button
+                  type="button"
+                  className="settings-update-badge"
+                  data-tooltip="Update available"
+                  onClick={() => setUpdateModalOpen(true)}
+                  aria-label="Update available"
+                >
+                  !
+                </button>
+              ) : null}
+            </div>
           </div>
         </aside>
         <div className="settings-main">
@@ -2588,6 +2633,48 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
       ) : null}
         </div>
       </div>
+      {updateModalOpen ? (
+        <Modal title="Update available" onClose={() => setUpdateModalOpen(false)}>
+          <div className="update-modal">
+            <p className="update-modal-copy">
+              {updateStatus?.update_available
+                ? "A newer halcyon build is available for this server."
+                : "halcyon is already on the newest known build."}
+            </p>
+            <div className="update-modal-status">
+              <div>
+                <small className="muted-copy">Current version</small>
+                <strong>{updateStatus?.current_version ?? __APP_VERSION__}</strong>
+              </div>
+              <div>
+                <small className="muted-copy">Newest version</small>
+                <strong>{updateStatus?.latest_version ?? __APP_VERSION__}</strong>
+              </div>
+            </div>
+            {updateStatus?.error ? (
+              <p className="update-modal-warning">{updateStatus.error}</p>
+            ) : (
+              <p className="update-modal-note">
+                Run <code>{updateStatus?.update_command ?? "halcyon update"}</code> on the machine hosting halcyon.
+                The app does not control Docker directly from inside the container.
+              </p>
+            )}
+            <div className="settings-actions-row">
+              <button className="ghost-button settings-utility-button" type="button" onClick={() => setUpdateModalOpen(false)}>
+                Close
+              </button>
+              <button
+                className="action-button"
+                type="button"
+                onClick={() => void handleUpdateAction()}
+                disabled={Boolean(updateStatus?.error)}
+              >
+                Update
+              </button>
+            </div>
+          </div>
+        </Modal>
+      ) : null}
       {pendingDeleteProfile ? (
         <Modal
           title="Delete user"

@@ -90,6 +90,7 @@ from app.schemas.common import (
     SwitchSessionIn,
     SyncSettingsIn,
     SyncSettingsOut,
+    UpdateStatusOut,
     UserPasswordChangeIn,
     UserPasswordResetByPinIn,
     UserPinSetIn,
@@ -97,6 +98,7 @@ from app.schemas.common import (
     VideoSummary,
     WatchStateIn,
 )
+from app.services.app_update import build_update_status
 from app.services.auth import hash_password, hash_session_token, verify_password, verify_recovery_phrase
 from app.services.auth_rate_limit import clear_failures, is_limited, register_failure
 from app.services.feed import build_home_feed, build_suggested_feed, summarize_video
@@ -1014,6 +1016,12 @@ def session_bootstrap_status(db: Session = Depends(get_db)) -> AuthBootstrapOut:
         admin_setup_required=bool(admin_user and admin_user.requires_admin_setup),
         allow_registration=_registration_allowed(db),
     )
+
+
+@router.get("/app/update-status", response_model=UpdateStatusOut)
+def app_update_status(current_user: UserProfile = Depends(get_configured_admin_user)) -> UpdateStatusOut:
+    del current_user
+    return UpdateStatusOut(**build_update_status())
 
 
 @router.get("/session/profiles", response_model=list[UserProfileOut])

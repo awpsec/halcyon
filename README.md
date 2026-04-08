@@ -46,6 +46,13 @@ halcyon is packaged so the same release folder works on both Windows and Linux w
 2. Open the project folder.
 3. Make sure Docker and Docker Compose are installed.
 
+For the easiest update path, clone the repository instead of downloading a one-off zip:
+
+```bash
+git clone git@github.com:awpsec/halcyon.git
+cd halcyon
+```
+
 ### 2. Prepare the local folders
 
 halcyon expects these local folders:
@@ -70,6 +77,18 @@ Run:
 docker compose up --build -d
 ```
 
+Or use the included helper command:
+
+```bash
+./halcyon start
+```
+
+On Windows:
+
+```powershell
+.\halcyon.ps1 start
+```
+
 This starts:
 
 - `halcyon-postgres`
@@ -81,6 +100,21 @@ This starts:
 Open:
 
 - [http://localhost:11111](http://localhost:11111)
+
+## Helper commands
+
+halcyon ships with small wrapper scripts so common Docker Compose tasks stay simple:
+
+- `halcyon start`
+- `halcyon stop`
+- `halcyon status`
+- `halcyon update`
+
+From Linux/macOS, run `./halcyon ...` or symlink the script into your `PATH`.
+
+From Windows, run `.\halcyon.ps1 ...` in PowerShell or `halcyon.cmd ...` from Command Prompt. If you want bare `halcyon ...`, add the repository folder to your `PATH`.
+
+`halcyon update` keeps your `data/` folders, library bind mount, database volume, and saved Admin settings in place. It pulls the newest git version and rebuilds the stack.
 
 ## First boot and admin onboarding
 
@@ -116,6 +150,8 @@ After first login:
 4. Review retention settings before enabling retention
 5. Create any additional user accounts you want
 6. Promote trusted accounts to admin only if they should manage server settings
+
+When a newer version is available, Admin settings also shows an update indicator beside the version footer. The popup there will show the current version, newest version, and the host-side update command to run.
 
 ## Library workflow
 

@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir .
 
 WORKDIR /app
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
+COPY halcyon-release.json ./halcyon-release.json
 COPY backend ./backend
 RUN mkdir -p /config /cache /library
 

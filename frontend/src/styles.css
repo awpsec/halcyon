@@ -5763,10 +5763,34 @@ body,
 }
 
 .settings-version-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   padding: 8px 10px 0;
   font-size: 0.77rem;
   color: color-mix(in srgb, var(--muted) 78%, transparent);
   letter-spacing: 0.01em;
+}
+
+.settings-update-badge {
+  width: 18px;
+  height: 18px;
+  border: 1px solid color-mix(in srgb, #ff9f43 62%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, #ff9f43 18%, transparent);
+  color: #ff9f43;
+  font-size: 0.74rem;
+  font-weight: 800;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.settings-update-badge:hover {
+  background: color-mix(in srgb, #ff9f43 24%, transparent);
+  color: #ffb15c;
 }
 
 .settings-main {
@@ -6733,6 +6757,51 @@ body,
   margin: 0;
   color: #f2a575;
   font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.update-modal {
+  display: grid;
+  gap: 14px;
+  max-width: 520px;
+}
+
+.update-modal-copy,
+.update-modal-note,
+.update-modal-warning {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.update-modal-status {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.update-modal-status > div {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  background: color-mix(in srgb, var(--panel-strong) 78%, transparent);
+}
+
+.update-modal-status strong {
+  font-size: 1rem;
+  color: var(--text);
+}
+
+.update-modal-note code {
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-strong) 80%, transparent);
+  color: var(--text);
+}
+
+.update-modal-warning {
+  color: #f2a575;
   font-weight: 600;
 }
 

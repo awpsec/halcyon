@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+MANIFEST_FILE="$SCRIPT_DIR/halcyon-release.json"
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "halcyon: missing required command '$1'" >&2
+    exit 1
+  fi
+}
+
+read_manifest_field() {
+  local key="$1"
+  grep -o "\"${key}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$MANIFEST_FILE" \
+    | head -n 1 \
+    | sed -E 's/.*"([^"]*)"[[:space:]]*$/\1/'
+}
+
+CURRENT_VERSION="$(read_manifest_field version)"
+MANIFEST_URL="$(read_manifest_field manifest_url)"
+
+fetch_latest_version() {
+  local payload=""
+  if command -v curl >/dev/null 2>&1; then
+    payload="$(curl -fsSL "$MANIFEST_URL" 2>/dev/null || true)"
+  elif command -v wget >/dev/null 2>&1; then
+    payload="$(wget -qO- "$MANIFEST_URL" 2>/dev/null || true)"
+  fi
+
+  if [[ -z "$payload" ]]; then
+    return 1
+  fi
+
+  printf '%s' "$payload" \
+    | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | head -n 1 \
+    | sed -E 's/.*"([^"]*)"[[:space:]]*$/\1/'
+}
+
+is_remote_newer() {
+  local local_version="$1"
+  local remote_version="$2"
+  [[ "$local_version" != "$remote_version" && "$(printf '%s\n%s\n' "$local_version" "$remote_version" | sort -V | tail -n 1)" == "$remote_version" ]]
+}
+
+show_usage() {
+  cat <<'EOF'
+Usage: halcyon <start|stop|status|update>
+
+  halcyon start    Start the Docker Compose stack
+  halcyon stop     Stop the Docker Compose stack
+  halcyon status   Show running containers and check for a newer release
+  halcyon update   Pull the latest git version and rebuild the stack
+EOF
+}
+
+show_status() {
+  require_command docker
+  echo "Current version: $CURRENT_VERSION"
+  if latest_version="$(fetch_latest_version)"; then
+    echo "Newest version:  $latest_version"
+    if is_remote_newer "$CURRENT_VERSION" "$latest_version"; then
+      echo "Status:          update available"
+    else
+      echo "Status:          up to date"
+    fi
+  else
+    echo "Newest version:  unavailable"
+    echo "Status:          unable to reach update server"
+  fi
+  echo
+  docker compose ps
+}
+
+case "${1:-}" in
+  start)
+    require_command docker
+    docker compose up -d
+    ;;
+  stop)
+    require_command docker
+    docker compose stop
+    ;;
+  status)
+    show_status
+    ;;
+  update)
+    require_command docker
+    require_command git
+    if [[ ! -d "$SCRIPT_DIR/.git" ]]; then
+      echo "halcyon update requires a git clone install. Download the newest release package or clone the repository." >&2
+      exit 1
+    fi
+    git fetch --tags origin main
+    git pull --ff-only origin main
+    docker compose up -d --build
+    echo
+    show_status
+    ;;
+  ""|-h|--help|help)
+    show_usage
+    ;;
+  *)
+    echo "halcyon: unknown command '${1}'" >&2
+    echo
+    show_usage
+    exit 1
+    ;;
+esac
