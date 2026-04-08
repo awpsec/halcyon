@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import func, literal, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_configured_admin_user, get_current_admin_user, get_current_user
+from app.api.deps import get_configured_admin_user, get_current_admin_user, get_current_user, resolve_session_token
 from app.core.config import get_settings
 from app.core.logging import read_log_lines
 from app.core.timezone import server_timezone_name
@@ -96,7 +96,7 @@ from app.schemas.common import (
     VideoSummary,
     WatchStateIn,
 )
-from app.services.auth import hash_password, verify_password, verify_recovery_phrase
+from app.services.auth import hash_password, hash_session_token, verify_password, verify_recovery_phrase
 from app.services.feed import build_home_feed, build_suggested_feed, summarize_video
 from app.services.media import download_thumbnail, find_caption_tracks, generate_preview_clip, generate_thumbnail, is_video_file, placeholder_thumbnail_svg, probe_media, srt_to_vtt
 from app.services.playback import ensure_compatible_stream, ensure_hls_transcode, reconcile_transcode_job, resolve_playback, stop_transcode_job, transcode_is_throttled, wait_for_transcode_playlist
@@ -950,20 +950,21 @@ def _apply_admin_password_change(
 
 
 def _revoke_other_sessions(db: Session, user_id: int, keep_token: str | None) -> None:
+    keep_hashed = hash_session_token(keep_token) if keep_token else None
     session_query = select(SessionToken).where(SessionToken.user_id == user_id)
-    if keep_token:
-        session_query = session_query.where(SessionToken.token != keep_token)
+    if keep_hashed:
+        session_query = session_query.where(SessionToken.token != keep_hashed)
     for token in db.scalars(session_query).all():
         db.delete(token)
     db.flush()
 
 
 def _create_session(db: Session, user: UserProfile, response: Response) -> SessionOut:
-    token = SessionToken(token=secrets.token_urlsafe(24), user_id=user.id)
-    db.add(token)
+    raw_token = secrets.token_urlsafe(24)
+    db.add(SessionToken(token=hash_session_token(raw_token), user_id=user.id))
     db.commit()
-    response.set_cookie(settings.session_cookie_name, token.token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 365)
-    return SessionOut(user=_current_user_out(user), session_token=token.token)
+    response.set_cookie(settings.session_cookie_name, raw_token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 365)
+    return SessionOut(user=_current_user_out(user), session_token=raw_token)
 
 
 def _active_youtube_api_key(db: Session) -> str | None:
@@ -1241,11 +1242,11 @@ def register(payload: RegisterIn, response: Response, db: Session = Depends(get_
 
 @router.post("/session/switch", response_model=SessionOut)
 def switch_session(payload: SwitchSessionIn, response: Response, db: Session = Depends(get_db)) -> SessionOut:
-    token = db.scalar(select(SessionToken).where(SessionToken.token == payload.session_token))
+    token = resolve_session_token(db, payload.session_token)
     if not token or not token.user:
         raise HTTPException(status_code=401, detail="Session token not recognized")
-    response.set_cookie(settings.session_cookie_name, token.token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 365)
-    return SessionOut(user=_current_user_out(token.user), session_token=token.token)
+    response.set_cookie(settings.session_cookie_name, payload.session_token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 365)
+    return SessionOut(user=_current_user_out(token.user), session_token=payload.session_token)
 
 
 @router.post("/session/logout")
@@ -1255,7 +1256,7 @@ def logout(
     db: Session = Depends(get_db),
 ) -> dict:
     if session_token:
-        token = db.scalar(select(SessionToken).where(SessionToken.token == session_token))
+        token = resolve_session_token(db, session_token)
         if token:
             db.delete(token)
             db.commit()

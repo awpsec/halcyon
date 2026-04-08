@@ -6,7 +6,7 @@ from app.core.timezone import server_timezone_name
 from app.db.session import engine
 from app.models.base import Base
 from app.models.entities import LibraryRoot, RetentionSettings, SelectedFolder, SessionToken, SyncSettings, UserProfile, VideoFile
-from app.services.auth import generate_recovery_phrase, generate_temporary_password, hash_password, hash_recovery_phrase
+from app.services.auth import generate_recovery_phrase, generate_temporary_password, hash_password, hash_recovery_phrase, hash_session_token, is_hashed_session_token
 
 DEFAULT_USER_AVATAR = "/assets/branding/default_avi.png"
 DEFAULT_ADMIN_USERNAME = "admin"
@@ -318,5 +318,9 @@ def seed_defaults(db: Session, mounted_roots: list[str], *, include_demo_users: 
         timezone_name = server_timezone_name()
         for retention_settings in db.query(RetentionSettings).all():
             retention_settings.auto_timezone = timezone_name
+
+    for session_token in db.query(SessionToken).all():
+        if not is_hashed_session_token(session_token.token):
+            session_token.token = hash_session_token(session_token.token)
 
     db.commit()

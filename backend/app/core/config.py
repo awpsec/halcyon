@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     scan_interval_seconds: int = 30
     background_tasks_enabled: bool = True
     transcode_cache_limit_mb: int = 20480
-    allow_origin: str = "*"
+    allow_origin: str | None = None
 
     model_config = SettingsConfigDict(
         env_prefix="HALCYON_",

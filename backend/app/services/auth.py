@@ -8,6 +8,7 @@ import secrets
 
 TEMP_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
 RECOVERY_WORDLIST_PATH = Path(__file__).resolve().parent.parent / "data" / "eff_large_wordlist.txt"
+SESSION_TOKEN_PREFIX = "sha384:"
 
 
 def hash_secret(secret: str) -> str:
@@ -77,3 +78,12 @@ def verify_recovery_phrase(phrase: str, stored_hash: str | None) -> bool:
 
 def generate_temporary_password(length: int = 18) -> str:
     return "".join(secrets.choice(TEMP_PASSWORD_ALPHABET) for _ in range(max(12, length)))
+
+
+def hash_session_token(token: str) -> str:
+    digest = hashlib.sha384(token.encode("utf-8")).hexdigest()
+    return f"{SESSION_TOKEN_PREFIX}{digest}"
+
+
+def is_hashed_session_token(stored_token: str | None) -> bool:
+    return bool(stored_token and stored_token.startswith(SESSION_TOKEN_PREFIX))

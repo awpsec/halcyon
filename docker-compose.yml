@@ -33,7 +33,6 @@ services:
       HALCYON_DATABASE_URL: postgresql+psycopg://halcyon:halcyon@halcyon-postgres:5432/halcyon
       HALCYON_SCAN_INTERVAL_SECONDS: "900"
       HALCYON_BACKGROUND_TASKS_ENABLED: "false"
-      HALCYON_ALLOW_ORIGIN: "*"
       HALCYON_YOUTUBE_API_KEY: "${HALCYON_YOUTUBE_API_KEY:-}"
     volumes:
       - ./data/config:/config

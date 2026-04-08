@@ -4,7 +4,7 @@ from fastapi import HTTPException, Response
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.deps import get_configured_admin_user
+from app.api.deps import get_configured_admin_user, get_current_user, resolve_session_token
 from app.api.routes import (
     change_password,
     complete_admin_setup,
@@ -16,6 +16,7 @@ from app.api.routes import (
     register,
     reset_password_by_pin,
     set_account_pin,
+    switch_session,
     update_profile_permissions,
 )
 from app.db.init_db import seed_defaults
@@ -27,11 +28,13 @@ from app.schemas.common import (
     AdminUserPermissionIn,
     LoginIn,
     RegisterIn,
+    SwitchSessionIn,
     UserPasswordChangeIn,
     UserPasswordResetByPinIn,
     UserPinSetIn,
 )
 from app.services.auth import generate_recovery_phrase, verify_password
+from app.services.auth import hash_session_token, is_hashed_session_token
 
 
 def make_session(tmp_path: Path) -> Session:
@@ -72,8 +75,8 @@ def test_admin_bootstrap_setup_revokes_other_admin_sessions(tmp_path: Path):
         assert admin is not None
         db.add_all(
             [
-                SessionToken(token="keep-session", user_id=admin.id),
-                SessionToken(token="stale-session", user_id=admin.id),
+                SessionToken(token=hash_session_token("keep-session"), user_id=admin.id),
+                SessionToken(token=hash_session_token("stale-session"), user_id=admin.id),
             ]
         )
         db.commit()
@@ -86,7 +89,7 @@ def test_admin_bootstrap_setup_revokes_other_admin_sessions(tmp_path: Path):
         )
 
         remaining_tokens = db.scalars(select(SessionToken.token).where(SessionToken.user_id == admin.id)).all()
-        assert remaining_tokens == ["keep-session"]
+        assert remaining_tokens == [hash_session_token("keep-session")]
 
 
 def test_admin_recovery_phrase_can_reset_password(tmp_path: Path):
@@ -231,6 +234,52 @@ def test_user_can_change_password_with_current_password(tmp_path: Path):
         db.refresh(test_user)
         assert result.name == "test"
         assert verify_password("new-test-pass", test_user.password_hash) is True
+
+
+def test_create_session_stores_only_hashed_token(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(tmp_path / "library")])
+
+        response = Response()
+        session = login(LoginIn(username="guest", password="guest"), response=response, db=db)
+        stored_tokens = db.scalars(select(SessionToken.token)).all()
+
+        assert len(stored_tokens) == 1
+        assert stored_tokens[0] != session.session_token
+        assert is_hashed_session_token(stored_tokens[0]) is True
+        assert stored_tokens[0] == hash_session_token(session.session_token)
+
+
+def test_legacy_plaintext_session_token_is_migrated_on_use(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(tmp_path / "library")])
+        guest = db.scalar(select(UserProfile).where(UserProfile.name == "guest"))
+        assert guest is not None
+        db.add(SessionToken(token="legacy-token", user_id=guest.id))
+        db.commit()
+
+        current_user = get_current_user(db=db, session_token="legacy-token")
+        stored_token = db.scalar(select(SessionToken.token).where(SessionToken.user_id == guest.id))
+
+        assert current_user.id == guest.id
+        assert stored_token == hash_session_token("legacy-token")
+
+
+def test_switch_and_logout_work_with_hashed_session_tokens(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(tmp_path / "library")])
+        response = Response()
+        session = login(LoginIn(username="guest", password="guest"), response=response, db=db)
+
+        switched = switch_session(
+            SwitchSessionIn(session_token=session.session_token),
+            response=Response(),
+            db=db,
+        )
+        assert switched.user.name == "guest"
+
+        logout(response=Response(), session_token=session.session_token, db=db)
+        assert resolve_session_token(db, session.session_token) is None
 
 
 def test_admin_can_delete_user_profile(tmp_path: Path):
@@ -385,7 +434,7 @@ def test_change_password_revokes_other_sessions(tmp_path: Path):
         )
 
         remaining_tokens = db.scalars(select(SessionToken.token).where(SessionToken.user_id == user.id)).all()
-        assert remaining_tokens == [session.session_token]
+        assert remaining_tokens == [hash_session_token(session.session_token)]
 
 
 def test_logout_revokes_current_session(tmp_path: Path):
@@ -401,7 +450,7 @@ def test_logout_revokes_current_session(tmp_path: Path):
         )
 
         result = logout(Response(), session_token=session.session_token, db=db)
-        remaining = db.scalar(select(SessionToken).where(SessionToken.token == session.session_token))
+        remaining = resolve_session_token(db, session.session_token)
 
         assert result["ok"] is True
         assert remaining is None

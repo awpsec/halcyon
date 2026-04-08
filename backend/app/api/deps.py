@@ -7,8 +7,26 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.entities import SessionToken, UserProfile
+from app.services.auth import hash_session_token, is_hashed_session_token
 
 settings = get_settings()
+
+
+def resolve_session_token(db: Session, raw_session_token: str | None) -> SessionToken | None:
+    if not raw_session_token:
+        return None
+    hashed = hash_session_token(raw_session_token)
+    token = db.scalar(
+        select(SessionToken)
+        .where(SessionToken.token.in_([hashed, raw_session_token]))
+        .order_by(SessionToken.id.asc())
+        .limit(1)
+    )
+    if token and not is_hashed_session_token(token.token):
+        token.token = hashed
+        db.commit()
+        db.refresh(token)
+    return token
 
 
 def get_current_user(
@@ -17,7 +35,7 @@ def get_current_user(
 ) -> UserProfile:
     if not session_token:
         raise HTTPException(status_code=401, detail="Not signed in")
-    token = db.scalar(select(SessionToken).where(SessionToken.token == session_token))
+    token = resolve_session_token(db, session_token)
     if not token or not token.user:
         raise HTTPException(status_code=401, detail="Invalid session")
     return token.user
