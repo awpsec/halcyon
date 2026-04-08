@@ -98,7 +98,13 @@ function Show-Status {
     Write-Host "Status:          unable to reach update server"
   }
   Write-Host ""
-  docker compose ps
+  $output = cmd /c "docker compose ps 2>nul"
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "Docker status:   unavailable"
+    Write-Host "Detail:          Docker is not running or the daemon is unreachable."
+  } else {
+    $output | ForEach-Object { Write-Host $_ }
+  }
 }
 
 switch ($Command.ToLowerInvariant()) {

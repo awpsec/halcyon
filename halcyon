@@ -73,7 +73,10 @@ show_status() {
     echo "Status:          unable to reach update server"
   fi
   echo
-  docker compose ps
+  if ! docker compose ps; then
+    echo "Docker status:   unavailable"
+    echo "Detail:          Docker is not running or the daemon is unreachable."
+  fi
 }
 
 case "${1:-}" in
