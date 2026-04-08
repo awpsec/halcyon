@@ -92,7 +92,7 @@ p {
 }
 
 .density-compact .content {
-  padding: 14px 18px;
+  padding: 16px 20px;
 }
 
 .density-compact .panel,
@@ -102,13 +102,13 @@ p {
 }
 
 .density-compact .rail-scroll {
-  grid-auto-columns: minmax(252px, 252px);
-  gap: 12px;
+  grid-auto-columns: minmax(286px, 286px);
+  gap: 14px;
 }
 
 .density-compact .video-grid-layout {
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 14px 12px;
+  grid-template-columns: repeat(auto-fill, minmax(276px, 1fr));
+  gap: 16px 14px;
 }
 
 .density-compact .video-tile {
@@ -137,7 +137,7 @@ p {
 }
 
 .density-relaxed .content {
-  padding: 28px 30px;
+  padding: 30px 32px;
 }
 
 .density-relaxed .panel,
@@ -147,13 +147,13 @@ p {
 }
 
 .density-relaxed .rail-scroll {
-  grid-auto-columns: minmax(362px, 362px);
-  gap: 24px;
+  grid-auto-columns: minmax(404px, 404px);
+  gap: 26px;
 }
 
 .density-relaxed .video-grid-layout {
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-  gap: 28px 24px;
+  grid-template-columns: repeat(auto-fill, minmax(392px, 1fr));
+  gap: 30px 26px;
 }
 
 .density-relaxed .video-tile {
@@ -670,8 +670,8 @@ textarea:focus-visible,
 .rail-scroll {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: minmax(320px, 320px);
-  gap: 18px;
+  grid-auto-columns: minmax(352px, 352px);
+  gap: 20px;
   overflow-x: auto;
   padding-bottom: 6px;
 }
@@ -714,8 +714,8 @@ textarea:focus-visible,
 
 .video-grid-layout {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
-  gap: 22px 18px;
+  grid-template-columns: repeat(auto-fill, minmax(338px, 1fr));
+  gap: 24px 20px;
 }
 
 .queue-management-grid {
@@ -3974,11 +3974,11 @@ body,
   }
 
   .video-grid-layout {
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
   }
 
   .rail-scroll {
-    grid-auto-columns: minmax(280px, 280px);
+    grid-auto-columns: minmax(308px, 308px);
   }
 
   .settings-section-grid {
@@ -6840,6 +6840,18 @@ body,
 .account-preferences-grid,
 .account-security-grid {
   max-width: 720px;
+}
+
+.account-security-current-field {
+  max-width: 360px;
+}
+
+.account-security-grid {
+  max-width: 760px;
+}
+
+.account-security-grid .settings-field input {
+  max-width: 100%;
 }
 
 .halcyon-player-shell .plyr__progress {

@@ -17,9 +17,9 @@ const HOME_FEED_FAST_POLL_MS = 3500;
 type PagedTopic = "recent" | "random" | "explore";
 
 function gridMetricsForDensity(density: Preferences["density"]) {
-  if (density === "compact") return { minWidth: 240, gap: 12 };
-  if (density === "relaxed") return { minWidth: 360, gap: 24 };
-  return { minWidth: 310, gap: 18 };
+  if (density === "compact") return { minWidth: 276, gap: 14 };
+  if (density === "relaxed") return { minWidth: 392, gap: 26 };
+  return { minWidth: 338, gap: 20 };
 }
 
 function toCard(video: VideoSummary | any, reasonOverride?: string) {

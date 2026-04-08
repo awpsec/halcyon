@@ -1613,16 +1613,16 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
               Change your account password here. Password resets still use the permanent account PIN that was chosen when this account was created.
             </p>
             <div className="settings-form-grid">
+              <label className="settings-field account-security-current-field">
+                <span>Current password</span>
+                <input
+                  type="password"
+                  value={currentPassword}
+                  onChange={(event) => setCurrentPassword(event.target.value)}
+                  placeholder="Current password"
+                />
+              </label>
               <div className="settings-inline-grid settings-inline-grid-fields account-security-grid">
-                <label className="settings-field">
-                  <span>Current password</span>
-                  <input
-                    type="password"
-                    value={currentPassword}
-                    onChange={(event) => setCurrentPassword(event.target.value)}
-                    placeholder="Current password"
-                  />
-                </label>
                 <label className="settings-field">
                   <span>New password</span>
                   <input
@@ -1632,16 +1632,16 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                     placeholder="New password"
                   />
                 </label>
+                <label className="settings-field">
+                  <span>Confirm new password</span>
+                  <input
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(event) => setConfirmPassword(event.target.value)}
+                    placeholder="Confirm new password"
+                  />
+                </label>
               </div>
-              <label className="settings-field">
-                <span>Confirm new password</span>
-                <input
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(event) => setConfirmPassword(event.target.value)}
-                  placeholder="Confirm new password"
-                />
-              </label>
             </div>
             <div className="settings-actions-row">
               <button

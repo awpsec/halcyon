@@ -42,10 +42,10 @@ function sortVideosByViews(videos: any[]) {
 function gridMetricsForCurrentDensity() {
   if (typeof document !== "undefined") {
     const root = document.documentElement;
-    if (root.classList.contains("density-compact")) return { minWidth: 240, gap: 12 };
-    if (root.classList.contains("density-relaxed")) return { minWidth: 360, gap: 24 };
+    if (root.classList.contains("density-compact")) return { minWidth: 276, gap: 14 };
+    if (root.classList.contains("density-relaxed")) return { minWidth: 392, gap: 26 };
   }
-  return { minWidth: 310, gap: 18 };
+  return { minWidth: 338, gap: 20 };
 }
 
 function channelMilestoneBadge(subscriberCount?: number | null) {

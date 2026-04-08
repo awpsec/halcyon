@@ -204,7 +204,7 @@ npm run dev
 
 Current release package:
 
-- `1.1.26-48`
+- `1.1.26-48.003`
 
 ## Credits
 
