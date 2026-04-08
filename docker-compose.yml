@@ -1,0 +1,64 @@
+name: halcyon
+
+services:
+  halcyon-postgres:
+    image: postgres:17-bookworm
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: halcyon
+      POSTGRES_USER: halcyon
+      POSTGRES_PASSWORD: halcyon
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U halcyon -d halcyon"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  halcyon-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      halcyon-postgres:
+        condition: service_healthy
+    ports:
+      - "11111:8000"
+    environment:
+      HALCYON_CONFIG_DIR: /config
+      HALCYON_CACHE_DIR: /cache
+      HALCYON_MOUNTED_ROOTS: '["/library"]'
+      HALCYON_DATABASE_URL: postgresql+psycopg://halcyon:halcyon@halcyon-postgres:5432/halcyon
+      HALCYON_SCAN_INTERVAL_SECONDS: "900"
+      HALCYON_BACKGROUND_TASKS_ENABLED: "false"
+      HALCYON_ALLOW_ORIGIN: "*"
+      HALCYON_YOUTUBE_API_KEY: "${HALCYON_YOUTUBE_API_KEY:-}"
+    volumes:
+      - ./data/config:/config
+      - ./data/cache:/cache
+      - ./library:/library
+
+  halcyon-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      halcyon-postgres:
+        condition: service_healthy
+    environment:
+      HALCYON_CONFIG_DIR: /config
+      HALCYON_CACHE_DIR: /cache
+      HALCYON_MOUNTED_ROOTS: '["/library"]'
+      HALCYON_DATABASE_URL: postgresql+psycopg://halcyon:halcyon@halcyon-postgres:5432/halcyon
+      HALCYON_SCAN_INTERVAL_SECONDS: "900"
+      HALCYON_YOUTUBE_API_KEY: "${HALCYON_YOUTUBE_API_KEY:-}"
+    volumes:
+      - ./data/config:/config
+      - ./data/cache:/cache
+      - ./library:/library
+
+volumes:
+  postgres-data:
