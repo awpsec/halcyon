@@ -35,12 +35,20 @@ from app.schemas.common import (
 )
 from app.services.auth import generate_recovery_phrase, verify_password
 from app.services.auth import hash_session_token, is_hashed_session_token
+from app.services.auth_rate_limit import clear_all_failures
 
 
 def make_session(tmp_path: Path) -> Session:
     engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}", future=True)
     Base.metadata.create_all(engine)
+    clear_all_failures()
     return sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)()
+
+
+class DummyRequest:
+    def __init__(self, host: str):
+        self.client = type("Client", (), {"host": host})()
+        self.headers: dict[str, str] = {}
 
 
 def test_admin_bootstrap_setup_clears_pending_phrase(tmp_path: Path):
@@ -107,6 +115,7 @@ def test_admin_recovery_phrase_can_reset_password(tmp_path: Path):
                 password="recovered-admin-pass",
             ),
             response=response,
+            request=DummyRequest("127.0.0.1"),
             db=db,
         )
 
@@ -194,6 +203,7 @@ def test_user_can_set_pin_once_and_reset_password_with_it(tmp_path: Path):
         session = reset_password_by_pin(
             UserPasswordResetByPinIn(username="guest", pin="123456", password="guest-reset-pass"),
             response=response,
+            request=DummyRequest("127.0.0.1"),
             db=db,
         )
         db.refresh(guest)
@@ -241,7 +251,7 @@ def test_create_session_stores_only_hashed_token(tmp_path: Path):
         seed_defaults(db, [str(tmp_path / "library")])
 
         response = Response()
-        session = login(LoginIn(username="guest", password="guest"), response=response, db=db)
+        session = login(LoginIn(username="guest", password="guest"), response=response, request=DummyRequest("127.0.0.1"), db=db)
         stored_tokens = db.scalars(select(SessionToken.token)).all()
 
         assert len(stored_tokens) == 1
@@ -269,7 +279,7 @@ def test_switch_and_logout_work_with_hashed_session_tokens(tmp_path: Path):
     with make_session(tmp_path) as db:
         seed_defaults(db, [str(tmp_path / "library")])
         response = Response()
-        session = login(LoginIn(username="guest", password="guest"), response=response, db=db)
+        session = login(LoginIn(username="guest", password="guest"), response=response, request=DummyRequest("127.0.0.1"), db=db)
 
         switched = switch_session(
             SwitchSessionIn(session_token=session.session_token),
@@ -379,6 +389,7 @@ def test_login_accepts_trimmed_case_insensitive_username(tmp_path: Path):
         session = login(
             LoginIn(username="  FRIEND  ", password="friendpass"),
             response=Response(),
+            request=DummyRequest("127.0.0.1"),
             db=db,
         )
 
@@ -400,6 +411,7 @@ def test_reset_password_by_pin_accepts_trimmed_case_insensitive_username(tmp_pat
         session = reset_password_by_pin(
             UserPasswordResetByPinIn(username="  FRIEND ", pin="123456", password="updatedpass"),
             response=Response(),
+            request=DummyRequest("127.0.0.1"),
             db=db,
         )
         user = db.scalar(select(UserProfile).where(UserProfile.name == "friend"))
@@ -454,3 +466,85 @@ def test_logout_revokes_current_session(tmp_path: Path):
 
         assert result["ok"] is True
         assert remaining is None
+
+
+def test_login_rate_limit_blocks_repeated_failures(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(tmp_path / "library")])
+        request = DummyRequest("10.0.0.8")
+
+        for _ in range(8):
+            try:
+                login(LoginIn(username="guest", password="wrong"), response=Response(), request=request, db=db)
+            except HTTPException as error:
+                assert error.status_code == 401
+
+        try:
+            login(LoginIn(username="guest", password="wrong"), response=Response(), request=request, db=db)
+            assert False, "Expected login rate limit"
+        except HTTPException as error:
+            assert error.status_code == 429
+
+
+def test_password_reset_rate_limit_blocks_repeated_failures(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(tmp_path / "library")])
+        admin = db.scalar(select(UserProfile).where(UserProfile.name == "admin"))
+        assert admin is not None
+        complete_admin_setup(AdminSetupIn(password="admin123"), db=db, current_user=admin)
+        register(
+            RegisterIn(username="friend", password="friendpass", pin="123456"),
+            response=Response(),
+            db=db,
+        )
+        request = DummyRequest("10.0.0.9")
+
+        for _ in range(5):
+            try:
+                reset_password_by_pin(
+                    UserPasswordResetByPinIn(username="friend", pin="000000", password="updatedpass"),
+                    response=Response(),
+                    request=request,
+                    db=db,
+                )
+            except HTTPException as error:
+                assert error.status_code == 401
+
+        try:
+            reset_password_by_pin(
+                UserPasswordResetByPinIn(username="friend", pin="000000", password="updatedpass"),
+                response=Response(),
+                request=request,
+                db=db,
+            )
+            assert False, "Expected password reset rate limit"
+        except HTTPException as error:
+            assert error.status_code == 429
+
+
+def test_admin_recovery_rate_limit_blocks_repeated_failures(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(tmp_path / "library")])
+        request = DummyRequest("10.0.0.10")
+
+        for _ in range(5):
+            try:
+                recover_admin_account(
+                    AdminRecoveryIn(recovery_phrase="wrong phrase", password="recovered-admin-pass"),
+                    response=Response(),
+                    request=request,
+                    db=db,
+                )
+            except HTTPException as error:
+                assert error.status_code == 401
+
+        try:
+            recover_admin_account(
+                AdminRecoveryIn(recovery_phrase="wrong phrase", password="recovered-admin-pass"),
+                response=Response(),
+                request=request,
+                db=db,
+            )
+            assert False, "Expected admin recovery rate limit"
+        except HTTPException as error:
+            assert error.status_code == 429

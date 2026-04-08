@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from sqlalchemy import func, literal, or_, select
 from sqlalchemy.orm import Session, joinedload
@@ -20,6 +20,7 @@ from app.api.deps import get_configured_admin_user, get_current_admin_user, get_
 from app.core.config import get_settings
 from app.core.logging import read_log_lines
 from app.core.timezone import server_timezone_name
+from app.db.init_db import DEFAULT_ADMIN_USERNAME
 from app.db.session import get_db
 from app.models.entities import (
     Channel,
@@ -97,6 +98,7 @@ from app.schemas.common import (
     WatchStateIn,
 )
 from app.services.auth import hash_password, hash_session_token, verify_password, verify_recovery_phrase
+from app.services.auth_rate_limit import clear_failures, is_limited, register_failure
 from app.services.feed import build_home_feed, build_suggested_feed, summarize_video
 from app.services.media import download_thumbnail, find_caption_tracks, generate_preview_clip, generate_thumbnail, is_video_file, placeholder_thumbnail_svg, probe_media, srt_to_vtt
 from app.services.playback import ensure_compatible_stream, ensure_hls_transcode, reconcile_transcode_job, resolve_playback, stop_transcode_job, transcode_is_throttled, wait_for_transcode_playlist
@@ -135,6 +137,12 @@ TEMP_DOWNLOAD_MARKERS = (
 YTDLP_FRAGMENT_PATTERN = re.compile(r"\.f\d{2,5}$", re.IGNORECASE)
 RETENTION_SCAN_DIRNAME = ".halcyon-retention"
 RETENTION_DELETE_BUFFER_DIRNAME = ".pending-delete"
+AUTH_LOGIN_LIMIT = 8
+AUTH_LOGIN_WINDOW_SECONDS = 10 * 60
+AUTH_RESET_LIMIT = 5
+AUTH_RESET_WINDOW_SECONDS = 15 * 60
+AUTH_ADMIN_RECOVERY_LIMIT = 5
+AUTH_ADMIN_RECOVERY_WINDOW_SECONDS = 15 * 60
 
 
 def _normalize_fs_path(value: str | Path) -> str:
@@ -204,6 +212,32 @@ def _scan_library_storage_bytes(content_roots: list[Path]) -> int:
                 except OSError:
                     continue
     return total_bytes
+
+
+def _client_ip(request: Request | None) -> str:
+    if request is None:
+        return "local-test"
+    forwarded = request.headers.get("x-forwarded-for", "").strip()
+    if forwarded:
+        return forwarded.split(",")[0].strip() or "unknown"
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _auth_limit_key(bucket: str, *, request: Request | None, username: str | None = None) -> str:
+    identity = _client_ip(request).casefold()
+    subject = (username or "").strip().casefold() or "anonymous"
+    return f"{bucket}:{identity}:{subject}"
+
+
+def _enforce_auth_rate_limit(key: str, *, limit: int, window_seconds: int) -> None:
+    limited, retry_after = is_limited(key, limit=limit, window_seconds=window_seconds)
+    if limited:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many authentication attempts. Try again in {retry_after} seconds.",
+        )
 DEFAULT_USER_AVATAR = "/assets/branding/default_avi.png"
 WATCH_COMPLETION_THRESHOLD = 0.95
 EXPLORE_HISTORY_LIMIT = 48
@@ -1202,8 +1236,10 @@ def select_profile(
 
 
 @router.post("/session/login", response_model=SessionOut)
-def login(payload: LoginIn, response: Response, db: Session = Depends(get_db)) -> SessionOut:
+def login(payload: LoginIn, response: Response, request: Request, db: Session = Depends(get_db)) -> SessionOut:
     normalized_username = _normalize_username(payload.username, strict=False)
+    limit_key = _auth_limit_key("login", request=request, username=normalized_username)
+    _enforce_auth_rate_limit(limit_key, limit=AUTH_LOGIN_LIMIT, window_seconds=AUTH_LOGIN_WINDOW_SECONDS)
     user = db.scalar(
         select(UserProfile)
         .where(func.lower(UserProfile.name) == normalized_username)
@@ -1211,7 +1247,9 @@ def login(payload: LoginIn, response: Response, db: Session = Depends(get_db)) -
         .limit(1)
     )
     if not user or not verify_password(payload.password, user.password_hash):
+        register_failure(limit_key, window_seconds=AUTH_LOGIN_WINDOW_SECONDS)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    clear_failures(limit_key)
     return _create_session(db, user, response)
 
 
@@ -1313,10 +1351,14 @@ def reset_admin_password_from_settings(
 
 
 @router.post("/session/admin/recover", response_model=SessionOut)
-def recover_admin_account(payload: AdminRecoveryIn, response: Response, db: Session = Depends(get_db)) -> SessionOut:
+def recover_admin_account(payload: AdminRecoveryIn, response: Response, request: Request, db: Session = Depends(get_db)) -> SessionOut:
+    limit_key = _auth_limit_key("admin-recover", request=request, username=DEFAULT_ADMIN_USERNAME)
+    _enforce_auth_rate_limit(limit_key, limit=AUTH_ADMIN_RECOVERY_LIMIT, window_seconds=AUTH_ADMIN_RECOVERY_WINDOW_SECONDS)
     admin_user = _admin_user(db)
     if not admin_user or not verify_recovery_phrase(payload.recovery_phrase, admin_user.recovery_phrase_hash):
+        register_failure(limit_key, window_seconds=AUTH_ADMIN_RECOVERY_WINDOW_SECONDS)
         raise HTTPException(status_code=401, detail="Recovery phrase not recognized")
+    clear_failures(limit_key)
     _apply_admin_password_change(admin_user, password=payload.password, clear_setup=True)
     for token in db.scalars(select(SessionToken).where(SessionToken.user_id == admin_user.id)).all():
         db.delete(token)
@@ -1341,8 +1383,10 @@ def change_password(
 
 
 @router.post("/session/password/reset", response_model=SessionOut)
-def reset_password_by_pin(payload: UserPasswordResetByPinIn, response: Response, db: Session = Depends(get_db)) -> SessionOut:
+def reset_password_by_pin(payload: UserPasswordResetByPinIn, response: Response, request: Request, db: Session = Depends(get_db)) -> SessionOut:
     normalized_username = _normalize_username(payload.username, strict=False)
+    limit_key = _auth_limit_key("password-reset", request=request, username=normalized_username)
+    _enforce_auth_rate_limit(limit_key, limit=AUTH_RESET_LIMIT, window_seconds=AUTH_RESET_WINDOW_SECONDS)
     user = db.scalar(
         select(UserProfile)
         .where(func.lower(UserProfile.name) == normalized_username)
@@ -1350,7 +1394,9 @@ def reset_password_by_pin(payload: UserPasswordResetByPinIn, response: Response,
         .limit(1)
     )
     if not user or not user.pin_hash or not verify_password(_validate_pin(payload.pin), user.pin_hash):
+        register_failure(limit_key, window_seconds=AUTH_RESET_WINDOW_SECONDS)
         raise HTTPException(status_code=401, detail="Username or PIN not recognized")
+    clear_failures(limit_key)
     user.password_hash = hash_password(_validate_password(payload.password))
     for token in db.scalars(select(SessionToken).where(SessionToken.user_id == user.id)).all():
         db.delete(token)
