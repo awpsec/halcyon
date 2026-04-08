@@ -1,29 +1,29 @@
 # halcyon
 
-halcyon is a self-hosted video library built to feel like the old internet again.
+halcyon is a self-hosted video library for people who miss following creators on purpose.
 
-The goal is not infinite algorithmic sludge, doomscrolling, or engagement bait. It is a quieter personal media space centered around the creators you actually care about: your subscriptions, your saved channels, your own library, your own pace. The name comes from that feeling on purpose: calm, positive nostalgia, and a return to enjoying media intentionally instead of being dragged around by recommendation engines.
+It is meant to feel closer to the older web: subscriptions first, your own library, your own pace, and a lot less recommendation sludge. The name is deliberate. halcyon is about calm, familiarity, and getting back to media that you actually chose.
 
-For the best automated setup, pair halcyon with MeTube and point MeTube at the same library folder halcyon watches.
+If you want the smoothest setup, pair halcyon with [MeTube](https://github.com/alexta69/metube) and point MeTube downloads at the same library folder halcyon scans.
 
-## What halcyon does
+## What it does
 
-- Scans a local media library and builds a YouTube-style interface around it
-- Supports multiple local accounts with watch history, queues, playlists, and saved videos
-- Matches local files to YouTube metadata when possible
+- Scans a local video library and gives it a YouTube-style interface
+- Supports multiple local users with history, playlists, queues, and saved videos
+- Matches local files to YouTube metadata when it can
 - Auto-organizes matched videos into per-channel folders
-- Generates thumbnails and preview clips for hover playback
-- Supports retention staging, deletion grace periods, and revert flows
-- Provides browser playback plus compatibility/transcode handling when needed
+- Generates thumbnails and preview clips
+- Handles retention staging, grace periods, revert, and permanent delete
+- Falls back to compatibility/transcode playback when needed
 
 ## Who it is for
 
 halcyon is for people who want:
 
-- a personal subscription-first video space
+- a personal, subscription-first video space
 - less algorithmic noise
 - more control over their own media
-- an interface that feels familiar without the time-wasting parts
+- a familiar interface without the worst parts of modern YouTube
 
 ## Stack
 
@@ -36,48 +36,44 @@ halcyon is for people who want:
 - ffmpeg / ffprobe
 - Docker Compose
 
-## Quick start with Docker Compose
+## Quick start
 
-halcyon is packaged so the same release folder works on both Windows and Linux with Docker Compose. The included compose file only uses relative bind mounts and container paths, so you can download the package, open the folder, and bring it up directly.
+The release folder is meant to work on both Windows and Linux with Docker Compose. The compose file uses relative paths and the included helper scripts wrap the common commands.
 
-### 1. Get the files in place
+### 1. Get the project
 
-1. Download or clone this repository.
-2. Open the project folder.
-3. Make sure Docker and Docker Compose are installed.
-
-For the easiest update path, clone the repository instead of downloading a one-off zip:
+Clone the repository if you want the simplest update path:
 
 ```bash
 git clone git@github.com:awpsec/halcyon.git
 cd halcyon
 ```
 
-### 2. Prepare the local folders
+You can also download a release archive and extract it somewhere permanent.
 
-halcyon expects these local folders:
+### 2. Check the local folders
+
+halcyon expects these directories:
 
 - `data/config`
 - `data/cache`
 - `library`
 
-They are already included in the release package. Put your video library inside `library`, or mount your own media path there in `docker-compose.yml`.
+They are already included in the release package. If you want to use a different media location, change the bind mount in `docker-compose.yml`.
 
-If you use MeTube, point MeTube downloads at that same `library` directory. halcyon will detect new files there, identify the channel, and automatically organize matched videos into per-channel folders.
+If you use MeTube, set its download directory to the same `library` folder. halcyon will see the new file, identify the channel, create the channel folder if needed, and move the matched file into place without needing a second sync.
 
 ### 3. Optional: create `.env`
 
-Copy `.env.example` to `.env` if you want to override defaults.
+Copy `.env.example` to `.env` only if you want to override defaults.
 
-### 4. Start the stack
-
-Run:
+### 4. Start halcyon
 
 ```bash
 docker compose up --build -d
 ```
 
-Or use the included helper command:
+Or use the wrapper:
 
 ```bash
 ./halcyon start
@@ -89,93 +85,89 @@ On Windows:
 .\halcyon.ps1 start
 ```
 
-This starts:
+That starts:
 
 - `halcyon-postgres`
 - `halcyon-web`
 - `halcyon-worker`
 
-### 5. Open halcyon
+### 5. Open it
 
-Open:
-
-- [http://localhost:11111](http://localhost:11111)
+Open [http://localhost:11111](http://localhost:11111).
 
 ## Helper commands
 
-halcyon ships with small wrapper scripts so common Docker Compose tasks stay simple:
+halcyon includes simple helper commands for the common Docker Compose tasks:
 
 - `halcyon start`
 - `halcyon stop`
 - `halcyon status`
 - `halcyon update`
 
-From Linux/macOS, run `./halcyon ...` or symlink the script into your `PATH`.
+On Linux/macOS, run `./halcyon ...` or symlink it into your `PATH`.
 
-From Windows, run `.\halcyon.ps1 ...` in PowerShell or `halcyon.cmd ...` from Command Prompt. If you want bare `halcyon ...`, add the repository folder to your `PATH`.
+On Windows, run `.\halcyon.ps1 ...` in PowerShell or `halcyon.cmd ...` in Command Prompt. If you want to type just `halcyon`, add the repo folder to your `PATH`.
 
-`halcyon update` keeps your `data/` folders, library bind mount, database volume, and saved Admin settings in place. It pulls the newest git version and rebuilds the stack.
+`halcyon update` keeps your `data/` folders, database volume, library mount, and saved settings in place. It pulls the newest version and rebuilds the stack.
 
-## First boot and admin onboarding
+## First boot
 
 On a fresh install, halcyon creates:
 
-- an `admin` account
-- a default `guest` account with password `guest`
+- `admin`
+- `guest` with password `guest`
 
-The `admin` account starts with a temporary password that is printed in the container logs.
+The bootstrap `admin` password is printed in the container logs.
 
-To read it:
+To find it:
 
 ```bash
 docker compose logs halcyon-web
 ```
 
-Look for the bootstrap admin credential in the log output, then:
+Then:
 
 1. Sign in as `admin`
-2. Save the generated recovery phrase somewhere safe
+2. Save the recovery phrase somewhere safe
 3. Confirm that you saved it
 4. Set the permanent admin password
 
-That recovery phrase is important. If the admin password is lost later, the recovery flow depends on it.
+Keep the recovery phrase. If you ever lose the admin password, that phrase is what the recovery flow depends on.
 
-## Recommended post-install steps
-
-After first login:
+## Recommended after setup
 
 1. Open `Settings`
-2. Confirm your mounted library path is correct
-3. Add your YouTube API key in Admin settings if you want stronger sync enrichment
-4. Review retention settings before enabling retention
-5. Create any additional user accounts you want
-6. Promote trusted accounts to admin only if they should manage server settings
+2. Confirm the library location is correct
+3. Add a YouTube API key in Admin settings if you want richer sync data
+4. Review retention settings before enabling them
+5. Create any other local accounts you want
+6. Only promote trusted accounts to admin
 
-When a newer version is available, Admin settings also shows an update indicator beside the version footer. The popup there will show the current version, newest version, and the host-side update command to run.
+When a newer version is available, Admin settings shows an update indicator beside the version footer and gives you the current version, newest version, and the command to run on the host.
 
-## Library workflow
+## Library behavior
 
-The intended setup is simple:
+The intended flow is simple:
 
-1. Set MeTube downloads to the same folder halcyon scans
-2. halcyon detects the new media
-3. halcyon identifies the channel
+1. MeTube drops a file into the same library folder halcyon watches
+2. halcyon detects it
+3. halcyon syncs and identifies the channel
 4. halcyon creates the channel folder if needed
-5. halcyon moves the matched video into that channel folder while keeping metadata intact
+5. halcyon moves the matched file there and keeps the metadata intact
 
-If a file is already matched but sitting in the wrong place, regular sync can repair that placement automatically.
+If something is already matched but sitting in the wrong place, regular sync can repair that too.
 
-## Retention behavior
+## Retention
 
-Retention uses a staging model:
+Retention uses a staging folder and a grace period:
 
-1. old items are marked
-2. marked items move to the pre-delete retention folder
-3. each marked item gets its own grace timer
-4. items can be reverted during that grace period
+1. older items are marked
+2. marked items move to the retention folder
+3. each item gets its own delete timer
+4. items can be reverted during that window
 5. once the timer expires, they can be deleted permanently
 
-Retention is designed so that reverting returns the file to the original library location, including the original subfolder path.
+Reverting puts the file back where it came from, including its original subfolder path.
 
 ## Development
 
@@ -204,9 +196,9 @@ npm run dev
 
 Current release package:
 
-- `1.1.26-48.003`
+- `1.1.26-48.004`
 
 ## Credits
 
-- [MeTube](https://github.com/alexta69/metube) as the recommended downloader companion for feeding the library and automating new downloads into halcyon
-- [Return YouTube Dislike](https://www.returnyoutubedislike.com/) for the public API and dislike/vote data used during sync enrichment
+- [MeTube](https://github.com/alexta69/metube), recommended for feeding downloads into the library
+- [Return YouTube Dislike](https://www.returnyoutubedislike.com/), for the public API and the dislike/vote data used during sync enrichment
