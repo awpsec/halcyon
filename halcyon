@@ -6,6 +6,62 @@ cd "$SCRIPT_DIR"
 
 MANIFEST_FILE="$SCRIPT_DIR/halcyon-release.json"
 
+resolve_path() {
+  local target="$1"
+  if command -v python >/dev/null 2>&1; then
+    python - "$target" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+    return
+  fi
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$target"
+    return
+  fi
+  (
+    cd "$(dirname "$target")" >/dev/null 2>&1 && printf '%s/%s\n' "$(pwd -P)" "$(basename "$target")"
+  )
+}
+
+ensure_command_link() {
+  local script_path current_path install_dir candidate target_path current_resolved
+  script_path="$(resolve_path "$SCRIPT_DIR/halcyon")"
+  current_path="$(command -v halcyon 2>/dev/null || true)"
+  if [[ -n "$current_path" ]]; then
+    current_resolved="$(resolve_path "$current_path" 2>/dev/null || true)"
+    if [[ "$current_resolved" == "$script_path" ]]; then
+      return
+    fi
+  fi
+
+  IFS=':' read -r -a path_dirs <<< "${PATH:-}"
+  for candidate in "${path_dirs[@]}"; do
+    [[ -n "$candidate" && -d "$candidate" && -w "$candidate" ]] || continue
+    install_dir="$candidate"
+    break
+  done
+
+  if [[ -z "${install_dir:-}" ]]; then
+    install_dir="$HOME/.local/bin"
+    mkdir -p "$install_dir" 2>/dev/null || return
+  fi
+
+  target_path="$install_dir/halcyon"
+  if [[ -e "$target_path" && ! -L "$target_path" ]]; then
+    return
+  fi
+
+  ln -sfn "$script_path" "$target_path" 2>/dev/null || return
+
+  if [[ ":${PATH:-}:" != *":$install_dir:"* ]]; then
+    echo "halcyon: installed command shim at $target_path" >&2
+    echo "halcyon: add $install_dir to PATH to use 'halcyon ...' everywhere." >&2
+  fi
+}
+
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "halcyon: missing required command '$1'" >&2
@@ -22,6 +78,8 @@ read_manifest_field() {
 
 CURRENT_VERSION="$(read_manifest_field version)"
 MANIFEST_URL="$(read_manifest_field manifest_url)"
+
+ensure_command_link
 
 fetch_latest_version() {
   local payload=""

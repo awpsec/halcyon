@@ -12,11 +12,90 @@ $Manifest = Get-Content $ManifestPath -Raw | ConvertFrom-Json
 $CurrentVersion = [string]$Manifest.version
 $ManifestUrl = [string]$Manifest.manifest_url
 
+function Resolve-NormalizedPath([string]$Path) {
+  try {
+    return (Resolve-Path $Path).ProviderPath
+  } catch {
+    return [System.IO.Path]::GetFullPath($Path)
+  }
+}
+
+function Test-WritableDirectory([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path $Path -PathType Container)) {
+    return $false
+  }
+  $probe = Join-Path $Path ".halcyon-write-test-$PID.tmp"
+  try {
+    Set-Content -Path $probe -Value "" -NoNewline
+    Remove-Item -Path $probe -Force -ErrorAction SilentlyContinue
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+function Install-CommandShim {
+  $ps1Path = Resolve-NormalizedPath (Join-Path $ScriptDir "halcyon.ps1")
+  $cmdPath = Resolve-NormalizedPath (Join-Path $ScriptDir "halcyon.cmd")
+  $installDir = $null
+
+  $existing = Get-Command halcyon.cmd -ErrorAction SilentlyContinue
+  if ($existing) {
+    try {
+      if ((Resolve-NormalizedPath $existing.Source) -eq $cmdPath) {
+        return
+      }
+    } catch {
+      # Keep going and try a writable fallback.
+    }
+  }
+
+  foreach ($entry in ($env:PATH -split ";")) {
+    if (Test-WritableDirectory $entry) {
+      $installDir = $entry
+      break
+    }
+  }
+
+  if (-not $installDir) {
+    $fallbackDir = Join-Path $env:USERPROFILE "AppData\\Local\\Microsoft\\WindowsApps"
+    if (-not (Test-Path $fallbackDir)) {
+      New-Item -ItemType Directory -Path $fallbackDir -Force | Out-Null
+    }
+    if (Test-WritableDirectory $fallbackDir) {
+      $installDir = $fallbackDir
+    }
+  }
+
+  if (-not $installDir) {
+    return
+  }
+
+  $target = Join-Path $installDir "halcyon.cmd"
+  if ((Test-Path $target) -and -not (Test-Path $target -PathType Leaf)) {
+    return
+  }
+
+  $content = "@echo off`r`nPowerShell -ExecutionPolicy Bypass -File ""$ps1Path"" %*`r`n"
+  try {
+    Set-Content -Path $target -Value $content -NoNewline
+  } catch {
+    return
+  }
+
+  if (-not (($env:PATH -split ";") -contains $installDir)) {
+    Write-Host "halcyon: installed command shim at $target"
+    Write-Host "halcyon: add $installDir to PATH to use 'halcyon ...' everywhere."
+  }
+}
+
 function Require-Command([string]$Name) {
   if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
     throw "halcyon: missing required command '$Name'"
   }
 }
+
+Install-CommandShim
 
 function Get-LatestVersion {
   try {

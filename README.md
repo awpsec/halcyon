@@ -107,6 +107,8 @@ Or use the wrapper:
 ./halcyon start
 ```
 
+On first run, halcyon will try to install a reusable `halcyon` command into a writable directory on your `PATH` automatically.
+
 On Windows:
 
 ```powershell
@@ -132,9 +134,7 @@ halcyon includes simple helper commands for the common Docker Compose tasks:
 - `halcyon status`
 - `halcyon update`
 
-On Linux/macOS, run `./halcyon ...` or symlink it into your `PATH`.
-
-On Windows, run `.\halcyon.ps1 ...` in PowerShell or `halcyon.cmd ...` in Command Prompt. If you want to type just `halcyon`, add the repo folder to your `PATH`.
+If you launch halcyon once with `./halcyon ...` or `.\halcyon.ps1 ...`, it will try to install the `halcyon` command for you automatically. If your shell `PATH` is locked down, you can still use the local wrapper scripts directly.
 
 `halcyon update` keeps your `data/` folders, database volume, library mount, and saved settings in place. It pulls the newest version and rebuilds the stack.
 
@@ -224,7 +224,7 @@ npm run dev
 
 Current release package:
 
-- `1.1.26-48.005`
+- `1.1.26-48.006`
 
 ## Credits
 
