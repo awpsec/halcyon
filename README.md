@@ -1,10 +1,38 @@
 # halcyon
 
+<p align="center">
+  <img src="docs/readme/halcyon-color.png" alt="halcyon logo" width="320" />
+</p>
+
 halcyon is a self-hosted video library for people who miss following creators on purpose.
 
 It is meant to feel closer to the older web: subscriptions first, your own library, your own pace, and a lot less recommendation sludge. The name is deliberate. halcyon is about calm, familiarity, and getting back to media that you actually chose.
 
 If you want the smoothest setup, pair halcyon with [MeTube](https://github.com/alexta69/metube) and point MeTube downloads at the same library folder halcyon scans.
+
+## Screenshots
+
+<details>
+  <summary>Browse the interface</summary>
+  <br />
+  <p>
+    <img src="docs/readme/home-dark.png" alt="Home view in dark theme" width="49%" />
+    <img src="docs/readme/home-light.png" alt="Home view in light theme" width="49%" />
+  </p>
+  <p>
+    <img src="docs/readme/subscriptions.png" alt="Subscriptions page" width="49%" />
+    <img src="docs/readme/settings-admin.png" alt="Admin settings page" width="49%" />
+  </p>
+</details>
+
+<details>
+  <summary>Watch page</summary>
+  <br />
+  <p>
+    <img src="docs/readme/watch-reg.png" alt="Standard watch page" width="49%" />
+    <img src="docs/readme/watch-theater.png" alt="Theater mode watch page" width="49%" />
+  </p>
+</details>
 
 ## What it does
 
@@ -196,7 +224,7 @@ npm run dev
 
 Current release package:
 
-- `1.1.26-48.004`
+- `1.1.26-48.005`
 
 ## Credits
 
