@@ -14,6 +14,8 @@ from app.core.config import get_settings
 RELEASE_MANIFEST_PATH = Path(__file__).resolve().parents[3] / "halcyon-release.json"
 UPDATE_CACHE_TTL_SECONDS = 600
 UPDATE_COMMAND = "halcyon update"
+MANUAL_GIT_UPDATE_COMMAND = "git pull --ff-only origin main && docker compose up -d --build"
+CLI_BOOTSTRAP_MARKER_NAME = "halcyon-cli-bootstrap.json"
 
 _CACHE_LOCK = Lock()
 _CACHE_VALUE: dict | None = None
@@ -59,6 +61,22 @@ def current_release_version() -> str:
     return str(read_local_release_manifest().get("version") or "0.0.0")
 
 
+def cli_bootstrap_marker_path() -> Path:
+    return get_settings().config_dir / CLI_BOOTSTRAP_MARKER_NAME
+
+
+def has_bootstrapped_cli() -> bool:
+    return cli_bootstrap_marker_path().exists()
+
+
+def default_update_command() -> str:
+    if has_bootstrapped_cli():
+      return UPDATE_COMMAND
+    if RELEASE_MANIFEST_PATH.resolve().parent.joinpath(".git").exists():
+      return MANUAL_GIT_UPDATE_COMMAND
+    return "Download the newest halcyon release, replace the project files, then run docker compose up -d --build"
+
+
 def _checked_at_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -86,7 +104,7 @@ def build_update_status(force: bool = False) -> dict:
     local_manifest = read_local_release_manifest()
     current_version = str(local_manifest.get("version") or "0.0.0")
     repository_url = str(local_manifest.get("repository_url") or get_settings().repository_url)
-    update_command = str(local_manifest.get("update_command") or UPDATE_COMMAND)
+    update_command = default_update_command()
     status = {
         "current_version": current_version,
         "latest_version": current_version,
@@ -105,6 +123,6 @@ def build_update_status(force: bool = False) -> dict:
     latest_version = str(remote_manifest.get("version") or current_version)
     status["latest_version"] = latest_version
     status["repository_url"] = str(remote_manifest.get("repository_url") or repository_url)
-    status["update_command"] = str(remote_manifest.get("update_command") or update_command)
+    status["update_command"] = update_command
     status["update_available"] = compare_versions(current_version, latest_version) < 0
     return status

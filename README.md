@@ -101,27 +101,31 @@ Copy `.env.example` to `.env` only if you want to override defaults.
 docker compose up --build -d
 ```
 
-Or use the wrapper:
-
-```bash
-./halcyon start
-```
-
-On first run, halcyon will try to install a reusable `halcyon` command into a writable directory on your `PATH` automatically.
-
-On Windows:
-
-```powershell
-.\halcyon.ps1 start
-```
-
 That starts:
 
 - `halcyon-postgres`
 - `halcyon-web`
 - `halcyon-worker`
 
-### 5. Open it
+### 5. Optional: install the `halcyon` command
+
+If you want reusable helper commands like `halcyon status` and `halcyon update`, run the bootstrap step once:
+
+Linux/macOS:
+
+```bash
+./halcyon status
+```
+
+Windows PowerShell:
+
+```powershell
+.\halcyon.ps1 status
+```
+
+That bootstrap run will try to install the `halcyon` command into a writable location on your `PATH`. If your `PATH` is locked down, you can keep using the local wrapper scripts directly.
+
+### 6. Open it
 
 Open [http://localhost:11111](http://localhost:11111).
 
@@ -134,7 +138,7 @@ halcyon includes simple helper commands for the common Docker Compose tasks:
 - `halcyon status`
 - `halcyon update`
 
-If you launch halcyon once with `./halcyon ...` or `.\halcyon.ps1 ...`, it will try to install the `halcyon` command for you automatically. If your shell `PATH` is locked down, you can still use the local wrapper scripts directly.
+These are optional convenience wrappers around Docker Compose. If you skipped the bootstrap step or your `PATH` is locked down, you can keep using `docker compose ...`, `./halcyon ...`, or `.\halcyon.ps1 ...` directly.
 
 `halcyon update` keeps your `data/` folders, database volume, library mount, and saved settings in place. It pulls the newest version and rebuilds the stack.
 
@@ -224,7 +228,7 @@ npm run dev
 
 Current release package:
 
-- `1.1.26-48.006`
+- `1.1.26-48.007`
 
 ## Credits
 

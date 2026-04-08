@@ -11,6 +11,7 @@ $ManifestPath = Join-Path $ScriptDir "halcyon-release.json"
 $Manifest = Get-Content $ManifestPath -Raw | ConvertFrom-Json
 $CurrentVersion = [string]$Manifest.version
 $ManifestUrl = [string]$Manifest.manifest_url
+$CliMarkerPath = Join-Path $ScriptDir "data\\config\\halcyon-cli-bootstrap.json"
 
 function Resolve-NormalizedPath([string]$Path) {
   try {
@@ -81,6 +82,20 @@ function Install-CommandShim {
     Set-Content -Path $target -Value $content -NoNewline
   } catch {
     return
+  }
+
+  try {
+    $markerDir = Split-Path -Parent $CliMarkerPath
+    if (-not (Test-Path $markerDir)) {
+      New-Item -ItemType Directory -Path $markerDir -Force | Out-Null
+    }
+    $markerPayload = @{
+      installed_at = [DateTime]::UtcNow.ToString("o")
+      command_path = $target
+    } | ConvertTo-Json
+    Set-Content -Path $CliMarkerPath -Value $markerPayload
+  } catch {
+    # Ignore marker failures; the command shim is already installed.
   }
 
   if (-not (($env:PATH -split ";") -contains $installDir)) {

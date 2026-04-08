@@ -1406,12 +1406,20 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
 
   const updateStatus = updateStatusState.data;
   const updateBadgeVisible = Boolean(isAdmin && updateStatus?.update_available);
+  const updateCommand = updateStatus?.update_command?.trim() || "halcyon update";
+  const isManualUpdateCommand =
+    updateCommand.includes("git pull") || updateCommand.includes("docker compose");
 
   async function handleUpdateAction() {
-    const command = updateStatus?.update_command?.trim() || "halcyon update";
     try {
-      await copyTextToClipboard(command);
-      pushToast("info", "Update command copied", `Run "${command}" in a terminal on the machine hosting halcyon.`);
+      await copyTextToClipboard(updateCommand);
+      pushToast(
+        "info",
+        "Update command copied",
+        isManualUpdateCommand
+          ? `From the halcyon root, run "${updateCommand}".`
+          : `Run "${updateCommand}" in a terminal on the machine hosting halcyon.`,
+      );
     } catch (error) {
       pushToast("error", "Unable to copy update command", error instanceof Error ? error.message : "Unknown clipboard error");
     }
@@ -2655,8 +2663,17 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
               <p className="update-modal-warning">{updateStatus.error}</p>
             ) : (
               <p className="update-modal-note">
-                Run <code>{updateStatus?.update_command ?? "halcyon update"}</code> on the machine hosting halcyon.
-                The app does not control Docker directly from inside the container.
+                {isManualUpdateCommand ? (
+                  <>
+                    From the halcyon root, run <code>{updateCommand}</code>.
+                    {" "}This install updates from the checked-out source, not a prebuilt app image.
+                  </>
+                ) : (
+                  <>
+                    Run <code>{updateCommand}</code> on the machine hosting halcyon.
+                    {" "}The app does not control Docker directly from inside the container.
+                  </>
+                )}
               </p>
             )}
             <div className="settings-actions-row">
