@@ -1887,13 +1887,18 @@ def get_video_suggestions(
 
 
 @router.post("/videos/{video_id}/progress")
-def update_progress(video_id: int, payload: ProgressIn, db: Session = Depends(get_db)) -> dict:
+def update_progress(
+    video_id: int,
+    payload: ProgressIn,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+) -> dict:
     video = _video_by_id(db, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    progress = db.scalar(select(WatchProgress).where(WatchProgress.user_id == payload.user_id, WatchProgress.video_id == video_id))
+    progress = db.scalar(select(WatchProgress).where(WatchProgress.user_id == current_user.id, WatchProgress.video_id == video_id))
     if not progress:
-        progress = WatchProgress(user_id=payload.user_id, video_id=video_id)
+        progress = WatchProgress(user_id=current_user.id, video_id=video_id)
         db.add(progress)
     normalized_position, completed = _normalized_watch_progress(
         payload.position_seconds,
@@ -1905,7 +1910,7 @@ def update_progress(video_id: int, payload: ProgressIn, db: Session = Depends(ge
         history_position = min(history_position, video.duration_seconds)
     progress.position_seconds = normalized_position
     progress.completed = completed
-    db.add(WatchHistory(user_id=payload.user_id, video_id=video_id, position_seconds=history_position))
+    db.add(WatchHistory(user_id=current_user.id, video_id=video_id, position_seconds=history_position))
     db.commit()
     return {"ok": True}
 
@@ -2031,7 +2036,11 @@ def set_watch_state(
 
 
 @router.get("/videos/{video_id}/stream")
-def stream_video(video_id: int, db: Session = Depends(get_db)) -> FileResponse:
+def stream_video(
+    video_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+) -> FileResponse:
     video = _video_by_id(db, video_id)
     if not video or not video.files:
         raise HTTPException(status_code=404, detail="File not found")
@@ -2039,7 +2048,11 @@ def stream_video(video_id: int, db: Session = Depends(get_db)) -> FileResponse:
 
 
 @router.get("/videos/{video_id}/compatible")
-def compatible_stream(video_id: int, db: Session = Depends(get_db)) -> FileResponse:
+def compatible_stream(
+    video_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+) -> FileResponse:
     video = _video_by_id(db, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -2055,7 +2068,12 @@ def compatible_stream(video_id: int, db: Session = Depends(get_db)) -> FileRespo
 
 
 @router.get("/videos/{video_id}/hls/{segment_path:path}")
-def hls_stream(video_id: int, segment_path: str, db: Session = Depends(get_db)) -> FileResponse:
+def hls_stream(
+    video_id: int,
+    segment_path: str,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+) -> FileResponse:
     video = _video_by_id(db, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -2083,7 +2101,11 @@ def hls_stream(video_id: int, segment_path: str, db: Session = Depends(get_db)) 
 
 
 @router.get("/videos/{video_id}/thumbnail")
-def video_thumbnail(video_id: int, db: Session = Depends(get_db)) -> FileResponse:
+def video_thumbnail(
+    video_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+) -> FileResponse:
     video = db.get(Video, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -2107,7 +2129,11 @@ def video_thumbnail(video_id: int, db: Session = Depends(get_db)) -> FileRespons
 
 
 @router.get("/videos/{video_id}/preview")
-def video_preview(video_id: int, db: Session = Depends(get_db)) -> FileResponse:
+def video_preview(
+    video_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+) -> FileResponse:
     video = db.get(Video, video_id)
     if not video or not video.files:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -2118,7 +2144,12 @@ def video_preview(video_id: int, db: Session = Depends(get_db)) -> FileResponse:
 
 
 @router.get("/videos/{video_id}/captions/{track_index}")
-def caption_track(video_id: int, track_index: int, db: Session = Depends(get_db)) -> Response:
+def caption_track(
+    video_id: int,
+    track_index: int,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+) -> Response:
     video = _video_by_id(db, video_id)
     if not video or not video.files:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -2174,7 +2205,12 @@ def get_channel(channel_ref: str, db: Session = Depends(get_db), current_user: U
 
 
 @router.get("/channels/{channel_id}/{kind}-image")
-def channel_image(channel_id: int, kind: str, db: Session = Depends(get_db)) -> FileResponse:
+def channel_image(
+    channel_id: int,
+    kind: str,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+) -> FileResponse:
     if kind not in {"avatar", "banner"}:
         raise HTTPException(status_code=404, detail="Image not found")
     channel = db.get(Channel, channel_id)
@@ -2275,16 +2311,28 @@ def get_playlist_detail(playlist_id: int, db: Session = Depends(get_db), current
 
 
 @router.post("/playlists", response_model=PlaylistOut)
-def create_playlist(payload: PlaylistCreateIn, db: Session = Depends(get_db)) -> PlaylistOut:
-    playlist = Playlist(user_id=payload.user_id, name=payload.name, description=payload.description)
+def create_playlist(
+    payload: PlaylistCreateIn,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+) -> PlaylistOut:
+    playlist = Playlist(user_id=current_user.id, name=payload.name, description=payload.description)
     db.add(playlist)
     db.commit()
     db.refresh(playlist)
-    return _playlist_out(db, playlist, payload.user_id)
+    return _playlist_out(db, playlist, current_user.id)
 
 
 @router.post("/playlists/{playlist_id}/items")
-def add_playlist_item(playlist_id: int, payload: QueueItemIn, db: Session = Depends(get_db)) -> dict:
+def add_playlist_item(
+    playlist_id: int,
+    payload: QueueItemIn,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+) -> dict:
+    playlist = db.get(Playlist, playlist_id)
+    if not playlist or playlist.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Playlist not found")
     max_position = db.scalar(select(func.max(PlaylistItem.position)).where(PlaylistItem.playlist_id == playlist_id))
     db.add(PlaylistItem(playlist_id=playlist_id, video_id=payload.video_id, position=(max_position or 0) + 1))
     db.commit()

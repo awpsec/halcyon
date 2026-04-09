@@ -230,7 +230,7 @@ npm run dev
 
 Current release package:
 
-- `1.1.26-49.001`
+- `1.1.26-49.002`
 
 ## Credits
 
