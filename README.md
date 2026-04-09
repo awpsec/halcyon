@@ -89,6 +89,8 @@ halcyon expects these directories:
 
 They are already included in the release package. If you want to use a different media location, change the bind mount in `docker-compose.yml`.
 
+You can also edit the `docker-compose.yml` environment values to fit your setup. For example, you might mount a NAS location like `/mnt/nas/halcyon` into the container as `/library`, or point MeTube and halcyon at the same custom media directory.
+
 If you use MeTube, set its download directory to the same `library` folder. halcyon will see the new file, identify the channel, create the channel folder if needed, and move the matched file into place without needing a second sync.
 
 ### 3. Optional: create `.env`
@@ -228,7 +230,7 @@ npm run dev
 
 Current release package:
 
-- `1.1.26-48.007`
+- `1.1.26-49.001`
 
 ## Credits
 

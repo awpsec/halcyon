@@ -373,6 +373,7 @@ class RetentionRun(TimestampMixin, Base):
     trigger: Mapped[str] = mapped_column(String(32), index=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
     message: Mapped[str | None] = mapped_column(String(1024), default=None)
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
     marked_count: Mapped[int] = mapped_column(Integer, default=0)
     deleted_count: Mapped[int] = mapped_column(Integer, default=0)
     reverted_count: Mapped[int] = mapped_column(Integer, default=0)

@@ -6,6 +6,7 @@ import {
   type Profile,
   type RetentionFolderBrowser,
   type RetentionLookupItem,
+  type RetentionRun,
   type TranscodeItem,
   type UpdateStatus,
   type VideoSummary,
@@ -145,41 +146,51 @@ function formatRetentionStatus(value: string | null | undefined) {
   return value;
 }
 
-function retentionRunDetails(item: {
-  status: string;
-  message?: string | null;
-  marked_count: number;
-  deleted_count: number;
-  reverted_count: number;
-}) {
-  const lines: string[] = [];
-  if (item.marked_count > 0) {
-    lines.push(`Marked ${item.marked_count} ${item.marked_count === 1 ? "video" : "videos"}.`);
-  }
-  if (item.deleted_count > 0) {
-    lines.push(`Deleted ${item.deleted_count} ${item.deleted_count === 1 ? "file" : "files"}.`);
-  }
-  if (item.reverted_count > 0) {
-    lines.push(`Reverted ${item.reverted_count} pending ${item.reverted_count === 1 ? "deletion" : "deletions"}.`);
+function retentionRunDetails(
+  item: Pick<RetentionRun, "status" | "message" | "details" | "marked_count" | "deleted_count" | "reverted_count">,
+) {
+  const sections: Array<{ key: string; title: string; entries: string[] }> = [];
+  const detailPayload = item.details ?? {};
+  const hadMeaningfulSummary =
+    item.marked_count > 0 || item.deleted_count > 0 || item.reverted_count > 0;
+
+  const fileSections = [
+    { key: "marked", title: "Marked files", entries: detailPayload.marked_files ?? [] },
+    { key: "deleted", title: "Deleted files", entries: detailPayload.deleted_files ?? [] },
+    { key: "reverted", title: "Reverted files", entries: detailPayload.reverted_files ?? [] },
+  ];
+  for (const section of fileSections) {
+    if (section.entries.length > 0) {
+      sections.push(section);
+    }
   }
 
+  const notes: string[] = [];
   const message = item.message?.trim() ?? "";
   const summaryMatch = message.match(/^Marked \d+, deleted \d+, reverted \d+(?:,\s*(.+))?$/i);
   const summaryTail = summaryMatch?.[1]?.trim();
   if (summaryTail) {
     const normalizedTail = summaryTail.charAt(0).toUpperCase() + summaryTail.slice(1);
-    lines.push(normalizedTail.endsWith(".") ? normalizedTail : `${normalizedTail}.`);
+    notes.push(normalizedTail.endsWith(".") ? normalizedTail : `${normalizedTail}.`);
   } else if (item.status === "failed" && message) {
-    lines.push(message);
+    notes.push(message);
   } else if (
     message &&
     !summaryMatch &&
     !/^Reverted \d+ pending deletions$/i.test(message)
   ) {
-    lines.push(message);
+    notes.push(message);
   }
 
-  return lines.length ? lines : ["No interesting details."];
+  if (!sections.length && !notes.length && hadMeaningfulSummary) {
+    notes.push("This run was recorded before detailed file logs were enabled.");
+  }
+
+  if (!sections.length && !notes.length) {
+    notes.push("No interesting details.");
+  }
+
+  return { sections, notes };
 }
 
 function formatRetentionTime(hour: number, minute: number) {
@@ -1453,20 +1464,20 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                 </>
               ) : null}
             </div>
-            <div className="settings-version-note">
+            <button
+              type="button"
+              className={`settings-version-note ${updateBadgeVisible ? "has-update" : ""}`}
+              onClick={() => setUpdateModalOpen(true)}
+              data-tooltip={updateBadgeVisible ? "Update available" : "Version and update info"}
+              aria-label={updateBadgeVisible ? "Open update details" : "Open version details"}
+            >
               <span>Version {__APP_VERSION__}</span>
               {updateBadgeVisible ? (
-                <button
-                  type="button"
-                  className="settings-update-badge"
-                  data-tooltip="Update available"
-                  onClick={() => setUpdateModalOpen(true)}
-                  aria-label="Update available"
-                >
+                <span className="settings-update-badge" aria-hidden="true">
                   !
-                </button>
+                </span>
               ) : null}
-            </div>
+            </button>
           </div>
         </aside>
         <div className="settings-main">
@@ -2365,13 +2376,26 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                             {formatAbsoluteDateTime(item.created_at) ?? formatRelativeDate(item.created_at) ?? "just now"}
                           </small>
                         </div>
-                        {expandedRetentionRunIds.includes(item.id) ? (
-                          <div className="retention-history-panel">
-                            {retentionRunDetails(item).map((line) => (
-                              <p key={`${item.id}-${line}`}>{line}</p>
-                            ))}
-                          </div>
-                        ) : null}
+                        {expandedRetentionRunIds.includes(item.id) ? (() => {
+                          const details = retentionRunDetails(item);
+                          return (
+                            <div className="retention-history-panel">
+                              {details.sections.map((section) => (
+                                <div className="retention-history-detail-block" key={`${item.id}-${section.key}`}>
+                                  <strong>{section.title}</strong>
+                                  <ol className="retention-history-detail-list">
+                                    {section.entries.map((entry, entryIndex) => (
+                                      <li key={`${item.id}-${section.key}-${entryIndex}`}>{entry}</li>
+                                    ))}
+                                  </ol>
+                                </div>
+                              ))}
+                              {details.notes.map((line, noteIndex) => (
+                                <p key={`${item.id}-note-${noteIndex}`}>{line}</p>
+                              ))}
+                            </div>
+                          );
+                        })() : null}
                       </article>
                     ))}
                     {!(retentionState.data?.history.length) ? (
@@ -2642,7 +2666,10 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
         </div>
       </div>
       {updateModalOpen ? (
-        <Modal title="Update available" onClose={() => setUpdateModalOpen(false)}>
+        <Modal
+          title={updateStatus?.update_available ? "Update available" : "Version details"}
+          onClose={() => setUpdateModalOpen(false)}
+        >
           <div className="update-modal">
             <p className="update-modal-copy">
               {updateStatus?.update_available
@@ -2667,6 +2694,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                   <>
                     From the halcyon root, run <code>{updateCommand}</code>.
                     {" "}This install updates from the checked-out source, not a prebuilt app image.
+                    {" "}If you want simpler updates later, run <code>./halcyon status</code> once to bootstrap the reusable <code>halcyon</code> command.
                   </>
                 ) : (
                   <>
@@ -2686,7 +2714,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                 onClick={() => void handleUpdateAction()}
                 disabled={Boolean(updateStatus?.error)}
               >
-                Update
+                {updateStatus?.update_available ? "Update" : "Copy command"}
               </button>
             </div>
           </div>

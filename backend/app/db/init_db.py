@@ -105,6 +105,11 @@ def init_db() -> None:
         if "last_auto_run_at" not in retention_settings_columns:
             connection.execute(text("ALTER TABLE retention_settings ADD COLUMN last_auto_run_at DATETIME"))
 
+        retention_run_columns = {column["name"] for column in inspector.get_columns("retention_runs")}
+        if "details" not in retention_run_columns:
+            connection.execute(text("ALTER TABLE retention_runs ADD COLUMN details JSON"))
+            connection.execute(text("UPDATE retention_runs SET details = '{}' WHERE details IS NULL"))
+
         retention_item_columns_by_name = {
             column["name"]: column for column in inspector.get_columns("retention_items")
         }

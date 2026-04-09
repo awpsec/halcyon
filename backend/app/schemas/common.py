@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class OrmModel(BaseModel):
@@ -346,6 +346,7 @@ class RetentionRunOut(OrmModel):
     trigger: str
     status: str
     message: str | None = None
+    details: dict = Field(default_factory=dict)
     marked_count: int
     deleted_count: int
     reverted_count: int

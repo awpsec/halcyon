@@ -39,6 +39,32 @@ NOOP_AUTO_RETENTION_MESSAGES = {"Retention disabled", "Retention not due yet"}
 RetentionUndoAction: TypeAlias = tuple[str, Path, Path]
 
 
+def _retention_file_label(*, relative_path: str | None = None, absolute_path: str | None = None) -> str:
+    normalized_relative = (relative_path or "").strip()
+    if normalized_relative:
+        return normalized_relative
+    normalized_absolute = (absolute_path or "").strip()
+    if normalized_absolute:
+        return Path(normalized_absolute).name or normalized_absolute
+    return "Unknown file"
+
+
+def _retention_run_details_payload(
+    *,
+    marked_files: list[str] | None = None,
+    deleted_files: list[str] | None = None,
+    reverted_files: list[str] | None = None,
+) -> dict:
+    details: dict[str, list[str]] = {}
+    if marked_files:
+        details["marked_files"] = marked_files
+    if deleted_files:
+        details["deleted_files"] = deleted_files
+    if reverted_files:
+        details["reverted_files"] = reverted_files
+    return details
+
+
 def _cleanup_empty_retention_dirs(path: Path, stop_at: Path) -> None:
     current = path
     while current.exists() and current != stop_at:
@@ -355,7 +381,7 @@ def _mark_last_run(
 
 
 def list_retention_runs(db: Session) -> list[RetentionRun]:
-    return db.scalars(
+    runs = db.scalars(
         select(RetentionRun)
         .where(
             (RetentionRun.trigger != "auto")
@@ -364,6 +390,9 @@ def list_retention_runs(db: Session) -> list[RetentionRun]:
         )
         .order_by(RetentionRun.created_at.desc(), RetentionRun.id.desc())
     ).all()
+    if _backfill_retention_run_details(db, runs):
+        db.commit()
+    return runs
 
 
 def retention_reclaimed_bytes(db: Session) -> int:
@@ -383,6 +412,7 @@ def _record_retention_run(
     trigger: str,
     status: str,
     message: str,
+    details: dict | None = None,
     marked_count: int,
     deleted_count: int,
     reverted_count: int,
@@ -393,12 +423,78 @@ def _record_retention_run(
             trigger=trigger,
             status=status,
             message=message,
+            details=details or {},
             marked_count=marked_count,
             deleted_count=deleted_count,
             reverted_count=reverted_count,
             run_token=run_token,
         )
     )
+
+
+def _retention_details_missing(run: RetentionRun) -> bool:
+    return not isinstance(run.details, dict) or not run.details
+
+
+def _retention_window_labels(
+    db: Session,
+    *,
+    timestamp_field,
+    timestamp_value: datetime,
+    count: int,
+    status: str | None = None,
+) -> list[str]:
+    if count <= 0:
+        return []
+    for window_seconds in (2, 20, 120):
+        start = timestamp_value - timedelta(seconds=window_seconds)
+        end = timestamp_value + timedelta(seconds=window_seconds)
+        statement = select(RetentionItem).where(timestamp_field >= start, timestamp_field <= end)
+        if status is not None:
+            statement = statement.where(RetentionItem.status == status)
+        items = db.scalars(statement.order_by(timestamp_field.asc(), RetentionItem.id.asc())).all()
+        if len(items) == count:
+            return [
+                _retention_file_label(
+                    relative_path=item.original_relative_path,
+                    absolute_path=item.original_absolute_path,
+                )
+                for item in items
+            ]
+    return []
+
+
+def _backfill_retention_run_details(db: Session, runs: list[RetentionRun]) -> bool:
+    changed = False
+    for run in runs:
+        if not _retention_details_missing(run):
+            continue
+        details = _retention_run_details_payload(
+            marked_files=_retention_window_labels(
+                db,
+                timestamp_field=RetentionItem.marked_at,
+                timestamp_value=run.created_at,
+                count=run.marked_count,
+            ),
+            deleted_files=_retention_window_labels(
+                db,
+                timestamp_field=RetentionItem.updated_at,
+                timestamp_value=run.created_at,
+                count=run.deleted_count,
+                status="deleted",
+            ),
+            reverted_files=_retention_window_labels(
+                db,
+                timestamp_field=RetentionItem.updated_at,
+                timestamp_value=run.created_at,
+                count=run.reverted_count,
+                status="reverted",
+            ),
+        )
+        if details:
+            run.details = details
+            changed = True
+    return changed
 
 
 def _prune_noop_auto_retention_runs(db: Session) -> int:
@@ -473,6 +569,7 @@ def record_retention_failure(db: Session, *, trigger: str, message: str) -> dict
         trigger=trigger,
         status="failed",
         message=normalized_message,
+        details={},
         marked_count=0,
         deleted_count=0,
         reverted_count=0,
@@ -734,6 +831,9 @@ def run_retention_cycle(db: Session, *, trigger: str = "auto", force: bool = Fal
     staging_root = effective_retention_staging_folder(settings_row)
     undo_actions: list[RetentionUndoAction] = []
     delete_finalize_paths: list[Path] = []
+    marked_files: list[str] = []
+    deleted_files: list[str] = []
+    reverted_files: list[str] = []
 
     try:
         staged_items = db.scalars(
@@ -752,13 +852,22 @@ def run_retention_cycle(db: Session, *, trigger: str = "auto", force: bool = Fal
                 continue
 
             if video_is_retention_exempt(video, saved_video_ids=saved_video_ids, exclusion_sets=exclusion_sets):
+                file_label = _retention_file_label(
+                    relative_path=item.original_relative_path,
+                    absolute_path=item.original_absolute_path,
+                )
                 if _revert_retention_item(db, item, undo_actions=undo_actions):
                     reverted_count += 1
+                    reverted_files.append(file_label)
                 else:
                     issue_count += 1
                 continue
 
             if now >= item.delete_after_at:
+                file_label = _retention_file_label(
+                    relative_path=item.original_relative_path,
+                    absolute_path=item.original_absolute_path,
+                )
                 if _delete_retention_item(
                     db,
                     item,
@@ -768,6 +877,7 @@ def run_retention_cycle(db: Session, *, trigger: str = "auto", force: bool = Fal
                     delete_finalize_paths=delete_finalize_paths,
                 ):
                     deleted_count += 1
+                    deleted_files.append(file_label)
                 else:
                     issue_count += 1
 
@@ -812,6 +922,12 @@ def run_retention_cycle(db: Session, *, trigger: str = "auto", force: bool = Fal
                         undo_actions=undo_actions,
                     ):
                         staged_any = True
+                        marked_files.append(
+                            _retention_file_label(
+                                relative_path=video_file.relative_path,
+                                absolute_path=video_file.absolute_path,
+                            )
+                        )
                     else:
                         _handle_missing_source_file(db, video=video, video_file=video_file)
                         missing_source_count += 1
@@ -856,6 +972,11 @@ def run_retention_cycle(db: Session, *, trigger: str = "auto", force: bool = Fal
                 trigger=trigger,
                 status=status,
                 message=message,
+                details=_retention_run_details_payload(
+                    marked_files=marked_files,
+                    deleted_files=deleted_files,
+                    reverted_files=reverted_files,
+                ),
                 marked_count=marked_count,
                 deleted_count=deleted_count,
                 reverted_count=reverted_count,
@@ -900,10 +1021,16 @@ def revert_last_retention_run(db: Session) -> dict:
     reverted_count = 0
     issue_count = 0
     undo_actions: list[RetentionUndoAction] = []
+    reverted_files: list[str] = []
     try:
         for item in items:
+            file_label = _retention_file_label(
+                relative_path=item.original_relative_path,
+                absolute_path=item.original_absolute_path,
+            )
             if _revert_retention_item(db, item, undo_actions=undo_actions):
                 reverted_count += 1
+                reverted_files.append(file_label)
             else:
                 issue_count += 1
 
@@ -925,6 +1052,7 @@ def revert_last_retention_run(db: Session) -> dict:
             trigger="manual-revert",
             status="completed",
             message=message,
+            details=_retention_run_details_payload(reverted_files=reverted_files),
             marked_count=0,
             deleted_count=0,
             reverted_count=reverted_count,
@@ -955,9 +1083,14 @@ def delete_pending_retention_items(db: Session) -> dict:
     issue_count = 0
     undo_actions: list[RetentionUndoAction] = []
     delete_finalize_paths: list[Path] = []
+    deleted_files: list[str] = []
 
     try:
         for item in items:
+            file_label = _retention_file_label(
+                relative_path=item.original_relative_path,
+                absolute_path=item.original_absolute_path,
+            )
             if _delete_retention_item(
                 db,
                 item,
@@ -967,6 +1100,7 @@ def delete_pending_retention_items(db: Session) -> dict:
                 delete_finalize_paths=delete_finalize_paths,
             ):
                 deleted_count += 1
+                deleted_files.append(file_label)
             else:
                 issue_count += 1
 
@@ -988,6 +1122,7 @@ def delete_pending_retention_items(db: Session) -> dict:
             trigger="manual-delete",
             status="completed",
             message=message,
+            details=_retention_run_details_payload(deleted_files=deleted_files),
             marked_count=0,
             deleted_count=deleted_count,
             reverted_count=0,

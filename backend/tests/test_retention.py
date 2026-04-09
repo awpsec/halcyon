@@ -237,6 +237,37 @@ def test_delete_pending_retention_items_removes_staged_files(tmp_path: Path):
         assert deleted_item.video_file_id is None
 
 
+def test_retention_runs_persist_file_lists_for_mark_delete_and_revert(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        video, video_file, _ = create_video_with_file(db, tmp_path)
+        video.created_at = datetime.utcnow().replace(year=2024)
+        settings_row = get_or_create_retention_settings(db)
+        settings_row.enabled = True
+        settings_row.retention_days = 30
+        settings_row.staging_folder_path = str(tmp_path / "retention-staging")
+        db.commit()
+
+        run_retention_cycle(db, trigger="manual", force=True)
+        mark_run = db.scalar(select(RetentionRun).order_by(RetentionRun.id.desc()))
+
+        assert mark_run is not None
+        assert mark_run.details == {"marked_files": ["channel/recent-video.mp4"]}
+
+        revert_last_retention_run(db)
+        revert_run = db.scalar(select(RetentionRun).order_by(RetentionRun.id.desc()))
+
+        assert revert_run is not None
+        assert revert_run.details == {"reverted_files": ["channel/recent-video.mp4"]}
+
+        run_retention_cycle(db, trigger="manual", force=True)
+        delete_pending_retention_items(db)
+        delete_run = db.scalar(select(RetentionRun).order_by(RetentionRun.id.desc()))
+
+        assert delete_run is not None
+        assert delete_run.details == {"deleted_files": ["channel/recent-video.mp4"]}
+        assert db.get(VideoFile, video_file.id) is None
+
+
 def test_delete_pending_retention_items_does_not_delete_metadata_when_staged_file_is_missing(tmp_path: Path):
     with make_session(tmp_path) as db:
         video, video_file, source_path = create_video_with_file(db, tmp_path)

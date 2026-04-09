@@ -264,6 +264,7 @@ export type RetentionRun = {
   trigger: string;
   status: string;
   message?: string | null;
+  details?: Record<string, string[]> | null;
   marked_count: number;
   deleted_count: number;
   reverted_count: number;
