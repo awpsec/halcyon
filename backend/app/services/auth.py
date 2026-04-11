@@ -9,6 +9,22 @@ import secrets
 TEMP_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
 RECOVERY_WORDLIST_PATH = Path(__file__).resolve().parent.parent / "data" / "eff_large_wordlist.txt"
 SESSION_TOKEN_PREFIX = "sha384:"
+FALLBACK_RECOVERY_WORDS = (
+    "anchor", "apricot", "ash", "aster", "atlas", "aurora", "badger", "bamboo",
+    "barley", "beacon", "birch", "bison", "bramble", "breeze", "brook", "canyon",
+    "caper", "cedar", "chisel", "cinder", "citrus", "clover", "cobalt", "copper",
+    "coral", "cricket", "current", "dahlia", "delta", "ember", "falcon", "fern",
+    "fable", "fjord", "flint", "forest", "frost", "garnet", "glade", "golden",
+    "harbor", "hazel", "heather", "hollow", "indigo", "iris", "ivory", "jade",
+    "jasper", "juniper", "kestrel", "lagoon", "laurel", "linen", "lotus", "mango",
+    "maple", "marble", "meadow", "meridian", "meteor", "mistral", "misty", "monarch",
+    "moss", "nectar", "nova", "onyx", "opal", "orchid", "otter", "pearl",
+    "pepper", "pine", "plume", "prairie", "quartz", "quill", "raven", "reef",
+    "ripple", "river", "robin", "saffron", "sage", "sierra", "silver", "solstice",
+    "sparrow", "spruce", "starling", "stone", "summit", "sunrise", "thistle", "timber",
+    "topaz", "trident", "tulip", "umber", "valley", "velvet", "violet", "willow",
+    "winter", "wren", "yarrow", "zephyr",
+)
 
 
 def hash_secret(secret: str) -> str:
@@ -41,14 +57,17 @@ def normalize_recovery_phrase(phrase: str) -> str:
 @lru_cache(maxsize=1)
 def _recovery_wordlist() -> tuple[str, ...]:
     words: list[str] = []
-    with RECOVERY_WORDLIST_PATH.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            parts = line.strip().split()
-            if len(parts) != 2:
-                continue
-            word = parts[1].strip().lower()
-            if word.isalpha():
-                words.append(word)
+    try:
+        with RECOVERY_WORDLIST_PATH.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                parts = line.strip().split()
+                if len(parts) != 2:
+                    continue
+                word = parts[1].strip().lower()
+                if word.isalpha():
+                    words.append(word)
+    except FileNotFoundError:
+        words.extend(FALLBACK_RECOVERY_WORDS)
     if not words:
         raise RuntimeError("Recovery word list is empty")
     return tuple(words)

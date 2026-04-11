@@ -33,6 +33,7 @@ from app.schemas.common import (
     UserPasswordResetByPinIn,
     UserPinSetIn,
 )
+from app.services import auth as auth_service
 from app.services.auth import generate_recovery_phrase, verify_password
 from app.services.auth import hash_session_token, is_hashed_session_token
 from app.services.auth_rate_limit import clear_all_failures
@@ -149,6 +150,20 @@ def test_recovery_phrase_generator_creates_random_word_like_tokens():
         assert len(set(words)) == 6
         assert all(word.isalpha() for word in words)
         assert all(word == word.lower() for word in words)
+
+
+def test_recovery_phrase_generator_falls_back_when_wordlist_is_missing(monkeypatch):
+    auth_service._recovery_wordlist.cache_clear()
+    monkeypatch.setattr(auth_service, "RECOVERY_WORDLIST_PATH", Path("missing-wordlist.txt"))
+
+    phrase = auth_service.generate_recovery_phrase()
+
+    auth_service._recovery_wordlist.cache_clear()
+
+    words = phrase.split()
+    assert len(words) == 6
+    assert len(set(words)) == 6
+    assert all(word in auth_service.FALLBACK_RECOVERY_WORDS for word in words)
 
 
 def test_admin_can_promote_other_user(tmp_path: Path):
