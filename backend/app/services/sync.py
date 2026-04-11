@@ -28,6 +28,7 @@ from app.models.entities import (
     SyncJob,
     SyncSettings,
     TranscodeJob,
+    Series,
     Video,
     VideoFile,
     VideoReaction,
@@ -77,6 +78,19 @@ TEMP_DOWNLOAD_MARKERS = (
     ".unconfirmed",
 )
 YTDLP_FRAGMENT_PATTERN = re.compile(r"\.f\d{2,5}$", re.IGNORECASE)
+GENERIC_PLAYLIST_TITLES = {
+    "uploads",
+    "popular uploads",
+    "videos",
+    "all videos",
+    "featured",
+    "live",
+    "live streams",
+    "shorts",
+    "saved",
+}
+MAX_CHANNEL_PLAYLISTS = 40
+MAX_PLAYLIST_ITEMS = 300
 
 
 def _ryd_next_reset_time(now: datetime) -> datetime:
@@ -136,6 +150,180 @@ def ensure_slug_uniqueness(db: Session, model, base_slug: str) -> str:
         candidate = f"{base_slug}-{suffix}"
         suffix += 1
     return candidate
+
+
+def get_or_create_series(db: Session, name: str) -> Series:
+    desired_name = clean_display_title(name).strip()
+    desired_slug = slugify(desired_name)
+    series = db.scalar(select(Series).where(Series.slug == desired_slug))
+    if series:
+        return series
+    series = Series(name=desired_name, slug=ensure_slug_uniqueness(db, Series, desired_slug))
+    db.add(series)
+    db.flush()
+    return series
+
+
+def is_generic_playlist_title(title: str | None) -> bool:
+    normalized = normalize_text(title or "")
+    return normalized in GENERIC_PLAYLIST_TITLES
+
+
+async def fetch_channel_public_playlists(
+    client: httpx.AsyncClient,
+    api_key: str,
+    youtube_channel_id: str,
+    requests_per_second: int,
+) -> list[dict]:
+    items: list[dict] = []
+    next_page_token: str | None = None
+    while len(items) < MAX_CHANNEL_PLAYLISTS:
+        response = await throttled_get(
+            client,
+            f"{YOUTUBE_API_BASE}/playlists",
+            params={
+                "part": "snippet,contentDetails",
+                "channelId": youtube_channel_id,
+                "maxResults": min(50, MAX_CHANNEL_PLAYLISTS - len(items)),
+                "pageToken": next_page_token,
+                "key": api_key,
+            },
+            requests_per_second=requests_per_second,
+        )
+        if response.is_error:
+            message = _extract_api_error(response)
+            raise YouTubeSyncError(
+                f"YouTube playlist lookup failed: {message}",
+                fatal="quotaExceeded" in message or "rateLimitExceeded" in message,
+            )
+        payload = response.json()
+        batch = payload.get("items", [])
+        items.extend(batch)
+        next_page_token = payload.get("nextPageToken")
+        if not next_page_token or not batch:
+            break
+    return items[:MAX_CHANNEL_PLAYLISTS]
+
+
+async def fetch_playlist_video_positions(
+    client: httpx.AsyncClient,
+    api_key: str,
+    playlist_id: str,
+    requests_per_second: int,
+) -> dict[str, int]:
+    positions: dict[str, int] = {}
+    next_page_token: str | None = None
+    fetched = 0
+    while fetched < MAX_PLAYLIST_ITEMS:
+        response = await throttled_get(
+            client,
+            f"{YOUTUBE_API_BASE}/playlistItems",
+            params={
+                "part": "snippet,contentDetails",
+                "playlistId": playlist_id,
+                "maxResults": min(50, MAX_PLAYLIST_ITEMS - fetched),
+                "pageToken": next_page_token,
+                "key": api_key,
+            },
+            requests_per_second=requests_per_second,
+        )
+        if response.is_error:
+            message = _extract_api_error(response)
+            raise YouTubeSyncError(
+                f"YouTube playlist membership lookup failed: {message}",
+                fatal="quotaExceeded" in message or "rateLimitExceeded" in message,
+            )
+        payload = response.json()
+        batch = payload.get("items", [])
+        for item in batch:
+            snippet = item.get("snippet", {})
+            content_details = item.get("contentDetails", {})
+            video_id = (
+                content_details.get("videoId")
+                or snippet.get("resourceId", {}).get("videoId")
+            )
+            if not video_id:
+                continue
+            positions[video_id] = int(snippet.get("position") or 0)
+        fetched += len(batch)
+        next_page_token = payload.get("nextPageToken")
+        if not next_page_token or not batch:
+            break
+    return positions
+
+
+async def fetch_channel_playlist_memberships(
+    client: httpx.AsyncClient,
+    api_key: str,
+    youtube_channel_id: str,
+    requests_per_second: int,
+    playlist_cache: dict[str, list[dict]],
+) -> list[dict]:
+    cached = playlist_cache.get(youtube_channel_id)
+    if cached is not None:
+        return cached
+
+    memberships: list[dict] = []
+    for playlist in await fetch_channel_public_playlists(client, api_key, youtube_channel_id, requests_per_second):
+        playlist_id = playlist.get("id")
+        title = clean_display_title(playlist.get("snippet", {}).get("title") or "")
+        if not playlist_id or not title or is_generic_playlist_title(title):
+            continue
+        positions = await fetch_playlist_video_positions(client, api_key, playlist_id, requests_per_second)
+        memberships.append(
+            {
+                "id": playlist_id,
+                "title": title,
+                "description": playlist.get("snippet", {}).get("description") or "",
+                "item_count": int(playlist.get("contentDetails", {}).get("itemCount") or 0),
+                "positions": positions,
+            }
+        )
+
+    playlist_cache[youtube_channel_id] = memberships
+    return memberships
+
+
+def choose_playlist_series_title(
+    video: Video,
+    youtube_video_id: str,
+    playlist_memberships: list[dict],
+) -> tuple[str | None, int | None]:
+    title_tokens = set(tokenize_text(video.title))
+    current_series_tokens = set(tokenize_text(video.series.name)) if video.series and video.series.name else set()
+    current_series_name = normalize_text(video.series.name) if video.series and video.series.name else ""
+    episode_number = parse_episode_number(video.title)
+
+    candidates: list[tuple[float, str, int | None]] = []
+    for playlist in playlist_memberships:
+        positions = playlist.get("positions") or {}
+        if youtube_video_id not in positions:
+            continue
+        playlist_title = clean_display_title(playlist.get("title") or "")
+        if not playlist_title or is_generic_playlist_title(playlist_title):
+            continue
+
+        playlist_tokens = set(tokenize_text(playlist_title))
+        score = 1.0  # exact playlist membership baseline
+        if playlist_tokens and title_tokens:
+            score += (len(playlist_tokens & title_tokens) / max(1, len(playlist_tokens))) * 2.6
+        if current_series_tokens and playlist_tokens:
+            score += (len(playlist_tokens & current_series_tokens) / max(1, len(playlist_tokens))) * 3.0
+        if current_series_name and normalize_text(playlist_title) == current_series_name:
+            score += 2.0
+        if episode_number is not None and len(playlist_tokens) >= 2:
+            score += 0.5
+        if re.search(r"\b(series|season|episode|part|arc|campaign|mod|standalone|overpoch|exile|tanoa)\b", normalize_text(playlist_title)):
+            score += 0.35
+
+        candidates.append((score, playlist_title, positions.get(youtube_video_id)))
+
+    if not candidates:
+        return None, None
+
+    candidates.sort(key=lambda item: (-item[0], item[2] if item[2] is not None else 10_000, item[1].lower()))
+    _, best_title, best_position = candidates[0]
+    return best_title, best_position
 
 
 def distinct_youtube_channel_ids_for_channel(db: Session, channel_id: int | None) -> list[str]:
@@ -1759,6 +1947,7 @@ async def apply_sync_item(
     client: httpx.AsyncClient,
     api_key: str | None,
     channel_cache: dict[str, dict | None] | None = None,
+    playlist_cache: dict[str, list[dict]] | None = None,
     allow_fallback_art: bool = False,
     prefer_high_res_banners: bool = False,
     confidence: float = 1.0,
@@ -1940,6 +2129,51 @@ async def apply_sync_item(
 
         channel_snapshot.fetched_at = datetime.utcnow()
 
+        if (
+            status == "matched"
+            and api_key
+            and video_id
+            and target_channel is not None
+            and playlist_cache is not None
+        ):
+            try:
+                playlist_memberships = await fetch_channel_playlist_memberships(
+                    client,
+                    api_key,
+                    channel_id,
+                    requests_per_second,
+                    playlist_cache,
+                )
+            except YouTubeSyncError as exc:
+                logger.warning(
+                    "Sync playlist fallback video_id=%s channel_id=%s error=%s",
+                    video.id,
+                    channel_id,
+                    exc,
+                )
+            else:
+                playlist_series_title, playlist_position = choose_playlist_series_title(
+                    video,
+                    video_id,
+                    playlist_memberships,
+                )
+                if playlist_series_title:
+                    target_series = get_or_create_series(db, playlist_series_title)
+                    video.series_id = target_series.id
+                    if video.episode_number is None and playlist_position is not None:
+                        video.episode_number = playlist_position + 1
+                    video.metadata_confidence = max(video.metadata_confidence or 0.0, 0.88)
+                    if "playlist-membership" not in match.reasons:
+                        match.reasons = [*(match.reasons or []), "playlist-membership"]
+                    matched_fields.append("playlist")
+                    logger.info(
+                        "Sync playlist grouped video_id=%s youtube_video_id=%s series=%s position=%s",
+                        video.id,
+                        video_id,
+                        playlist_series_title,
+                        playlist_position,
+                    )
+
         if status == "matched":
             try:
                 organization_moves = auto_organize_channel_files(db, video=video, channel=target_channel)
@@ -1986,7 +2220,7 @@ async def apply_sync_item(
             snippet.get("channelTitle", "Unknown Channel"),
             confidence,
             ",".join(dict.fromkeys(matched_fields)),
-            ",".join(reasons or []),
+            ",".join(match.reasons or []),
         )
 
     try:
@@ -2010,6 +2244,7 @@ async def sync_video(
     requests_per_second: int,
     client: httpx.AsyncClient,
     channel_cache: dict[str, dict | None] | None = None,
+    playlist_cache: dict[str, list[dict]] | None = None,
     allow_fallback_art: bool = False,
     prefer_high_res_banners: bool = False,
     force: bool = False,
@@ -2060,6 +2295,7 @@ async def sync_video(
                     client=client,
                     api_key=api_key,
                     channel_cache=channel_cache,
+                    playlist_cache=playlist_cache,
                     allow_fallback_art=allow_fallback_art,
                     prefer_high_res_banners=prefer_high_res_banners,
                     confidence=existing_match.confidence or 1.0,
@@ -2088,6 +2324,7 @@ async def sync_video(
                     client=client,
                     api_key=api_key,
                     channel_cache=channel_cache,
+                    playlist_cache=playlist_cache,
                     allow_fallback_art=allow_fallback_art,
                     prefer_high_res_banners=prefer_high_res_banners,
                     confidence=existing_match.confidence or 1.0,
@@ -2224,6 +2461,7 @@ async def sync_video(
             client=client,
             api_key=api_key,
             channel_cache=channel_cache,
+            playlist_cache=playlist_cache,
             allow_fallback_art=allow_fallback_art,
             prefer_high_res_banners=prefer_high_res_banners,
             confidence=best_score,
@@ -2349,6 +2587,7 @@ async def sync_scope(
         try:
             total = len(videos)
             channel_cache: dict[str, dict | None] = {}
+            playlist_cache: dict[str, list[dict]] = {}
             job.details = {
                 "processed": 0,
                 "total": total,
@@ -2391,6 +2630,7 @@ async def sync_scope(
                             requests_per_second,
                             client,
                             channel_cache=channel_cache,
+                            playlist_cache=playlist_cache,
                             allow_fallback_art=allow_fallback_art,
                             prefer_high_res_banners=prefer_high_res_banners,
                             force=force,

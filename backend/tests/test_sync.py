@@ -10,10 +10,10 @@ import app.services.background as background_service
 import app.services.sync as sync_service
 from app.core.config import Settings
 from app.models.base import Base
-from app.models.entities import Channel, LibraryRoot, RetentionItem, SelectedFolder, SyncJob, SyncSettings, UserProfile, Video, VideoFile, WatchProgress, YouTubeChannelSnapshot, YouTubeMatch, YouTubeVideoSnapshot
+from app.models.entities import Channel, LibraryRoot, RetentionItem, SelectedFolder, Series, SyncJob, SyncSettings, UserProfile, Video, VideoFile, WatchProgress, YouTubeChannelSnapshot, YouTubeMatch, YouTubeVideoSnapshot
 from app.services.media import fingerprint_file
 from app.services.scanner import scan_selected_folders
-from app.services.sync import apply_sync_item, auto_organize_channel_files, fetch_channel_about_details, sync_scope, sync_video
+from app.services.sync import apply_sync_item, auto_organize_channel_files, choose_playlist_series_title, fetch_channel_about_details, sync_scope, sync_video
 from app.services.utils import slugify
 
 
@@ -73,6 +73,46 @@ def test_fetch_channel_about_details_parses_counts_without_api(monkeypatch):
 def test_slugify_collapses_apostrophes_without_extra_dash() -> None:
     assert slugify("Moore's Law is Dead") == "moores-law-is-dead"
     assert slugify("Moore’s Law is Dead") == "moores-law-is-dead"
+
+
+def test_choose_playlist_series_title_prefers_exact_membership_and_non_generic_playlist(tmp_path: Path) -> None:
+    with make_session(tmp_path) as db:
+        channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
+        existing_series = Series(name="Arma 2 DayZ Mod", slug="arma-2-dayz-mod")
+        db.add_all([channel, existing_series])
+        db.flush()
+
+        video = Video(
+            title="BATTLE OF THE BRIDGE! - Arma 2: DayZ Mod - Ep 48",
+            slug="battle-of-the-bridge",
+            channel_id=channel.id,
+            series_id=existing_series.id,
+            duration_seconds=1200,
+            is_available=True,
+        )
+        db.add(video)
+        db.commit()
+        db.refresh(video)
+
+        title, position = choose_playlist_series_title(
+            video,
+            "bridge12345a",
+            [
+                {
+                    "id": "uploads",
+                    "title": "Uploads",
+                    "positions": {"bridge12345a": 47},
+                },
+                {
+                    "id": "dayz",
+                    "title": "DayZ Mod (FRANKIEonPC)",
+                    "positions": {"bridge12345a": 47},
+                },
+            ],
+        )
+
+        assert title == "DayZ Mod (FRANKIEonPC)"
+        assert position == 47
 
 
 def test_sync_video_uses_recent_channel_uploads_when_title_search_misses(tmp_path: Path, monkeypatch):
@@ -601,6 +641,136 @@ def test_apply_sync_item_auto_organizes_root_file_without_losing_match(tmp_path:
         assert rescanned_file.absolute_path == str(organized_path)
         assert rescanned_videos[0].channel is not None
         assert rescanned_videos[0].channel.slug == "asmongold-tv"
+
+
+def test_apply_sync_item_assigns_series_from_playlist_membership(tmp_path: Path, monkeypatch):
+    source_path = tmp_path / "library" / "battle.mp4"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"source")
+
+    def fake_settings() -> Settings:
+        return Settings(
+            mounted_roots=[],
+            config_dir=tmp_path / "config",
+            cache_dir=tmp_path / "cache",
+            background_tasks_enabled=False,
+        )
+
+    async def fake_ryd(*args, **kwargs):
+        return None
+
+    async def fake_channel_about(*args, **kwargs):
+        return None
+
+    async def fake_channel_details(*args, **kwargs):
+        return {
+            "snippet": {
+                "title": "FRANKIEonPCin1080p",
+                "description": "Channel description",
+                "thumbnails": {},
+            },
+            "statistics": {
+                "subscriberCount": "3400000",
+                "videoCount": "214",
+                "viewCount": "501000000",
+            },
+            "brandingSettings": {"image": {}},
+        }
+
+    async def fake_playlist_memberships(*args, **kwargs):
+        return [
+            {
+                "id": "uploads",
+                "title": "Uploads",
+                "positions": {"bridge12345a": 47},
+            },
+            {
+                "id": "dayz",
+                "title": "DayZ Mod (FRANKIEonPC)",
+                "positions": {"bridge12345a": 47},
+            },
+        ]
+
+    monkeypatch.setattr(sync_service, "get_settings", fake_settings)
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_about)
+    monkeypatch.setattr(sync_service, "fetch_channel_details", fake_channel_details)
+    monkeypatch.setattr(sync_service, "fetch_channel_playlist_memberships", fake_playlist_memberships)
+    monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
+
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="BATTLE OF THE BRIDGE! - Arma 2: DayZ Mod - Ep 48",
+            slug="battle-of-the-bridge",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=1200,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(source_path),
+                relative_path="battle.mp4",
+                file_size=source_path.stat().st_size,
+                fingerprint="p" * 64,
+            )
+        )
+        db.commit()
+        db.refresh(video)
+
+        item = {
+            "id": "bridge12345a",
+            "snippet": {
+                "title": "BATTLE OF THE BRIDGE! - Arma 2: DayZ Mod - Ep.48",
+                "channelTitle": "FRANKIEonPCin1080p",
+                "channelId": "channel-frankie",
+                "publishedAt": "2026-04-11T12:00:00Z",
+                "description": "Matched metadata",
+                "thumbnails": {},
+            },
+            "statistics": {
+                "viewCount": "1234",
+                "likeCount": "56",
+            },
+            "_waytube_duration_seconds": 1200,
+            "_waytube_source": "youtube-api",
+        }
+
+        async def run() -> None:
+            async with httpx.AsyncClient() as client:
+                await apply_sync_item(
+                    db,
+                    video,
+                    item,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                    api_key="test-api-key",
+                    playlist_cache={},
+                    confidence=0.93,
+                    reasons=["title", "duration-tight"],
+                    status="matched",
+                )
+
+        asyncio.run(run())
+
+        refreshed_video = db.get(Video, video.id)
+        refreshed_match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+        assigned_series = db.get(Series, refreshed_video.series_id) if refreshed_video and refreshed_video.series_id else None
+
+        assert refreshed_video is not None
+        assert refreshed_match is not None
+        assert assigned_series is not None
+        assert assigned_series.name == "DayZ Mod (FRANKIEonPC)"
+        assert refreshed_video.episode_number == 48
+        assert "playlist-membership" in (refreshed_match.reasons or [])
 
 
 def test_sync_video_reorganizes_existing_matched_file_into_selected_library_folder(tmp_path: Path, monkeypatch):
