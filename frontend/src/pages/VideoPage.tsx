@@ -282,6 +282,7 @@ function WatchSuggestionRow({
         )
       : 0;
   const isWatched = item.completed ?? item.watched ?? progressPercent >= 99.5;
+  const canMarkUnwatched = isWatched || (item.progress_seconds ?? 0) > 0;
   const publishedAt = item.published_at ?? null;
   const isNew =
     publishedAt !== null &&
@@ -659,7 +660,7 @@ function WatchSuggestionRow({
                   Mark as watched
                 </button>
               ) : null}
-              {isWatched ? (
+              {canMarkUnwatched ? (
                 <button
                   className="menu-item"
                   onClick={() => void markWatchState("unwatched")}
@@ -987,6 +988,7 @@ export function VideoPage({
   }, [engagementRatio]);
   const playerAspectRatio = "16 / 9";
   const videoWatched = Boolean(data?.video?.watched ?? (data as any)?.video?.completed);
+  const canMarkVideoUnwatched = videoWatched || (data?.video?.progress_seconds ?? data?.resume_point ?? 0) > 0;
   const resumablePosition = useMemo(() => {
     if (!data?.resume_point || data.resume_point <= 0) return null;
     if (videoWatched) return null;
@@ -1886,14 +1888,14 @@ export function VideoPage({
                             Mark as watched
                           </button>
                         ) : null}
-                        {videoWatched ? (
-                <button
-                  className="menu-item"
-                  onClick={() => void markWatchState("unwatched")}
-                >
-                  Mark as unwatched
-                </button>
-              ) : null}
+                        {canMarkVideoUnwatched ? (
+                          <button
+                            className="menu-item"
+                            onClick={() => void markWatchState("unwatched")}
+                          >
+                            Mark as unwatched
+                          </button>
+                        ) : null}
                         <button
                           className="menu-item"
                           onClick={() => void handleSync()}

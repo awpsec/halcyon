@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.routes import set_watch_state
 from app.models.base import Base
-from app.models.entities import Channel, Series, UserProfile, Video, VideoFile, WatchHistory, WatchProgress
+from app.models.entities import Channel, Series, UserProfile, Video, VideoFile, WatchHistory, WatchProgress, YouTubeMatch, YouTubeVideoSnapshot
 from app.schemas.common import WatchStateIn
 from app.services.feed import build_home_feed
 
@@ -134,6 +134,67 @@ def test_recently_added_excludes_watched_videos(tmp_path: Path):
 
         assert recent_section is not None
         assert [item.id for item in recent_section.items] == [fresh_video.id]
+
+
+def test_recently_added_prefers_uploaded_date_over_added_date(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        user, older_upload = create_user_and_video(db, tmp_path)
+        older_upload.created_at = datetime(2026, 4, 11, 12, 0, 0)
+
+        newer_path = tmp_path / "library" / "channel" / "newer-upload.mp4"
+        newer_path.write_bytes(b"newer-upload-data")
+        newer_upload = Video(
+            title="Newer upload",
+            slug="newer-upload",
+            channel_id=older_upload.channel_id,
+            created_at=datetime(2026, 4, 10, 12, 0, 0),
+            duration_seconds=1800,
+            is_available=True,
+        )
+        db.add(newer_upload)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=newer_upload.id,
+                absolute_path=str(newer_path),
+                relative_path="channel/newer-upload.mp4",
+                file_size=newer_path.stat().st_size,
+                fingerprint="n" * 64,
+            )
+        )
+        db.add_all(
+            [
+                YouTubeMatch(
+                    video_id=older_upload.id,
+                    youtube_video_id="yt-older-upload",
+                    status="matched",
+                ),
+                YouTubeMatch(
+                    video_id=newer_upload.id,
+                    youtube_video_id="yt-newer-upload",
+                    status="matched",
+                ),
+                YouTubeVideoSnapshot(
+                    youtube_video_id="yt-older-upload",
+                    title=older_upload.title,
+                    published_at=datetime(2026, 4, 1, 12, 0, 0),
+                    published_at_source="youtube-api",
+                ),
+                YouTubeVideoSnapshot(
+                    youtube_video_id="yt-newer-upload",
+                    title=newer_upload.title,
+                    published_at=datetime(2026, 4, 5, 12, 0, 0),
+                    published_at_source="youtube-api",
+                ),
+            ]
+        )
+        db.commit()
+
+        sections = build_home_feed(db, user.id)
+        recent_section = next((section for section in sections if section.key == "recent"), None)
+
+        assert recent_section is not None
+        assert [item.id for item in recent_section.items[:2]] == [newer_upload.id, older_upload.id]
 
 
 def test_longform_excludes_watched_videos(tmp_path: Path):

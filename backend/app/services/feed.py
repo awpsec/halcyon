@@ -82,6 +82,38 @@ def _trusted_snapshot_published_at(snapshot: YouTubeVideoSnapshot | None) -> dat
     return snapshot.published_at
 
 
+def _trusted_published_at_by_video_id(videos: list[Video], db: Session) -> dict[int, datetime]:
+    youtube_video_ids_by_video_id = {
+        video.id: video.youtube_match.youtube_video_id
+        for video in videos
+        if video.youtube_match and video.youtube_match.youtube_video_id
+    }
+    youtube_video_ids = list({youtube_video_id for youtube_video_id in youtube_video_ids_by_video_id.values() if youtube_video_id})
+    if not youtube_video_ids:
+        return {}
+    snapshots = db.execute(
+        select(
+            YouTubeVideoSnapshot.youtube_video_id,
+            YouTubeVideoSnapshot.published_at,
+            YouTubeVideoSnapshot.published_at_source,
+        ).where(YouTubeVideoSnapshot.youtube_video_id.in_(youtube_video_ids))
+    ).all()
+    trusted_by_youtube_id = {
+        youtube_video_id: published_at
+        for youtube_video_id, published_at, published_at_source in snapshots
+        if published_at and published_at_source in TRUSTED_PUBLISHED_AT_SOURCES
+    }
+    return {
+        video_id: trusted_by_youtube_id[youtube_video_id]
+        for video_id, youtube_video_id in youtube_video_ids_by_video_id.items()
+        if youtube_video_id in trusted_by_youtube_id
+    }
+
+
+def _video_recency_timestamp(video: Video, trusted_published_at_by_video_id: dict[int, datetime]) -> datetime:
+    return trusted_published_at_by_video_id.get(video.id) or video.published_at or video.created_at or datetime.min
+
+
 def _video_to_card(video: Video, progress_by_video: dict[int, WatchProgress], reason: str, db: Session) -> FeedCard:
     video = apply_video_override(db, video)
     progress = progress_by_video.get(video.id)
@@ -135,6 +167,7 @@ def build_home_feed(db: Session, user_id: int) -> list[FeedSection]:
     queue_video_ids = db.scalars(select(QueueItem.video_id).where(QueueItem.user_id == user_id).order_by(QueueItem.position)).all()
 
     all_videos = db.scalars(_video_feed_query()).unique().all()
+    trusted_published_at_by_video_id = _trusted_published_at_by_video_id(all_videos, db)
     in_progress = [
         video
         for video in all_videos
@@ -147,7 +180,7 @@ def build_home_feed(db: Session, user_id: int) -> list[FeedSection]:
     random_pool = [video for video in all_videos if not progress_by_video.get(video.id)]
     recently_added = sorted(
         [video for video in all_videos if video.id not in watched_video_ids],
-        key=lambda video: video.created_at,
+        key=lambda video: _video_recency_timestamp(video, trusted_published_at_by_video_id),
         reverse=True,
     )
     in_progress_ids = {video.id for video in in_progress}
