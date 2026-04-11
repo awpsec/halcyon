@@ -228,13 +228,13 @@ npm run dev
 ## Default ports
 
 - App: `11111`
-- Postgres: `5432`
+- Postgres is internal to Docker and is not exposed on the host by default.
 
 ## Version
 
 Current release package:
 
-- `1.1.26-411.003`
+- `1.1.26-411.004`
 
 ## Credits
 

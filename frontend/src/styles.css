@@ -1880,6 +1880,14 @@ body,
   gap: 12px;
 }
 
+.admin-setup-phrase-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .admin-setup-phrase-copy {
   display: flex;
   flex-direction: column;
@@ -1957,6 +1965,10 @@ body,
 
   .admin-setup-download-button {
     width: fit-content;
+  }
+
+  .admin-setup-phrase-actions {
+    justify-content: flex-start;
   }
 }
 

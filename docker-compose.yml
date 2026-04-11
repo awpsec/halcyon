@@ -2,6 +2,7 @@ name: halcyon
 
 services:
   postgres:
+    container_name: postgres
     image: postgres:17-bookworm
     command:
       - postgres
@@ -15,8 +16,6 @@ services:
       - log_connections=off
       - -c
       - log_disconnections=off
-    ports:
-      - "5432:5432"
     environment:
       POSTGRES_DB: halcyon
       POSTGRES_USER: halcyon
@@ -30,6 +29,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
 
   web:
+    container_name: web
     build:
       context: .
       dockerfile: Dockerfile
@@ -52,6 +52,7 @@ services:
       - ./library:/library
 
   worker:
+    container_name: worker
     build:
       context: .
       dockerfile: Dockerfile
