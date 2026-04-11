@@ -1771,23 +1771,32 @@ async def apply_sync_item(
     channel_id = snippet.get("channelId")
 
     if video_id:
-        duplicate_match = db.scalar(
+        conflicting_matches = db.execute(
             select(YouTubeMatch)
             .options(joinedload(YouTubeMatch.video).joinedload(Video.files))
             .where(
                 YouTubeMatch.youtube_video_id == video_id,
                 YouTubeMatch.video_id != video.id,
             )
-            .limit(1)
-        )
-        if duplicate_match and duplicate_match.video:
-            logger.info(
-                "Sync merging duplicate video_id=%s duplicate_video_id=%s youtube_video_id=%s",
-                video.id,
-                duplicate_match.video_id,
-                video_id,
-            )
-            merge_duplicate_video_into_target(db, target_video=video, duplicate_video=duplicate_match.video)
+            .order_by(YouTubeMatch.id.asc())
+        ).unique().scalars().all()
+        for conflicting_match in conflicting_matches:
+            if conflicting_match.video:
+                logger.info(
+                    "Sync merging duplicate video_id=%s duplicate_video_id=%s youtube_video_id=%s",
+                    video.id,
+                    conflicting_match.video_id,
+                    video_id,
+                )
+                merge_duplicate_video_into_target(db, target_video=video, duplicate_video=conflicting_match.video)
+            else:
+                logger.warning(
+                    "Sync clearing stale youtube match id=%s youtube_video_id=%s",
+                    conflicting_match.id,
+                    video_id,
+                )
+                db.delete(conflicting_match)
+        db.flush()
 
     match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
     if not match:

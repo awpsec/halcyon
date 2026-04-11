@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -119,7 +119,7 @@ class VideoFile(TimestampMixin, Base):
     video_id: Mapped[int] = mapped_column(ForeignKey("videos.id"), index=True)
     absolute_path: Mapped[str] = mapped_column(String(2048), unique=True)
     relative_path: Mapped[str] = mapped_column(String(2048), index=True)
-    file_size: Mapped[int] = mapped_column(Integer, default=0)
+    file_size: Mapped[int] = mapped_column(BigInteger, default=0)
     modified_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     codec_summary: Mapped[str | None] = mapped_column(String(255), default=None)
     resolution: Mapped[str | None] = mapped_column(String(64), default=None)
@@ -358,7 +358,7 @@ class RetentionItem(TimestampMixin, Base):
     staged_absolute_path: Mapped[str] = mapped_column(String(2048), unique=True)
     original_relative_path: Mapped[str | None] = mapped_column(String(2048), default=None)
     original_video_created_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
-    file_size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    file_size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     file_fingerprint: Mapped[str | None] = mapped_column(String(128), default=None, index=True)
     marked_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
     delete_after_at: Mapped[datetime] = mapped_column(DateTime, index=True)

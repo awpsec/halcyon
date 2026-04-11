@@ -644,3 +644,29 @@ def test_scan_selected_folders_removes_missing_files_despite_reverted_history(tm
         assert job.details["removed"] == 2
         assert refreshed_file is None
         assert refreshed_video is None
+
+
+def test_scan_selected_folders_marks_job_failed_after_rollback(tmp_path: Path, monkeypatch):
+    library_root = tmp_path / "library"
+    library_root.mkdir(parents=True)
+    (library_root / "broken.mp4").write_bytes(b"broken-video")
+
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(library_root)])
+
+        def raise_failure(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(scanner_service, "upsert_video_for_path", raise_failure)
+
+        try:
+            scan_selected_folders(db, [library_root])
+        except RuntimeError as exc:
+            assert str(exc) == "boom"
+        else:
+            raise AssertionError("scan_selected_folders should have failed")
+
+        latest_job = db.scalar(select(scanner_service.ScanJob).order_by(scanner_service.ScanJob.id.desc()))
+        assert latest_job is not None
+        assert latest_job.status == "failed"
+        assert latest_job.details["error"] == "boom"

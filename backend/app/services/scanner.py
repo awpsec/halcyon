@@ -516,11 +516,14 @@ def scan_selected_folders(db: Session, mounted_roots: list[Path], *, trigger: st
             logger.info("%s scan completed discovered=%s total=%s removed=%s", trigger_label, discovered, total, removed)
         return job
     except Exception as exc:
-        job.status = "failed"
-        job.finished_at = datetime.utcnow()
-        job.details = {**(job.details or {}), "error": str(exc)}
-        db.commit()
-        db.refresh(job)
+        db.rollback()
+        failed_job = db.get(ScanJob, job.id)
+        if failed_job is not None:
+            failed_job.status = "failed"
+            failed_job.finished_at = datetime.utcnow()
+            failed_job.details = {**(failed_job.details or {}), "error": str(exc)}
+            db.commit()
+            db.refresh(failed_job)
         logger.exception("%s scan failed error=%s", trigger_label, exc)
         raise
 

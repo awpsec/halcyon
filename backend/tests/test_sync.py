@@ -1078,3 +1078,95 @@ def test_apply_sync_item_merges_duplicate_youtube_video_records(tmp_path: Path, 
         assert merged_progress.position_seconds == 321
         assert target_path.exists()
         assert not duplicate_path.exists()
+
+
+def test_apply_sync_item_clears_stale_duplicate_match_before_assigning(tmp_path: Path, monkeypatch):
+    def fake_settings() -> Settings:
+        return Settings(
+            mounted_roots=[],
+            config_dir=tmp_path / "config",
+            cache_dir=tmp_path / "cache",
+            background_tasks_enabled=False,
+        )
+
+    async def fake_ryd(*args, **kwargs):
+        return None
+
+    async def fake_channel_about(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(sync_service, "get_settings", fake_settings)
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_about)
+    monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
+
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(channel)
+        db.flush()
+
+        target_video = Video(
+            title="Target video",
+            slug="target-video",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=900,
+            is_available=True,
+        )
+        db.add(target_video)
+        db.flush()
+
+        db.add(
+            YouTubeMatch(
+                video_id=target_video.id + 999,
+                youtube_video_id="dup-stale-123",
+                youtube_channel_id="channel-psi",
+                status="matched",
+                confidence=0.5,
+                reasons=["stale"],
+            )
+        )
+        db.commit()
+        db.refresh(target_video)
+
+        item = {
+            "id": "dup-stale-123",
+            "snippet": {
+                "title": "Target video",
+                "channelTitle": "PsiSyndicate",
+                "channelId": "channel-psi",
+                "publishedAt": "2026-04-11T12:00:00Z",
+                "description": "Matched metadata",
+                "thumbnails": {},
+            },
+            "statistics": {
+                "viewCount": "1234",
+                "likeCount": "56",
+            },
+            "_waytube_duration_seconds": 900,
+            "_waytube_source": "watch-page",
+        }
+
+        async def run() -> None:
+            async with httpx.AsyncClient() as client:
+                await apply_sync_item(
+                    db,
+                    target_video,
+                    item,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                    api_key=None,
+                    confidence=0.93,
+                    reasons=["title", "duration-tight"],
+                    status="matched",
+                )
+
+        asyncio.run(run())
+
+        surviving_matches = db.scalars(
+            select(YouTubeMatch).where(YouTubeMatch.youtube_video_id == "dup-stale-123").order_by(YouTubeMatch.id.asc())
+        ).all()
+
+        assert len(surviving_matches) == 1
+        assert surviving_matches[0].video_id == target_video.id

@@ -56,6 +56,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     with engine.begin() as connection:
         inspector = inspect(connection)
+        dialect_name = connection.dialect.name
         user_columns = {column["name"] for column in inspector.get_columns("user_profiles")}
         if "password_hash" not in user_columns:
             connection.execute(text("ALTER TABLE user_profiles ADD COLUMN password_hash VARCHAR(255)"))
@@ -148,9 +149,20 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE retention_runs ADD COLUMN details JSON"))
             connection.execute(text("UPDATE retention_runs SET details = '{}' WHERE details IS NULL"))
 
+        video_file_columns_by_name = {
+            column["name"]: column for column in inspector.get_columns("video_files")
+        }
+        file_size_type = str(video_file_columns_by_name.get("file_size", {}).get("type", "")).upper()
+        if file_size_type and "BIGINT" not in file_size_type and dialect_name == "postgresql":
+            connection.execute(text("ALTER TABLE video_files ALTER COLUMN file_size TYPE BIGINT"))
+
         retention_item_columns_by_name = {
             column["name"]: column for column in inspector.get_columns("retention_items")
         }
+        file_size_bytes_type = str(retention_item_columns_by_name.get("file_size_bytes", {}).get("type", "")).upper()
+        if file_size_bytes_type and "BIGINT" not in file_size_bytes_type and dialect_name == "postgresql":
+            connection.execute(text("ALTER TABLE retention_items ALTER COLUMN file_size_bytes TYPE BIGINT"))
+
         if (
             retention_item_columns_by_name.get("video_id", {}).get("nullable") is False
             or retention_item_columns_by_name.get("video_file_id", {}).get("nullable") is False
