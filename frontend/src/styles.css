@@ -1602,6 +1602,17 @@ body,
   padding-inline: 12px;
 }
 
+.channel-section-heading {
+  min-height: 40px;
+}
+
+.channel-heading-spacer {
+  flex: 0 0 162px;
+  min-height: 40px;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .channel-sort-button strong {
   font-size: 0.84rem;
   font-weight: 700;
@@ -1697,6 +1708,12 @@ body,
 
 .channel-videos-heading {
   min-height: 40px;
+}
+
+@media (max-width: 760px) {
+  .channel-heading-spacer {
+    display: none;
+  }
 }
 
 .stats-grid {

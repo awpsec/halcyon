@@ -145,7 +145,7 @@ PLAYLIST_FOLDER_MARKERS = {
 
 
 def clean_path_label(value: str) -> str:
-    return clean_display_title(value.replace("_", " ").replace(".", " ").strip())
+    return clean_display_title(value.replace("_", " ").strip())
 
 
 def infer_series_name(value: str) -> str | None:
@@ -173,7 +173,7 @@ def infer_series_name(value: str) -> str | None:
 def split_title_parts(path: Path) -> tuple[str, str | None]:
     ellipsis_token = "HALCYONELLIPSISMARKER"
     stem = re.sub(r"\.{3,}", ellipsis_token, path.stem)
-    stem = clean_display_title(stem.replace("_", " ").replace(".", " ").strip()).replace(ellipsis_token, "...")
+    stem = clean_display_title(stem.replace("_", " ").strip()).replace(ellipsis_token, "...")
     parts = [part for part in path.parts if part not in (path.anchor,)]
     channel = parts[-3] if len(parts) >= 3 else (parts[-2] if len(parts) >= 2 else "Unknown Channel")
     series = clean_path_label(parts[-2]) if len(parts) >= 2 else infer_series_name(stem)
@@ -182,11 +182,23 @@ def split_title_parts(path: Path) -> tuple[str, str | None]:
     return stem, series
 
 
-def infer_folder_hints(path: Path) -> tuple[str, str, str | None]:
+def infer_folder_hints(path: Path, container_hint: str | None = None) -> tuple[str, str, str | None]:
     title, nested_series = split_title_parts(path)
     parts = [part for part in path.parts if part not in (path.anchor,)]
     folder_parts = list(parts[:-1])
     if not folder_parts:
+        if container_hint:
+            container_name = clean_path_label(container_hint)
+            container_tokens = set(tokenize_text(container_name))
+            title_tokens = set(tokenize_text(title))
+            overlap = len(container_tokens & title_tokens) / max(1, len(container_tokens)) if container_tokens else 0.0
+            playlistish = bool(container_tokens & PLAYLIST_FOLDER_MARKERS)
+            episodic = parse_episode_number(title) is not None
+            title_series = infer_series_name(title)
+            looks_like_series = playlistish or overlap >= 0.2 or (episodic and len(container_tokens) >= 2) or bool(title_series)
+            if looks_like_series:
+                return title, "Unknown Channel", infer_series_name(container_name) or title_series or container_name
+            return title, container_name or "Unknown Channel", title_series
         return title, "Unknown Channel", infer_series_name(title)
     if len(folder_parts) >= 2:
         return title, folder_parts[0], nested_series

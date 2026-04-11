@@ -276,7 +276,8 @@ def upsert_video_for_path(
 ) -> tuple[Video, str]:
     relative_path = file_path.relative_to(mounted_root).as_posix()
     classification_relative = file_path.relative_to(classification_root or mounted_root)
-    title, channel_hint, series_hint = infer_folder_hints(classification_relative)
+    container_hint = classification_root.name if classification_root and classification_root != mounted_root else None
+    title, channel_hint, series_hint = infer_folder_hints(classification_relative, container_hint=container_hint)
     episode_number = parse_episode_number(title)
     published_at = infer_published_at(file_path)
     fingerprint = fingerprint_file(file_path)

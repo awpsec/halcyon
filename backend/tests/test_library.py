@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -164,6 +165,25 @@ def test_scan_selected_folders_preserves_literal_ellipses_in_title(tmp_path: Pat
         assert video.title == "Wait... what happened here"
 
 
+def test_scan_selected_folders_preserves_decimal_episode_title(tmp_path: Path):
+    library_root = tmp_path / "library"
+    target_dir = library_root / "DayZ Mod (FRANKIEonPC)"
+    target_dir.mkdir(parents=True)
+    video_path = target_dir / "DEM DAYZ HACKZ! - Arma 2 DayZ Mod - Ep. 6.5.mp4"
+    video_path.write_bytes(b"fake-video-data")
+    stale_timestamp = datetime(2024, 1, 1).timestamp()
+    os.utime(video_path, (stale_timestamp, stale_timestamp))
+
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(library_root)])
+
+        scan_selected_folders(db, [library_root])
+        video = db.scalar(select(Video))
+
+        assert video is not None
+        assert video.title == "DEM DAYZ HACKZ! - Arma 2 DayZ Mod - Ep. 6.5"
+
+
 def test_scan_selected_folders_treats_one_folder_playlist_dump_as_series(tmp_path: Path):
     library_root = tmp_path / "library"
     playlist_dir = library_root / "ARMA 2 DayZ Overpoch Mod Series 2"
@@ -184,6 +204,33 @@ def test_scan_selected_folders_treats_one_folder_playlist_dump_as_series(tmp_pat
         assert db.get(Channel, video.channel_id).name == "Unknown Channel"
         assert db.get(Series, video.series_id).name == "ARMA 2 DayZ Overpoch Mod - Series 2"
         assert video.episode_number == 1
+
+
+def test_scan_selected_single_folder_playlist_dump_as_series(tmp_path: Path):
+    library_root = tmp_path / "library"
+    playlist_dir = library_root / "DayZ Mod (FRANKIEonPC)"
+    playlist_dir.mkdir(parents=True)
+    video_path = playlist_dir / "BATTLE OF THE BRIDGE! - Arma 2 DayZ Mod - Ep. 48.mp4"
+    video_path.write_bytes(b"fake-video-data")
+    stale_timestamp = datetime(2024, 1, 1).timestamp()
+    os.utime(video_path, (stale_timestamp, stale_timestamp))
+
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(library_root)])
+        root = db.scalar(select(LibraryRoot).where(LibraryRoot.path == str(library_root)))
+        db.add(SelectedFolder(root_id=root.id, relative_path="DayZ Mod (FRANKIEonPC)"))
+        db.commit()
+
+        scan_selected_folders(db, [library_root])
+
+        video = db.scalar(select(Video))
+
+        assert video is not None
+        assert video.series_id is not None
+        assert db.get(Series, video.series_id).name == "DayZ Mod (FRANKIEonPC)"
+        assert video.channel_id is not None
+        assert db.get(Channel, video.channel_id).name == "Unknown Channel"
+        assert video.title == "BATTLE OF THE BRIDGE! - Arma 2 DayZ Mod - Ep. 48"
 
 
 def test_scan_selected_folders_infers_series_from_root_level_title(tmp_path: Path):

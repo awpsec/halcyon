@@ -438,8 +438,9 @@ export function ChannelDetailPage({ profile }: { profile: Profile | null }) {
         <>
           {recentUploads.length ? (
             <section className="home-block">
-              <div className="section-heading">
+              <div className="section-heading channel-section-heading">
                 <h2>Recent Uploads</h2>
+                <div className="channel-heading-spacer" aria-hidden="true" />
               </div>
               <div className="video-grid-layout featured-grid">
                 {recentUploads.map((video: any) => (
@@ -450,8 +451,9 @@ export function ChannelDetailPage({ profile }: { profile: Profile | null }) {
           ) : null}
           {homeVideoCards.length ? (
             <section className="home-block" ref={homeVideosRef}>
-              <div className="section-heading">
+              <div className="section-heading channel-section-heading">
                 <h2>Videos</h2>
+                <div className="channel-heading-spacer" aria-hidden="true" />
               </div>
               <div className="video-grid-layout">
                 {homeVideoCards.map((video: any) => (
@@ -462,8 +464,9 @@ export function ChannelDetailPage({ profile }: { profile: Profile | null }) {
           ) : null}
           {seriesGroups.length ? (
             <section className="home-block">
-              <div className="section-heading">
+              <div className="section-heading channel-section-heading">
                 <h2>Series</h2>
+                <div className="channel-heading-spacer" aria-hidden="true" />
               </div>
               <div className="video-grid-layout">
               {seriesGroups.slice(0, 6).map((group) => (
@@ -494,7 +497,7 @@ export function ChannelDetailPage({ profile }: { profile: Profile | null }) {
 
       {activeTab === "Videos" ? (
         <section className="home-block">
-          <div className="section-heading channel-videos-heading">
+          <div className="section-heading channel-section-heading channel-videos-heading">
             <h2>All Videos</h2>
             <button
               className="ghost-button channel-sort-button"
@@ -530,25 +533,31 @@ export function ChannelDetailPage({ profile }: { profile: Profile | null }) {
 
       {activeTab === "Series" ? (
         seriesGroups.length ? (
-          <section className="video-grid-layout">
-            {seriesGroups.map((group) => (
-              <CollectionCard
-                key={group.name}
-                title={group.name}
-                subtitle={data.channel.name}
-                badge="Series"
-                thumbnailUrl={group.thumbnail_url}
-                stackedThumbnails={group.preview_thumbnails}
-                to={`/series/${group.id}`}
-                meta={`${group.videos.length} videos`}
-                menuItems={group.id ? [
-                  {
-                    label: group.videos.every((video: any) => video.user_saved) ? "Remove from saved" : "Add to saved",
-                    onSelect: () => toggleSeriesSaved(group.id, !group.videos.every((video: any) => video.user_saved)),
-                  },
-                ] : undefined}
-              />
-            ))}
+          <section className="home-block">
+            <div className="section-heading channel-section-heading">
+              <h2>Series</h2>
+              <div className="channel-heading-spacer" aria-hidden="true" />
+            </div>
+            <div className="video-grid-layout">
+              {seriesGroups.map((group) => (
+                <CollectionCard
+                  key={group.name}
+                  title={group.name}
+                  subtitle={data.channel.name}
+                  badge="Series"
+                  thumbnailUrl={group.thumbnail_url}
+                  stackedThumbnails={group.preview_thumbnails}
+                  to={`/series/${group.id}`}
+                  meta={`${group.videos.length} videos`}
+                  menuItems={group.id ? [
+                    {
+                      label: group.videos.every((video: any) => video.user_saved) ? "Remove from saved" : "Add to saved",
+                      onSelect: () => toggleSeriesSaved(group.id, !group.videos.every((video: any) => video.user_saved)),
+                    },
+                  ] : undefined}
+                />
+              ))}
+            </div>
           </section>
         ) : (
           <EmptyState message="This channel has no grouped series yet." />
