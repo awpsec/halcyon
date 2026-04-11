@@ -27,8 +27,8 @@ type Props = {
 };
 
 const baseNavItems = [
-  { to: "/", label: "Home" },
-  { to: "/channels", label: "Subscriptions" },
+  { to: "/", label: "Home", end: true },
+  { to: "/channels", label: "Subscriptions", end: true },
   { to: "/playlists", label: "Playlists" },
 ];
 
@@ -300,7 +300,7 @@ export function AppShell({
         >
           {!isWatchPage
             ? navItems.map((item) => (
-                <NavLink key={item.to} className="nav-link" to={item.to}>
+                <NavLink key={item.to} className="nav-link" to={item.to} end={item.end}>
                   {item.label}
                 </NavLink>
               ))
