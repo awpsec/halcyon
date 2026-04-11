@@ -2586,7 +2586,7 @@ def get_sync_settings(
         settings_row = SyncSettings(
             comment_limit=100,
             automatic_detection_enabled=True,
-            scan_interval_seconds=30,
+            scan_interval_seconds=max(5, min(settings.scan_interval_seconds, 3600)),
         )
         db.add(settings_row)
         db.commit()
@@ -2600,7 +2600,7 @@ def get_sync_settings(
         db.commit()
         db.refresh(settings_row)
     if not settings_row.scan_interval_seconds:
-        settings_row.scan_interval_seconds = 30
+        settings_row.scan_interval_seconds = max(5, min(settings.scan_interval_seconds, 3600))
         db.commit()
         db.refresh(settings_row)
     if not settings_row.requests_per_second:

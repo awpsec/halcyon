@@ -1,6 +1,7 @@
 from sqlalchemy import func, inspect, text
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.timezone import server_timezone_name
 from app.db.session import engine
@@ -12,6 +13,7 @@ DEFAULT_USER_AVATAR = "/assets/branding/default_avi.png"
 DEFAULT_ADMIN_USERNAME = "admin"
 
 logger = get_logger()
+settings = get_settings()
 
 
 def init_db() -> None:
@@ -310,7 +312,13 @@ def seed_defaults(db: Session, mounted_roots: list[str], *, include_demo_users: 
         db.delete(root)
 
     if not db.query(SyncSettings).count():
-        db.add(SyncSettings(automatic_detection_enabled=True, scan_interval_seconds=30, allow_fallback_art=False))
+        db.add(
+            SyncSettings(
+                automatic_detection_enabled=True,
+                scan_interval_seconds=max(5, min(settings.scan_interval_seconds, 3600)),
+                allow_fallback_art=False,
+            )
+        )
     if not db.query(RetentionSettings).count():
         db.add(
             RetentionSettings(

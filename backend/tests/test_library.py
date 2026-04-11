@@ -4,8 +4,10 @@ from pathlib import Path
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+import app.db.init_db as init_db_module
 import app.services.scanner as scanner_service
-from app.api.routes import _scan_library_storage_bytes, _selected_storage_roots, library_storage
+from app.api import routes as routes_module
+from app.api.routes import _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage
 from app.db.init_db import seed_defaults
 from app.models.base import Base
 from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, UserProfile, Video, VideoFile
@@ -34,6 +36,34 @@ def test_seed_defaults_creates_profiles_and_roots(tmp_path: Path):
         assert len(admin.recovery_phrase_pending.split()) == 6
         assert len(roots) == 1
         assert roots[0].path == str(tmp_path / "library")
+
+
+def test_seed_defaults_uses_configured_scan_interval_for_initial_sync_settings(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        configured = type("SettingsStub", (), {"scan_interval_seconds": 900})()
+        monkeypatch.setattr(init_db_module, "settings", configured)
+
+        seed_defaults(db, [str(tmp_path / "library")])
+
+        sync_settings = db.scalar(select(init_db_module.SyncSettings))
+
+        assert sync_settings is not None
+        assert sync_settings.scan_interval_seconds == 900
+
+
+def test_get_sync_settings_uses_configured_scan_interval_when_row_is_missing(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        admin = UserProfile(name="admin", display_name="Admin", accent_color="#fff", is_admin=True)
+        db.add(admin)
+        db.commit()
+        db.refresh(admin)
+
+        configured = type("SettingsStub", (), {"scan_interval_seconds": 900, "youtube_api_key": None})()
+        monkeypatch.setattr(routes_module, "settings", configured)
+
+        sync_settings = get_sync_settings(db=db, current_user=admin)
+
+        assert sync_settings.scan_interval_seconds == 900
 
 
 def test_seed_defaults_preserves_existing_avatar(tmp_path: Path):
