@@ -109,6 +109,8 @@ That starts:
 - `halcyon-web`
 - `halcyon-worker`
 
+The shipped compose file uses a `60` second background scan interval by default. If you want slower or faster automatic onboarding, edit `HALCYON_SCAN_INTERVAL_SECONDS` in `docker-compose.yml`.
+
 ### 5. Optional: install the `halcyon` command
 
 If you want reusable helper commands like `halcyon status` and `halcyon update`, run the bootstrap step once:
@@ -167,6 +169,8 @@ Then:
 4. Set the permanent admin password
 
 Keep the recovery phrase. If you ever lose the admin password, that phrase is what the recovery flow depends on.
+
+halcyon writes rotating application logs to `./data/config/halcyon.log`. `docker compose logs` should stay focused on useful service status, while the file log keeps the fuller application history.
 
 ## Recommended after setup
 
@@ -230,7 +234,7 @@ npm run dev
 
 Current release package:
 
-- `1.1.26-410.004`
+- `1.1.26-411.001`
 
 ## Credits
 

@@ -3,6 +3,18 @@ name: halcyon
 services:
   halcyon-postgres:
     image: postgres:17-bookworm
+    command:
+      - postgres
+      - -c
+      - log_min_messages=warning
+      - -c
+      - client_min_messages=warning
+      - -c
+      - log_checkpoints=off
+      - -c
+      - log_connections=off
+      - -c
+      - log_disconnections=off
     ports:
       - "5432:5432"
     environment:
@@ -31,7 +43,7 @@ services:
       HALCYON_CACHE_DIR: /cache
       HALCYON_MOUNTED_ROOTS: '["/library"]'
       HALCYON_DATABASE_URL: postgresql+psycopg://halcyon:halcyon@halcyon-postgres:5432/halcyon
-      HALCYON_SCAN_INTERVAL_SECONDS: "900"
+      HALCYON_SCAN_INTERVAL_SECONDS: "60"
       HALCYON_BACKGROUND_TASKS_ENABLED: "false"
       HALCYON_YOUTUBE_API_KEY: "${HALCYON_YOUTUBE_API_KEY:-}"
     volumes:
@@ -52,7 +64,7 @@ services:
       HALCYON_CACHE_DIR: /cache
       HALCYON_MOUNTED_ROOTS: '["/library"]'
       HALCYON_DATABASE_URL: postgresql+psycopg://halcyon:halcyon@halcyon-postgres:5432/halcyon
-      HALCYON_SCAN_INTERVAL_SECONDS: "900"
+      HALCYON_SCAN_INTERVAL_SECONDS: "60"
       HALCYON_YOUTUBE_API_KEY: "${HALCYON_YOUTUBE_API_KEY:-}"
     volumes:
       - ./data/config:/config
