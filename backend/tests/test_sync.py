@@ -14,6 +14,7 @@ from app.models.entities import Channel, LibraryRoot, RetentionItem, SelectedFol
 from app.services.media import fingerprint_file
 from app.services.scanner import scan_selected_folders
 from app.services.sync import apply_sync_item, auto_organize_channel_files, fetch_channel_about_details, sync_scope, sync_video
+from app.services.utils import slugify
 
 
 def make_session(tmp_path: Path) -> Session:
@@ -67,6 +68,11 @@ def test_fetch_channel_about_details_parses_counts_without_api(monkeypatch):
     assert result["subscriber_count"] == 4_490_000
     assert result["view_count"] == 5_135_286_525
     assert result["video_count"] == 6_945
+
+
+def test_slugify_collapses_apostrophes_without_extra_dash() -> None:
+    assert slugify("Moore's Law is Dead") == "moores-law-is-dead"
+    assert slugify("Moore’s Law is Dead") == "moores-law-is-dead"
 
 
 def test_sync_video_uses_recent_channel_uploads_when_title_search_misses(tmp_path: Path, monkeypatch):

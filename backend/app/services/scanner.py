@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models.entities import (
     Channel,
+    LibraryRoot,
     MetadataOverride,
     PlaylistItem,
     QueueItem,
@@ -38,6 +39,7 @@ settings = get_settings()
 logger = get_logger()
 SCAN_STALE_AFTER = timedelta(minutes=10)
 SCAN_MIN_STABLE_AGE = timedelta(seconds=45)
+DEFAULT_LIBRARY_SENTINEL = ".halcyon-library-root"
 TEMP_DOWNLOAD_MARKERS = (
     ".part",
     ".ytdl",
@@ -461,12 +463,18 @@ def scan_selected_folders(db: Session, mounted_roots: list[Path], *, trigger: st
         for item in selected:
             if item.root:
                 selected_map.setdefault(item.root.path, []).append(item.relative_path)
+        available_roots = {
+            root.path
+            for root in db.scalars(select(LibraryRoot).where(LibraryRoot.is_available.is_(True))).all()
+        }
 
         candidates: list[tuple[Path, Path, Path]] = []
         managed_roots: list[Path] = []
         excluded_scan_roots = _retention_scan_excluded_roots(db, mounted_roots)
         for root in mounted_roots:
-            roots_to_scan = selected_map.get(str(root), [""])
+            roots_to_scan = selected_map.get(str(root))
+            if roots_to_scan is None:
+                roots_to_scan = [""] if _uses_implicit_root_selection(root, available_roots) else []
             for relative in roots_to_scan:
                 target_root = root / relative if relative else root
                 classification_root = target_root if relative and len(Path(relative).parts) == 1 else root
@@ -524,3 +532,12 @@ def scan_selected_folders_if_idle(db: Session, mounted_roots: list[Path], *, tri
     if running and running.status == "running":
         return None
     return scan_selected_folders(db, mounted_roots, trigger=trigger)
+
+
+def _uses_implicit_root_selection(root: Path, available_root_paths: set[str]) -> bool:
+    normalized = root.as_posix().rstrip("/")
+    if len(available_root_paths) != 1 or str(root) not in available_root_paths:
+        return False
+    if normalized == "/library":
+        return (root / DEFAULT_LIBRARY_SENTINEL).exists()
+    return root.name == "library"

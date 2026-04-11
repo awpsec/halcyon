@@ -1,13 +1,13 @@
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 import app.db.init_db as init_db_module
 import app.services.scanner as scanner_service
 from app.api import routes as routes_module
-from app.api.routes import _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage, list_roots, list_selected_folders
+from app.api.routes import _indexed_library_storage_bytes, _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage, list_roots, list_selected_folders
 from app.db.init_db import seed_defaults
 from app.models.base import Base
 from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, UserProfile, Video, VideoFile
@@ -51,6 +51,22 @@ def test_library_routes_expose_implicit_root_selection_when_none_exist(tmp_path:
         assert selected[0].root_id == roots[0].id
         assert selected[0].relative_path == ""
         assert selected[0].id < 0
+
+
+def test_library_routes_do_not_expose_implicit_root_selection_for_custom_mount(tmp_path: Path):
+    custom_root = tmp_path / "users" / "zedd"
+    custom_root.mkdir(parents=True)
+
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(custom_root)])
+
+        roots = list_roots(db=db, current_user=object())
+        selected = list_selected_folders(db=db, current_user=object())
+
+        assert len(roots) == 1
+        assert roots[0].path == str(custom_root)
+        assert roots[0].selected_count == 0
+        assert selected == []
 
 
 def test_seed_defaults_uses_configured_scan_interval_for_initial_sync_settings(tmp_path: Path, monkeypatch):
@@ -401,16 +417,52 @@ def test_library_storage_counts_nested_selected_folder_bytes(tmp_path: Path):
         assert total_bytes == 28
 
 
+def test_library_storage_without_selection_uses_only_default_library_root(tmp_path: Path):
+    custom_root = tmp_path / "users" / "zedd"
+    custom_root.mkdir(parents=True)
+
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(custom_root)])
+
+        content_roots = _selected_storage_roots(db)
+
+        assert content_roots == []
+
+
 def test_library_storage_route_uses_selected_roots_without_crashing(tmp_path: Path):
     library_root = tmp_path / "library"
     selected_root = library_root / "youtube"
     selected_root.mkdir(parents=True)
-    (selected_root / "video.mp4").write_bytes(b"x" * 13)
+    video_path = selected_root / "video.mp4"
+    video_path.write_bytes(b"x" * 13)
 
     with make_session(tmp_path) as db:
         seed_defaults(db, [str(library_root)])
         root = db.scalar(select(LibraryRoot).where(LibraryRoot.path == str(library_root)))
         db.add(SelectedFolder(root_id=root.id, relative_path="youtube"))
+        db.flush()
+
+        channel = Channel(name="Indexed", slug="indexed-storage")
+        db.add(channel)
+        db.flush()
+        video = Video(
+            title="Indexed storage video",
+            slug="indexed-storage-video",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(video_path),
+                relative_path="youtube/video.mp4",
+                file_size=13,
+                fingerprint="d" * 64,
+            )
+        )
         db.commit()
 
         data = library_storage(db=db, current_user=object())
@@ -418,6 +470,65 @@ def test_library_storage_route_uses_selected_roots_without_crashing(tmp_path: Pa
         assert data["library_bytes"] == 13
         assert data["root_count"] == 1
         assert data["total_bytes"] >= data["available_bytes"] >= 0
+
+
+def test_indexed_library_storage_uses_db_files_instead_of_walking_root(tmp_path: Path):
+    library_root = tmp_path / "library"
+    selected_root = library_root / "youtube"
+    selected_root.mkdir(parents=True)
+    indexed_video_path = selected_root / "video.mp4"
+    indexed_video_path.write_bytes(b"x" * 13)
+    (library_root / "backups").mkdir(parents=True)
+    (library_root / "backups" / "ignored.mp4").write_bytes(b"y" * 999)
+
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(library_root)])
+        root = db.scalar(select(LibraryRoot).where(LibraryRoot.path == str(library_root)))
+        db.add(SelectedFolder(root_id=root.id, relative_path="youtube"))
+        db.flush()
+
+        channel = Channel(name="Indexed", slug="indexed")
+        db.add(channel)
+        db.flush()
+        video = Video(
+            title="Indexed video",
+            slug="indexed-video",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(indexed_video_path),
+                relative_path="youtube/video.mp4",
+                file_size=13,
+                fingerprint="c" * 64,
+            )
+        )
+        db.commit()
+
+        content_roots = _selected_storage_roots(db)
+
+        assert _scan_library_storage_bytes(content_roots) == 13
+        assert _indexed_library_storage_bytes(db, content_roots) == 13
+
+
+def test_scan_selected_folders_without_selection_skips_custom_mount_root(tmp_path: Path):
+    custom_root = tmp_path / "users" / "zedd"
+    custom_root.mkdir(parents=True)
+    (custom_root / "youtube").mkdir()
+    (custom_root / "youtube" / "video.mp4").write_bytes(b"video-data")
+
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(custom_root)])
+
+        job = scan_selected_folders(db, [custom_root])
+
+        assert job.details["discovered"] == 0
+        assert db.scalar(select(func.count(Video.id))) == 0
 
 
 def test_scan_selected_folders_preserves_retention_error_rows(tmp_path: Path):

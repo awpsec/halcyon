@@ -1396,22 +1396,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
     }
   }
 
-  if (
-    !profile ||
-    (isAdmin &&
-      (
-        syncState.loading ||
-        rootsState.loading ||
-        selectedState.loading ||
-        storageState.loading ||
-        jobsState.loading ||
-        logsState.loading ||
-        transcodesState.loading ||
-        uploadsState.loading ||
-        retentionState.loading ||
-        profilesState.loading
-      ))
-  ) {
+  if (!profile) {
     return <SettingsPageSkeleton />;
   }
 

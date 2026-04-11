@@ -109,7 +109,9 @@ def tokens_match_query(haystack: str, query: str) -> bool:
 
 
 def slugify(value: str) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
+    # Apostrophes should collapse words together, not create extra dashes.
+    collapsed = re.sub(r"[\'’`]+", "", value.strip().lower())
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "-", collapsed).strip("-")
     return normalized or "item"
 
 

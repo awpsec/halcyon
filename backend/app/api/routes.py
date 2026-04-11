@@ -145,6 +145,7 @@ AUTH_RESET_LIMIT = 5
 AUTH_RESET_WINDOW_SECONDS = 15 * 60
 AUTH_ADMIN_RECOVERY_LIMIT = 5
 AUTH_ADMIN_RECOVERY_WINDOW_SECONDS = 15 * 60
+DEFAULT_LIBRARY_SENTINEL = ".halcyon-library-root"
 
 
 def _normalize_fs_path(value: str | Path) -> str:
@@ -181,8 +182,9 @@ def _selected_storage_roots(db: Session) -> list[Path]:
             root_path = Path(row.root.path)
             candidates.append(root_path / row.relative_path if row.relative_path else root_path)
     else:
-        roots = db.scalars(select(LibraryRoot).order_by(LibraryRoot.id.asc())).all()
-        candidates.extend(Path(root.path) for root in roots)
+        roots = db.scalars(select(LibraryRoot).where(LibraryRoot.is_available.is_(True)).order_by(LibraryRoot.id.asc())).all()
+        implicit_roots = [root for root in roots if _uses_implicit_root_selection(root, len(roots))]
+        candidates.extend(Path(root.path) for root in implicit_roots)
     return _dedupe_storage_roots(candidates)
 
 
@@ -193,9 +195,9 @@ def _selected_folder_counts_by_root(db: Session) -> dict[int, int]:
             select(SelectedFolder.root_id, func.count(SelectedFolder.id)).group_by(SelectedFolder.root_id)
         ).all()
     }
-    roots = db.scalars(select(LibraryRoot).order_by(LibraryRoot.id.asc())).all()
+    roots = db.scalars(select(LibraryRoot).where(LibraryRoot.is_available.is_(True)).order_by(LibraryRoot.id.asc())).all()
     for root in roots:
-        if root.is_available and counts.get(root.id, 0) == 0:
+        if counts.get(root.id, 0) == 0 and _uses_implicit_root_selection(root, len(roots)):
             counts[root.id] = 1
     return counts
 
@@ -204,8 +206,9 @@ def _effective_selected_folders(db: Session) -> list[SelectedFolderOut]:
     actual_rows = db.scalars(select(SelectedFolder).order_by(SelectedFolder.id.asc())).all()
     items = [SelectedFolderOut.model_validate(row) for row in actual_rows]
     actual_root_ids = {row.root_id for row in actual_rows}
-    for root in db.scalars(select(LibraryRoot).order_by(LibraryRoot.id.asc())).all():
-        if not root.is_available or root.id in actual_root_ids:
+    roots = db.scalars(select(LibraryRoot).where(LibraryRoot.is_available.is_(True)).order_by(LibraryRoot.id.asc())).all()
+    for root in roots:
+        if root.id in actual_root_ids or not _uses_implicit_root_selection(root, len(roots)):
             continue
         items.append(
             SelectedFolderOut(
@@ -216,6 +219,16 @@ def _effective_selected_folders(db: Session) -> list[SelectedFolderOut]:
             )
         )
     return items
+
+
+def _uses_implicit_root_selection(root: LibraryRoot, available_root_count: int) -> bool:
+    if available_root_count != 1:
+        return False
+    root_path = Path(root.path)
+    normalized = root_path.as_posix().rstrip("/")
+    if normalized == "/library":
+        return (root_path / DEFAULT_LIBRARY_SENTINEL).exists()
+    return root_path.name == "library"
 
 
 def _is_transient_video_artifact(path: Path) -> bool:
@@ -245,6 +258,27 @@ def _scan_library_storage_bytes(content_roots: list[Path]) -> int:
                     total_bytes += int(file_path.stat().st_size)
                 except OSError:
                     continue
+    return total_bytes
+
+
+def _indexed_library_storage_bytes(db: Session, content_roots: list[Path]) -> int:
+    if not content_roots:
+        return 0
+
+    normalized_roots = [_normalize_fs_path(root) for root in content_roots]
+    total_bytes = 0
+    rows = db.execute(
+        select(VideoFile.absolute_path, VideoFile.file_size)
+        .join(Video, Video.id == VideoFile.video_id)
+        .where(Video.is_available.is_(True))
+    ).all()
+    for absolute_path, file_size in rows:
+        normalized_path = _normalize_fs_path(absolute_path)
+        if any(
+            normalized_path == normalized_root or normalized_path.startswith(f"{normalized_root}\\")
+            for normalized_root in normalized_roots
+        ):
+            total_bytes += int(file_size or 0)
     return total_bytes
 
 
@@ -1510,7 +1544,7 @@ def library_storage(
 ) -> dict:
     del current_user
     content_roots = _selected_storage_roots(db)
-    total_library_bytes = _scan_library_storage_bytes(content_roots)
+    total_library_bytes = _indexed_library_storage_bytes(db, content_roots)
     volume_usage: dict[int, tuple[int, int]] = {}
 
     for root in content_roots:
