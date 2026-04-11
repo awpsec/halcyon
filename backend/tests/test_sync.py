@@ -75,6 +75,42 @@ def test_slugify_collapses_apostrophes_without_extra_dash() -> None:
     assert slugify("Moore’s Law is Dead") == "moores-law-is-dead"
 
 
+def test_normalize_youtube_api_quota_resets_stale_day(tmp_path: Path) -> None:
+    with make_session(tmp_path) as db:
+        settings_row = SyncSettings(
+            youtube_api_quota_day="2026-04-10",
+            youtube_api_quota_used_units=7300,
+        )
+        db.add(settings_row)
+        db.commit()
+        db.refresh(settings_row)
+
+        changed = sync_service.normalize_youtube_api_quota(settings_row, now=datetime.fromisoformat("2026-04-11T12:00:00+00:00"))
+
+        assert changed is True
+        assert settings_row.youtube_api_quota_day == sync_service.current_youtube_quota_day(datetime.fromisoformat("2026-04-11T12:00:00+00:00"))
+        assert settings_row.youtube_api_quota_used_units == 0
+
+
+def test_build_youtube_api_quota_summary_clamps_remaining_values(tmp_path: Path) -> None:
+    with make_session(tmp_path) as db:
+        settings_row = SyncSettings(
+            youtube_api_quota_day="2026-04-11",
+            youtube_api_quota_used_units=12_500,
+        )
+        db.add(settings_row)
+        db.commit()
+        db.refresh(settings_row)
+
+        summary = sync_service.build_youtube_api_quota_summary(settings_row)
+
+        assert summary["youtube_api_quota_daily_limit"] == 10_000
+        assert summary["youtube_api_quota_used_units"] == 10_000
+        assert summary["youtube_api_quota_remaining_units"] == 0
+        assert summary["youtube_api_quota_remaining_percent"] == 0
+        assert summary["youtube_api_quota_estimated"] is True
+
+
 def test_choose_playlist_series_title_prefers_exact_membership_and_non_generic_playlist(tmp_path: Path) -> None:
     with make_session(tmp_path) as db:
         channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
@@ -363,6 +399,134 @@ def test_sync_video_uses_neighbor_title_channel_hints_for_orphans_without_api(tm
         assert result.status == "matched"
         assert result.youtube_channel_id == "channel-asmongold"
         assert any("Asmongold TV" in query for query in captured_queries)
+
+
+def test_sync_video_uses_series_neighbor_channel_hints_for_new_episode_without_api(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        known_channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
+        unknown_channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        series = Series(name="DayZ Mod (FRANKIEonPC)", slug="dayz-mod-frankieonpc")
+        db.add_all([known_channel, unknown_channel, series])
+        db.flush()
+
+        matched_path = tmp_path / "library" / "series-known.mp4"
+        matched_path.parent.mkdir(parents=True, exist_ok=True)
+        matched_path.write_bytes(b"known")
+        matched_video = Video(
+            title="BATTLE OF THE BRIDGE! - Arma 2: DayZ Mod - Ep 48",
+            slug="battle-of-the-bridge-ep-48",
+            channel_id=known_channel.id,
+            series_id=series.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=1800,
+            published_at=datetime(2026, 4, 11),
+            is_available=True,
+        )
+        db.add(matched_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=matched_video.id,
+                absolute_path=str(matched_path),
+                relative_path="series-known.mp4",
+                file_size=matched_path.stat().st_size,
+                fingerprint="e" * 64,
+            )
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=matched_video.id,
+                youtube_video_id="bridge48",
+                youtube_channel_id="channel-frankie",
+                status="matched",
+                confidence=1.0,
+                reasons=["known-channel"],
+            )
+        )
+
+        target_path = tmp_path / "library" / "series-new.mp4"
+        target_path.write_bytes(b"target")
+        target_video = Video(
+            title="DEM DAYZ HACKZ! - Arma 2: DayZ Mod - Ep. 6.5",
+            slug="dem-dayz-hackz-ep-6-5",
+            channel_id=unknown_channel.id,
+            series_id=series.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=1795,
+            published_at=datetime(2026, 4, 11),
+            is_available=True,
+        )
+        db.add(target_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=target_video.id,
+                absolute_path=str(target_path),
+                relative_path="series-new.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="f" * 64,
+            )
+        )
+        db.commit()
+
+        captured_queries: list[str] = []
+
+        async def fake_fetch_fallback_candidates(client, queries, requests_per_second, status_callback=None):
+            captured_queries.extend(queries)
+            return [
+                {
+                    "id": "hackz65",
+                    "snippet": {
+                        "title": "DEM DAYZ HACKZ! - Arma 2: DayZ Mod - Ep. 6.5",
+                        "channelTitle": "FRANKIEonPCin1080p",
+                        "channelId": "channel-frankie",
+                        "publishedAt": "2026-04-11T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 1795,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert result.youtube_channel_id == "channel-frankie"
+        assert any("FRANKIEonPCin1080p" in query for query in captured_queries)
 
 
 def test_force_sync_refreshes_existing_match_by_id_before_researching(tmp_path: Path, monkeypatch):

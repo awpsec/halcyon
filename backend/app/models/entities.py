@@ -316,6 +316,8 @@ class SyncSettings(TimestampMixin, Base):
     requests_per_second: Mapped[int] = mapped_column(Integer, default=3)
     last_library_sync_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     youtube_api_key: Mapped[str | None] = mapped_column(String(255), default=None)
+    youtube_api_quota_day: Mapped[str | None] = mapped_column(String(16), default=None)
+    youtube_api_quota_used_units: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class RetentionSettings(TimestampMixin, Base):

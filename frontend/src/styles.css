@@ -6071,6 +6071,45 @@ body,
   max-width: 360px;
 }
 
+.settings-page .settings-quota-meter {
+  max-width: 360px;
+  display: grid;
+  gap: 8px;
+  margin-top: -6px;
+}
+
+.settings-page .settings-quota-meter-header,
+.settings-page .settings-quota-meter-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.settings-page .settings-quota-meter-header strong {
+  color: var(--text);
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.settings-page .settings-quota-meter-bar {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel-strong) 70%, var(--text-muted));
+  border: 1px solid color-mix(in srgb, var(--panel-border) 78%, transparent);
+  overflow: hidden;
+}
+
+.settings-page .settings-quota-meter-fill {
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  transition: width 180ms ease, background 180ms ease;
+}
+
 .settings-page .settings-inline-select-wrap {
   display: inline-flex;
   width: 100%;

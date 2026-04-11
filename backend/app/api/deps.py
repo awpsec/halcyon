@@ -15,17 +15,26 @@ settings = get_settings()
 def resolve_session_token(db: Session, raw_session_token: str | None) -> SessionToken | None:
     if not raw_session_token:
         return None
-    hashed = hash_session_token(raw_session_token)
-    token = db.scalar(
+    if is_hashed_session_token(raw_session_token):
+        return None
+    legacy_token = db.scalar(
         select(SessionToken)
-        .where(SessionToken.token.in_([hashed, raw_session_token]))
+        .where(SessionToken.token == raw_session_token)
         .order_by(SessionToken.id.asc())
         .limit(1)
     )
-    if token and not is_hashed_session_token(token.token):
-        token.token = hashed
+    if legacy_token:
+        legacy_token.token = hash_session_token(raw_session_token)
         db.commit()
-        db.refresh(token)
+        db.refresh(legacy_token)
+        return legacy_token
+    hashed = hash_session_token(raw_session_token)
+    token = db.scalar(
+        select(SessionToken)
+        .where(SessionToken.token == hashed)
+        .order_by(SessionToken.id.asc())
+        .limit(1)
+    )
     return token
 
 

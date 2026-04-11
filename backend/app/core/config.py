@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     youtube_api_key: str | None = None
     ffmpeg_bin_dir: Path | None = None
     session_cookie_name: str = "halcyon_session"
+    session_cookie_secure: bool = False
     scan_interval_seconds: int = 30
     background_tasks_enabled: bool = True
     transcode_cache_limit_mb: int = 20480

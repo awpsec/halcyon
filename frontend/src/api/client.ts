@@ -213,6 +213,11 @@ export type SyncSettings = {
   requests_per_second: number;
   last_library_sync_at: string | null;
   youtube_api_key?: string | null;
+  youtube_api_quota_daily_limit: number;
+  youtube_api_quota_used_units: number;
+  youtube_api_quota_remaining_units: number;
+  youtube_api_quota_remaining_percent: number;
+  youtube_api_quota_estimated: boolean;
 };
 
 export type RetentionSettings = {

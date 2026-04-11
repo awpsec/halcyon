@@ -353,6 +353,23 @@ def test_legacy_plaintext_session_token_is_migrated_on_use(tmp_path: Path):
         assert stored_token == hash_session_token("legacy-token")
 
 
+def test_hashed_session_token_is_not_accepted_as_client_credential(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(tmp_path / "library")])
+        guest = db.scalar(select(UserProfile).where(UserProfile.name == "guest"))
+        assert guest is not None
+        db.add(SessionToken(token=hash_session_token("real-session"), user_id=guest.id))
+        db.commit()
+
+        assert resolve_session_token(db, hash_session_token("real-session")) is None
+
+        try:
+            get_current_user(db=db, session_token=hash_session_token("real-session"))
+            assert False, "Expected hashed session token rejection"
+        except HTTPException as error:
+            assert error.status_code == 401
+
+
 def test_switch_and_logout_work_with_hashed_session_tokens(tmp_path: Path):
     with make_session(tmp_path) as db:
         seed_defaults(db, [str(tmp_path / "library")])

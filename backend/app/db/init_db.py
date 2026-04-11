@@ -91,6 +91,11 @@ def init_db() -> None:
         if "requests_per_second" not in sync_columns:
             connection.execute(text("ALTER TABLE sync_settings ADD COLUMN requests_per_second INTEGER DEFAULT 3"))
             connection.execute(text("UPDATE sync_settings SET requests_per_second = 3 WHERE requests_per_second IS NULL"))
+        if "youtube_api_quota_day" not in sync_columns:
+            connection.execute(text("ALTER TABLE sync_settings ADD COLUMN youtube_api_quota_day VARCHAR(16)"))
+        if "youtube_api_quota_used_units" not in sync_columns:
+            connection.execute(text("ALTER TABLE sync_settings ADD COLUMN youtube_api_quota_used_units INTEGER DEFAULT 0"))
+            connection.execute(text("UPDATE sync_settings SET youtube_api_quota_used_units = 0 WHERE youtube_api_quota_used_units IS NULL"))
         if "prefer_high_res_banners" not in sync_columns:
             connection.execute(text("ALTER TABLE sync_settings ADD COLUMN prefer_high_res_banners BOOLEAN DEFAULT FALSE"))
             connection.execute(text("UPDATE sync_settings SET prefer_high_res_banners = FALSE WHERE prefer_high_res_banners IS NULL"))

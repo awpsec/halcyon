@@ -1,17 +1,17 @@
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.routes import add_playlist_item, create_playlist, router, update_progress
+from app.api.routes import add_playlist_item, complete_admin_setup, create_playlist, login, router, update_progress
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.base import Base
 from app.models.entities import Channel, Playlist, SessionToken, UserProfile, Video, VideoFile, WatchHistory, WatchProgress
-from app.schemas.common import PlaylistCreateIn, ProgressIn, QueueItemIn
+from app.schemas.common import AdminSetupIn, LoginIn, PlaylistCreateIn, ProgressIn, QueueItemIn
 from app.services.auth import hash_session_token
 
 
@@ -27,6 +27,12 @@ def create_user(db: Session, name: str) -> UserProfile:
     db.commit()
     db.refresh(user)
     return user
+
+
+class DummyRequest:
+    def __init__(self, host: str):
+        self.client = type("Client", (), {"host": host})()
+        self.headers: dict[str, str] = {}
 
 
 def create_video(db: Session, tmp_path: Path) -> Video:
@@ -154,3 +160,43 @@ def test_video_stream_requires_authentication(tmp_path: Path):
         assert unauthenticated.status_code == 401
         assert authenticated.status_code == 200
         assert authenticated.content == b"video-data"
+
+
+def test_representative_routes_require_authentication_and_admin_routes_reject_regular_users(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        admin = UserProfile(
+            name="admin",
+            display_name="Admin",
+            accent_color="#fff",
+            is_admin=True,
+            requires_admin_setup=True,
+            password_hash=hash_session_token("placeholder"),
+        )
+        user = create_user(db, "owner")
+        db.add(admin)
+        db.commit()
+        db.refresh(admin)
+        client = make_client(db)
+
+        unauthenticated_paths = [
+            "/api/session/me",
+            "/api/home",
+            "/api/library/videos",
+            "/api/jobs/status",
+        ]
+        for path in unauthenticated_paths:
+            response = client.get(path)
+            assert response.status_code == 401, path
+
+        admin_only_paths = [
+            "/api/session/profiles",
+            "/api/sync/settings",
+            "/api/library/roots",
+            "/api/logs",
+        ]
+        db.add(SessionToken(token=hash_session_token("user-session"), user_id=user.id))
+        db.commit()
+        client.cookies.set(get_settings().session_cookie_name, "user-session")
+        for path in admin_only_paths:
+            response = client.get(path)
+            assert response.status_code == 403, path

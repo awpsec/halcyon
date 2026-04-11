@@ -281,6 +281,11 @@ class SyncSettingsOut(OrmModel):
     requests_per_second: int
     last_library_sync_at: datetime | None
     youtube_api_key: str | None = None
+    youtube_api_quota_daily_limit: int = 10_000
+    youtube_api_quota_used_units: int = 0
+    youtube_api_quota_remaining_units: int = 10_000
+    youtube_api_quota_remaining_percent: float = 100.0
+    youtube_api_quota_estimated: bool = True
 
 
 class RetentionSettingsIn(BaseModel):

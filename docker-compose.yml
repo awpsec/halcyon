@@ -2,7 +2,7 @@ name: halcyon
 
 services:
   postgres:
-    container_name: postgres
+    container_name: halcyon-postgres
     image: postgres:17-bookworm
     command:
       - postgres
@@ -29,7 +29,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
 
   web:
-    container_name: web
+    container_name: halcyon-web
     build:
       context: .
       dockerfile: Dockerfile
@@ -52,7 +52,7 @@ services:
       - ./library:/library
 
   worker:
-    container_name: worker
+    container_name: halcyon-worker
     build:
       context: .
       dockerfile: Dockerfile

@@ -4,19 +4,21 @@ import asyncio
 from collections import deque
 import hashlib
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import re
 from pathlib import Path
 import shutil
 import time
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.logging import get_logger
+from app.db.session import SessionLocal
 from app.models.entities import (
     Channel,
     MetadataOverride,
@@ -65,6 +67,15 @@ MATCH_REFRESH_AFTER = timedelta(hours=6)
 CHANNEL_ART_RETRY_AFTER = timedelta(minutes=15)
 RYD_RATE_LIMIT_PER_MINUTE = 100
 RYD_RATE_LIMIT_PER_DAY = 10_000
+YOUTUBE_API_DAILY_QUOTA_LIMIT = 10_000
+YOUTUBE_API_QUOTA_COSTS = {
+    "search": 100,
+    "videos": 1,
+    "channels": 1,
+    "playlists": 1,
+    "playlistItems": 1,
+    "commentThreads": 1,
+}
 LIVE_RETENTION_STATUSES = ("staged", "error")
 TEMP_DOWNLOAD_MARKERS = (
     ".part",
@@ -78,6 +89,11 @@ TEMP_DOWNLOAD_MARKERS = (
     ".unconfirmed",
 )
 YTDLP_FRAGMENT_PATTERN = re.compile(r"\.f\d{2,5}$", re.IGNORECASE)
+
+try:
+    YOUTUBE_API_QUOTA_TZ = ZoneInfo("America/Los_Angeles")
+except ZoneInfoNotFoundError:
+    YOUTUBE_API_QUOTA_TZ = timezone.utc
 GENERIC_PLAYLIST_TITLES = {
     "uploads",
     "popular uploads",
@@ -857,6 +873,60 @@ class YouTubeSyncError(RuntimeError):
         self.fatal = fatal
 
 
+def current_youtube_quota_day(now: datetime | None = None) -> str:
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    return reference.astimezone(YOUTUBE_API_QUOTA_TZ).date().isoformat()
+
+
+def normalize_youtube_api_quota(settings_row: SyncSettings, *, now: datetime | None = None) -> bool:
+    current_day = current_youtube_quota_day(now)
+    changed = False
+    if settings_row.youtube_api_quota_day != current_day:
+        settings_row.youtube_api_quota_day = current_day
+        settings_row.youtube_api_quota_used_units = 0
+        changed = True
+    elif settings_row.youtube_api_quota_used_units is None:
+        settings_row.youtube_api_quota_used_units = 0
+        changed = True
+    return changed
+
+
+def build_youtube_api_quota_summary(settings_row: SyncSettings) -> dict[str, int | float | bool]:
+    used_units = max(0, min(int(settings_row.youtube_api_quota_used_units or 0), YOUTUBE_API_DAILY_QUOTA_LIMIT))
+    remaining_units = max(0, YOUTUBE_API_DAILY_QUOTA_LIMIT - used_units)
+    remaining_percent = (remaining_units / YOUTUBE_API_DAILY_QUOTA_LIMIT) * 100 if YOUTUBE_API_DAILY_QUOTA_LIMIT else 0.0
+    return {
+        "youtube_api_quota_daily_limit": YOUTUBE_API_DAILY_QUOTA_LIMIT,
+        "youtube_api_quota_used_units": used_units,
+        "youtube_api_quota_remaining_units": remaining_units,
+        "youtube_api_quota_remaining_percent": round(remaining_percent, 2),
+        "youtube_api_quota_estimated": True,
+    }
+
+
+def track_youtube_api_quota_request(url: str) -> None:
+    if not url.startswith(YOUTUBE_API_BASE):
+        return
+    endpoint = url.rstrip("/").rsplit("/", 1)[-1]
+    cost = YOUTUBE_API_QUOTA_COSTS.get(endpoint)
+    if not cost:
+        return
+    with SessionLocal() as db:
+        settings_row = db.scalar(select(SyncSettings))
+        if not settings_row:
+            settings_row = SyncSettings()
+            db.add(settings_row)
+            db.flush()
+        normalize_youtube_api_quota(settings_row)
+        settings_row.youtube_api_quota_used_units = min(
+            YOUTUBE_API_DAILY_QUOTA_LIMIT,
+            int(settings_row.youtube_api_quota_used_units or 0) + cost,
+        )
+        db.commit()
+
+
 async def throttled_get(
     client: httpx.AsyncClient,
     url: str,
@@ -873,6 +943,7 @@ async def throttled_get(
         wait_seconds = max(0.0, min_interval - (time.monotonic() - _LAST_REQUEST_AT))
         if wait_seconds > 0:
             await asyncio.sleep(wait_seconds)
+        track_youtube_api_quota_request(url)
         response = await client.get(url, params=params, headers=headers)
         _LAST_REQUEST_AT = time.monotonic()
     return response
@@ -1301,6 +1372,53 @@ def infer_channel_ids_from_neighbor_titles(db: Session, video: Video, *, limit: 
         if shared_count < 2 and overlap < 0.34:
             continue
         score = max(overlap, shared_count / max(1, min(len(video_tokens), len(candidate_tokens))))
+        scored[youtube_channel_id] = max(scored.get(youtube_channel_id, 0.0), score)
+
+    return [
+        channel_id
+        for channel_id, _score in sorted(scored.items(), key=lambda item: item[1], reverse=True)[:limit]
+    ]
+
+
+def infer_channel_ids_from_series_neighbors(db: Session, video: Video, *, limit: int = 3) -> list[str]:
+    if not video.series_id:
+        return []
+
+    video_tokens = set(tokenize_text(clean_display_title(video.title) or video.title))
+    episode_number = parse_episode_number(video.title)
+    rows = db.execute(
+        select(Video.title, YouTubeMatch.youtube_channel_id)
+        .join(YouTubeMatch, YouTubeMatch.video_id == Video.id)
+        .where(
+            Video.id != video.id,
+            Video.series_id == video.series_id,
+            YouTubeMatch.status == "matched",
+            YouTubeMatch.youtube_channel_id.is_not(None),
+        )
+        .order_by(YouTubeMatch.last_synced_at.desc().nullslast(), Video.id.desc())
+    ).all()
+
+    scored: dict[str, float] = {}
+    for candidate_title, youtube_channel_id in rows:
+        if not youtube_channel_id:
+            continue
+
+        score = 1.0
+        candidate_title = clean_display_title(candidate_title or "")
+        if candidate_title:
+            candidate_tokens = set(tokenize_text(candidate_title))
+            if video_tokens and candidate_tokens:
+                shared_tokens = video_tokens & candidate_tokens
+                overlap = len(shared_tokens) / max(1, len(video_tokens))
+                if overlap:
+                    score += overlap
+            candidate_episode = parse_episode_number(candidate_title)
+            if episode_number is not None and candidate_episode is not None:
+                if episode_number == candidate_episode:
+                    score += 0.35
+                elif abs(episode_number - candidate_episode) <= 2:
+                    score += 0.18
+
         scored[youtube_channel_id] = max(scored.get(youtube_channel_id, 0.0), score)
 
     return [
@@ -2352,6 +2470,8 @@ async def sync_video(
                 if item
             ]
         )
+    if not force:
+        channel_ids.extend(infer_channel_ids_from_series_neighbors(db, video))
     if video.channel and not is_generic_channel_name(video.channel.name):
         if api_key:
             try:

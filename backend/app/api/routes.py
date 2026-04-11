@@ -120,7 +120,7 @@ from app.services.retention import (
     validate_retention_staging_folder_path,
 )
 from app.services.scanner import scan_selected_folders
-from app.services.sync import reconcile_sync_job, sync_scope
+from app.services.sync import build_youtube_api_quota_summary, normalize_youtube_api_quota, reconcile_sync_job, sync_scope
 from app.services.utils import normalize_text, tokenize_text, tokens_match_query
 
 router = APIRouter()
@@ -1065,7 +1065,14 @@ def _create_session(db: Session, user: UserProfile, response: Response) -> Sessi
     raw_token = secrets.token_urlsafe(24)
     db.add(SessionToken(token=hash_session_token(raw_token), user_id=user.id))
     db.commit()
-    response.set_cookie(settings.session_cookie_name, raw_token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 365)
+    response.set_cookie(
+        settings.session_cookie_name,
+        raw_token,
+        httponly=True,
+        samesite="lax",
+        secure=settings.session_cookie_secure,
+        max_age=60 * 60 * 24 * 365,
+    )
     return SessionOut(user=_current_user_out(user), session_token=raw_token)
 
 
@@ -1357,7 +1364,14 @@ def switch_session(payload: SwitchSessionIn, response: Response, db: Session = D
     token = resolve_session_token(db, payload.session_token)
     if not token or not token.user:
         raise HTTPException(status_code=401, detail="Session token not recognized")
-    response.set_cookie(settings.session_cookie_name, payload.session_token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 365)
+    response.set_cookie(
+        settings.session_cookie_name,
+        payload.session_token,
+        httponly=True,
+        samesite="lax",
+        secure=settings.session_cookie_secure,
+        max_age=60 * 60 * 24 * 365,
+    )
     return SessionOut(user=_current_user_out(token.user), session_token=payload.session_token)
 
 
@@ -2681,7 +2695,16 @@ def get_sync_settings(
         db.refresh(settings_row)
     if not settings_row.youtube_api_key and settings.youtube_api_key:
         settings_row.youtube_api_key = settings.youtube_api_key
-    return settings_row
+    changed = normalize_youtube_api_quota(settings_row)
+    if changed:
+        db.commit()
+        db.refresh(settings_row)
+    return SyncSettingsOut.model_validate(
+        {
+            **settings_row.__dict__,
+            **build_youtube_api_quota_summary(settings_row),
+        }
+    )
 
 
 @router.put("/sync/settings", response_model=SyncSettingsOut)
@@ -2703,9 +2726,15 @@ def update_sync_settings(
     settings_row.comment_limit = payload.comment_limit
     settings_row.requests_per_second = max(1, min(payload.requests_per_second, 10))
     settings_row.youtube_api_key = payload.youtube_api_key.strip() if payload.youtube_api_key else None
+    normalize_youtube_api_quota(settings_row)
     db.commit()
     db.refresh(settings_row)
-    return settings_row
+    return SyncSettingsOut.model_validate(
+        {
+            **settings_row.__dict__,
+            **build_youtube_api_quota_summary(settings_row),
+        }
+    )
 
 
 @router.get("/retention/settings")

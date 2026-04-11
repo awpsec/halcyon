@@ -468,6 +468,21 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
   const [retentionRunning, setRetentionRunning] = useState(false);
   const [retentionDeleting, setRetentionDeleting] = useState(false);
   const [retentionReverting, setRetentionReverting] = useState(false);
+  const youtubeQuotaSummary = useMemo(() => {
+    const dailyLimit = syncState.data?.youtube_api_quota_daily_limit ?? 10_000;
+    const usedUnits = syncState.data?.youtube_api_quota_used_units ?? 0;
+    const remainingUnits = syncState.data?.youtube_api_quota_remaining_units ?? Math.max(0, dailyLimit - usedUnits);
+    const remainingPercent = Math.max(0, Math.min(100, syncState.data?.youtube_api_quota_remaining_percent ?? ((remainingUnits / dailyLimit) * 100)));
+    const fillColor = `color-mix(in srgb, var(--accent) ${Math.max(18, Math.round(remainingPercent))}%, var(--text-muted))`;
+    return {
+      dailyLimit,
+      usedUnits,
+      remainingUnits,
+      remainingPercent,
+      fillColor,
+      estimated: syncState.data?.youtube_api_quota_estimated ?? true,
+    };
+  }, [syncState.data]);
   const [savingAccount, setSavingAccount] = useState(false);
   const [scanPending, setScanPending] = useState(false);
   const [syncPending, setSyncPending] = useState(false);
@@ -1898,6 +1913,25 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                     }}
                   />
                 </label>
+                <div className="settings-quota-meter" aria-label="Estimated YouTube API usage">
+                  <div className="settings-quota-meter-header">
+                    <strong>Estimated daily YouTube API quota</strong>
+                    <span>{youtubeQuotaSummary.remainingUnits.toLocaleString()} remaining</span>
+                  </div>
+                  <div className="settings-quota-meter-bar" aria-hidden="true">
+                    <div
+                      className="settings-quota-meter-fill"
+                      style={{
+                        width: `${youtubeQuotaSummary.remainingPercent}%`,
+                        background: youtubeQuotaSummary.fillColor,
+                      }}
+                    />
+                  </div>
+                  <div className="settings-quota-meter-meta">
+                    <span>{youtubeQuotaSummary.usedUnits.toLocaleString()} / {youtubeQuotaSummary.dailyLimit.toLocaleString()} units used</span>
+                    <span>{youtubeQuotaSummary.estimated ? "Estimated from halcyon requests. Resets daily." : "Live quota usage."}</span>
+                  </div>
+                </div>
                 <div className="settings-inline-grid settings-inline-grid-fields">
                   <label className="settings-field">
                     <span>Max Comments</span>
