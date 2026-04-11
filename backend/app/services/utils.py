@@ -167,6 +167,15 @@ def infer_series_name(value: str) -> str | None:
         base = clean_path_label(short_match.group("base"))
         return f"{base} - Series {int(short_match.group('number'))}" if base else None
 
+    episodic_match = re.search(
+        r"^.+?\s*[-|]\s*(?P<series>.+?)\s*[-|]\s*(?:episode|ep|part|pt)\.?\s*\d+(?:\.\d+)?\b",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if episodic_match:
+        series = clean_path_label(episodic_match.group("series"))
+        return series or None
+
     return None
 
 
@@ -209,12 +218,18 @@ def infer_folder_hints(path: Path, container_hint: str | None = None) -> tuple[s
     overlap = len(folder_tokens & title_tokens) / max(1, len(folder_tokens)) if folder_tokens else 0.0
     playlistish = bool(folder_tokens & PLAYLIST_FOLDER_MARKERS)
     episodic = parse_episode_number(title) is not None
-    looks_like_series = playlistish or overlap >= 0.2 or (episodic and len(folder_tokens) >= 2)
-    if looks_like_series:
-        return title, "Unknown Channel", infer_series_name(folder_name) or folder_name
+    folder_series = infer_series_name(folder_name)
     title_series = infer_series_name(title)
+    looks_like_series = playlistish or overlap >= 0.2 or (episodic and len(folder_tokens) >= 2)
+    folder_looks_like_channel = not playlistish and overlap < 0.2 and not folder_series
+
+    if title_series and folder_looks_like_channel:
+        return title, folder_name, title_series
+
+    if looks_like_series:
+        return title, "Unknown Channel", folder_series or title_series or folder_name
     if title_series:
-        return title, "Unknown Channel", title_series
+        return title, folder_name, title_series
     return title, folder_name, None
 
 

@@ -1710,6 +1710,11 @@ body,
   min-height: 40px;
 }
 
+.channel-series-empty {
+  padding: 32px 0 8px;
+  text-align: center;
+}
+
 @media (max-width: 760px) {
   .channel-heading-spacer {
     display: none;

@@ -560,7 +560,7 @@ export function ChannelDetailPage({ profile }: { profile: Profile | null }) {
             </div>
           </section>
         ) : (
-          <EmptyState message="This channel has no grouped series yet." />
+          <p className="channel-series-empty muted-copy">This channel has no grouped series yet.</p>
         )
       ) : null}
 
