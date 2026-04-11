@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from sqlalchemy import func, inspect, text
 from sqlalchemy.orm import Session
 
@@ -14,6 +16,40 @@ DEFAULT_ADMIN_USERNAME = "admin"
 
 logger = get_logger()
 settings = get_settings()
+
+
+def _bootstrap_admin_credentials_path() -> Path:
+    return settings.config_dir / "admin-bootstrap.json"
+
+
+def read_bootstrap_admin_credentials() -> dict[str, str] | None:
+    path = _bootstrap_admin_credentials_path()
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    username = str(payload.get("username") or "").strip()
+    password = str(payload.get("password") or "").strip()
+    if not username or not password:
+        return None
+    return {"username": username, "password": password}
+
+
+def write_bootstrap_admin_credentials(username: str, password: str) -> None:
+    path = _bootstrap_admin_credentials_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"username": username, "password": password}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def clear_bootstrap_admin_credentials() -> None:
+    path = _bootstrap_admin_credentials_path()
+    if path.exists():
+        path.unlink()
 
 
 def init_db() -> None:
@@ -204,6 +240,7 @@ def init_db() -> None:
 def _ensure_admin_account(db: Session) -> None:
     admin = db.query(UserProfile).filter(func.lower(UserProfile.name) == DEFAULT_ADMIN_USERNAME).order_by(UserProfile.id.asc()).first()
     temporary_password: str | None = None
+    persisted_bootstrap = read_bootstrap_admin_credentials()
 
     if not admin:
         recovery_phrase = generate_recovery_phrase()
@@ -221,6 +258,7 @@ def _ensure_admin_account(db: Session) -> None:
         )
         db.add(admin)
         db.flush()
+        write_bootstrap_admin_credentials(admin.name, temporary_password)
     else:
         admin.is_admin = True
         admin.display_name = admin.display_name or "Admin"
@@ -237,6 +275,17 @@ def _ensure_admin_account(db: Session) -> None:
             admin.password_hash = hash_password(temporary_password)
             for token in db.query(SessionToken).filter(SessionToken.user_id == admin.id).all():
                 db.delete(token)
+            write_bootstrap_admin_credentials(admin.name, temporary_password)
+
+    if admin.requires_admin_setup:
+        if not temporary_password and persisted_bootstrap and persisted_bootstrap.get("username") == admin.name:
+            temporary_password = persisted_bootstrap.get("password")
+        elif not temporary_password and admin.password_hash:
+            temporary_password = generate_temporary_password()
+            admin.password_hash = hash_password(temporary_password)
+            for token in db.query(SessionToken).filter(SessionToken.user_id == admin.id).all():
+                db.delete(token)
+            write_bootstrap_admin_credentials(admin.name, temporary_password)
 
     if admin.requires_admin_setup and temporary_password:
         logger.warning(
@@ -244,6 +293,8 @@ def _ensure_admin_account(db: Session) -> None:
             admin.name,
             temporary_password,
         )
+    elif not admin.requires_admin_setup:
+        clear_bootstrap_admin_credentials()
 
 
 def seed_defaults(db: Session, mounted_roots: list[str], *, include_demo_users: bool = False) -> None:

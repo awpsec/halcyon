@@ -20,7 +20,7 @@ from app.api.deps import get_configured_admin_user, get_current_admin_user, get_
 from app.core.config import get_settings
 from app.core.logging import read_log_lines
 from app.core.timezone import server_timezone_name
-from app.db.init_db import DEFAULT_ADMIN_USERNAME
+from app.db.init_db import DEFAULT_ADMIN_USERNAME, clear_bootstrap_admin_credentials
 from app.db.session import get_db
 from app.models.entities import (
     Channel,
@@ -1322,6 +1322,7 @@ def complete_admin_setup(
     _apply_admin_password_change(current_user, password=payload.password, clear_setup=True)
     _revoke_other_sessions(db, current_user.id, session_token)
     db.commit()
+    clear_bootstrap_admin_credentials()
     db.refresh(current_user)
     return _current_user_out(current_user)
 
@@ -1354,6 +1355,7 @@ def reset_admin_password_from_settings(
     _apply_admin_password_change(current_user, password=payload.password, clear_setup=True)
     _revoke_other_sessions(db, current_user.id, session_token)
     db.commit()
+    clear_bootstrap_admin_credentials()
     db.refresh(current_user)
     return _current_user_out(current_user)
 
@@ -1371,6 +1373,7 @@ def recover_admin_account(payload: AdminRecoveryIn, response: Response, request:
     for token in db.scalars(select(SessionToken).where(SessionToken.user_id == admin_user.id)).all():
         db.delete(token)
     db.flush()
+    clear_bootstrap_admin_credentials()
     return _create_session(db, admin_user, response)
 
 

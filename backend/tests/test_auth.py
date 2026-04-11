@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from fastapi import HTTPException, Response
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -19,7 +20,9 @@ from app.api.routes import (
     switch_session,
     update_profile_permissions,
 )
-from app.db.init_db import seed_defaults
+from app.core.config import get_settings
+from app.db import init_db as init_db_module
+from app.db.init_db import clear_bootstrap_admin_credentials, read_bootstrap_admin_credentials, seed_defaults
 from app.models.base import Base
 from app.models.entities import SessionToken, UserProfile
 from app.schemas.common import (
@@ -52,8 +55,27 @@ class DummyRequest:
         self.headers: dict[str, str] = {}
 
 
+@pytest.fixture(autouse=True)
+def restore_init_db_settings():
+    original_settings = init_db_module.settings
+    yield
+    init_db_module.settings = original_settings
+
+
+def set_init_db_test_settings(config_dir: Path) -> None:
+    init_db_module.settings = type(
+        "SettingsStub",
+        (),
+        {
+            "config_dir": config_dir,
+            "scan_interval_seconds": get_settings().scan_interval_seconds,
+        },
+    )()
+
+
 def test_admin_bootstrap_setup_clears_pending_phrase(tmp_path: Path):
     with make_session(tmp_path) as db:
+        set_init_db_test_settings(tmp_path)
         seed_defaults(db, [str(tmp_path / "library")])
         admin = db.scalar(select(UserProfile).where(UserProfile.name == "admin"))
 
@@ -74,6 +96,7 @@ def test_admin_bootstrap_setup_clears_pending_phrase(tmp_path: Path):
         assert admin.requires_admin_setup is False
         assert admin.recovery_phrase_pending is None
         assert verify_password("admin123", admin.password_hash) is True
+        assert read_bootstrap_admin_credentials() is None
 
 
 def test_admin_bootstrap_setup_revokes_other_admin_sessions(tmp_path: Path):
@@ -103,22 +126,45 @@ def test_admin_bootstrap_setup_revokes_other_admin_sessions(tmp_path: Path):
 
 def test_seed_defaults_does_not_rotate_pending_admin_password(tmp_path: Path):
     with make_session(tmp_path) as db:
+        set_init_db_test_settings(tmp_path)
         seed_defaults(db, [str(tmp_path / "library")])
         admin = db.scalar(select(UserProfile).where(UserProfile.name == "admin"))
 
         assert admin is not None
         original_password_hash = admin.password_hash
         original_phrase = admin.recovery_phrase_pending
+        original_bootstrap = read_bootstrap_admin_credentials()
 
         seed_defaults(db, [str(tmp_path / "library")])
         db.refresh(admin)
 
         assert admin.password_hash == original_password_hash
         assert admin.recovery_phrase_pending == original_phrase
+        assert read_bootstrap_admin_credentials() == original_bootstrap
+
+
+def test_seed_defaults_recreates_missing_bootstrap_password_file(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        set_init_db_test_settings(tmp_path)
+        seed_defaults(db, [str(tmp_path / "library")])
+        admin = db.scalar(select(UserProfile).where(UserProfile.name == "admin"))
+
+        assert admin is not None
+        original_hash = admin.password_hash
+        clear_bootstrap_admin_credentials()
+
+        seed_defaults(db, [str(tmp_path / "library")])
+        db.refresh(admin)
+
+        recreated = read_bootstrap_admin_credentials()
+        assert recreated is not None
+        assert recreated["username"] == "admin"
+        assert admin.password_hash != original_hash
 
 
 def test_admin_recovery_phrase_can_reset_password(tmp_path: Path):
     with make_session(tmp_path) as db:
+        set_init_db_test_settings(tmp_path)
         seed_defaults(db, [str(tmp_path / "library")])
         admin = db.scalar(select(UserProfile).where(UserProfile.name == "admin"))
 
@@ -141,6 +187,7 @@ def test_admin_recovery_phrase_can_reset_password(tmp_path: Path):
         assert session.user.is_admin is True
         assert session.user.requires_admin_setup is False
         assert verify_password("recovered-admin-pass", admin.password_hash) is True
+        assert read_bootstrap_admin_credentials() is None
 
 
 def test_regular_user_cannot_access_configured_admin_dependency(tmp_path: Path):
