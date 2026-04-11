@@ -186,6 +186,38 @@ def _selected_storage_roots(db: Session) -> list[Path]:
     return _dedupe_storage_roots(candidates)
 
 
+def _selected_folder_counts_by_root(db: Session) -> dict[int, int]:
+    counts = {
+        root_id: count
+        for root_id, count in db.execute(
+            select(SelectedFolder.root_id, func.count(SelectedFolder.id)).group_by(SelectedFolder.root_id)
+        ).all()
+    }
+    roots = db.scalars(select(LibraryRoot).order_by(LibraryRoot.id.asc())).all()
+    for root in roots:
+        if root.is_available and counts.get(root.id, 0) == 0:
+            counts[root.id] = 1
+    return counts
+
+
+def _effective_selected_folders(db: Session) -> list[SelectedFolderOut]:
+    actual_rows = db.scalars(select(SelectedFolder).order_by(SelectedFolder.id.asc())).all()
+    items = [SelectedFolderOut.model_validate(row) for row in actual_rows]
+    actual_root_ids = {row.root_id for row in actual_rows}
+    for root in db.scalars(select(LibraryRoot).order_by(LibraryRoot.id.asc())).all():
+        if not root.is_available or root.id in actual_root_ids:
+            continue
+        items.append(
+            SelectedFolderOut(
+                id=-root.id,
+                root_id=root.id,
+                relative_path="",
+                is_enabled=True,
+            )
+        )
+    return items
+
+
 def _is_transient_video_artifact(path: Path) -> bool:
     suffixes = {suffix.lower() for suffix in path.suffixes}
     if suffixes.intersection(TEMP_DOWNLOAD_MARKERS):
@@ -1445,12 +1477,7 @@ def list_roots(
 ) -> list[LibraryRootOut]:
     del current_user
     roots = db.scalars(select(LibraryRoot).order_by(LibraryRoot.id)).all()
-    selected_counts = {
-        root_id: count
-        for root_id, count in db.execute(
-            select(SelectedFolder.root_id, func.count(SelectedFolder.id)).group_by(SelectedFolder.root_id)
-        ).all()
-    }
+    selected_counts = _selected_folder_counts_by_root(db)
 
     items: list[LibraryRootOut] = []
     for root in roots:
@@ -1508,9 +1535,9 @@ def library_storage(
 def list_selected_folders(
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_configured_admin_user),
-) -> list[SelectedFolder]:
+) -> list[SelectedFolderOut]:
     del current_user
-    return db.scalars(select(SelectedFolder).order_by(SelectedFolder.id)).all()
+    return _effective_selected_folders(db)
 
 
 @router.post("/library/selected-folders", response_model=SelectedFolderOut)
@@ -1581,7 +1608,7 @@ def browse_root(
             VideoFile.absolute_path.like(f"{normalized_root_path}%"),
         )
     ) or 0
-    selected_count = db.scalar(select(func.count(SelectedFolder.id)).where(SelectedFolder.root_id == root.id)) or 0
+    selected_count = _selected_folder_counts_by_root(db).get(root.id, 0)
     return {
         "root": LibraryRootOut(
             id=root.id,

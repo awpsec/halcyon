@@ -1723,6 +1723,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
               {(rootsState.data ?? []).map((root) => {
                 const folders = selectedByRoot.get(root.id) ?? [];
                 const browserOpen = browserRootId === root.id;
+                const hasImplicitRootSelection = folders.some((item) => item.id < 0 && item.relative_path === "");
                 return (
                   <div className="library-root-flat" key={root.id}>
                     <div className="library-root-header">
@@ -1732,13 +1733,19 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                           {root.selected_count} folder{root.selected_count === 1 ? "" : "s"} selected • {root.item_count} item{root.item_count === 1 ? "" : "s"} loaded
                         </small>
                       </div>
-                      <button className="icon-button" type="button" aria-label="Browse root" onClick={() => setBrowserRootId(browserOpen ? null : root.id)}>
-                        <svg viewBox="0 0 24 24" className="icon-button-svg" aria-hidden="true">
-                          <path d={browserOpen ? "M7 14l5-5 5 5" : "M7 10l5 5 5-5"} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      </button>
+                      {!hasImplicitRootSelection ? (
+                        <button className="icon-button" type="button" aria-label="Browse root" onClick={() => setBrowserRootId(browserOpen ? null : root.id)}>
+                          <svg viewBox="0 0 24 24" className="icon-button-svg" aria-hidden="true">
+                            <path d={browserOpen ? "M7 14l5-5 5 5" : "M7 10l5 5 5-5"} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        </button>
+                      ) : null}
                     </div>
-                    {browserOpen ? (
+                    {hasImplicitRootSelection ? (
+                      <div className="selected-folder-list">
+                        <small className="muted-copy">This mounted root is active as the entire library by default.</small>
+                      </div>
+                    ) : browserOpen ? (
                       <div className="library-picker-grid">
                         {(browserState.data?.directories ?? []).map((directory: { name: string; relative_path: string }) => {
                           const selected = folders.some((item) => item.relative_path === directory.relative_path);
@@ -1761,16 +1768,18 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                     <div className="selected-folder-list">
                       {folders.map((folder) => (
                         <div className="selected-folder-row" key={folder.id}>
-                          <span>{folder.relative_path}</span>
-                          <button
-                            className="linkish"
-                            onClick={async () => {
-                              await api.deleteSelectedFolder(folder.id);
-                              await refreshServerState();
-                            }}
-                          >
-                            Remove
-                          </button>
+                          <span>{folder.relative_path || "Entire root"}</span>
+                          {folder.id > 0 ? (
+                            <button
+                              className="linkish"
+                              onClick={async () => {
+                                await api.deleteSelectedFolder(folder.id);
+                                await refreshServerState();
+                              }}
+                            >
+                              Remove
+                            </button>
+                          ) : null}
                         </div>
                       ))}
                     </div>

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 import app.db.init_db as init_db_module
 import app.services.scanner as scanner_service
 from app.api import routes as routes_module
-from app.api.routes import _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage
+from app.api.routes import _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage, list_roots, list_selected_folders
 from app.db.init_db import seed_defaults
 from app.models.base import Base
 from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, UserProfile, Video, VideoFile
@@ -38,9 +38,24 @@ def test_seed_defaults_creates_profiles_and_roots(tmp_path: Path):
         assert roots[0].path == str(tmp_path / "library")
 
 
+def test_library_routes_expose_implicit_root_selection_when_none_exist(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(tmp_path / "library")])
+
+        roots = list_roots(db=db, current_user=object())
+        selected = list_selected_folders(db=db, current_user=object())
+
+        assert len(roots) == 1
+        assert roots[0].selected_count == 1
+        assert len(selected) == 1
+        assert selected[0].root_id == roots[0].id
+        assert selected[0].relative_path == ""
+        assert selected[0].id < 0
+
+
 def test_seed_defaults_uses_configured_scan_interval_for_initial_sync_settings(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
-        configured = type("SettingsStub", (), {"scan_interval_seconds": 900})()
+        configured = type("SettingsStub", (), {"scan_interval_seconds": 900, "config_dir": tmp_path})()
         monkeypatch.setattr(init_db_module, "settings", configured)
 
         seed_defaults(db, [str(tmp_path / "library")])
