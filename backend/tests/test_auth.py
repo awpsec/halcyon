@@ -101,6 +101,22 @@ def test_admin_bootstrap_setup_revokes_other_admin_sessions(tmp_path: Path):
         assert remaining_tokens == [hash_session_token("keep-session")]
 
 
+def test_seed_defaults_does_not_rotate_pending_admin_password(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(tmp_path / "library")])
+        admin = db.scalar(select(UserProfile).where(UserProfile.name == "admin"))
+
+        assert admin is not None
+        original_password_hash = admin.password_hash
+        original_phrase = admin.recovery_phrase_pending
+
+        seed_defaults(db, [str(tmp_path / "library")])
+        db.refresh(admin)
+
+        assert admin.password_hash == original_password_hash
+        assert admin.recovery_phrase_pending == original_phrase
+
+
 def test_admin_recovery_phrase_can_reset_password(tmp_path: Path):
     with make_session(tmp_path) as db:
         seed_defaults(db, [str(tmp_path / "library")])

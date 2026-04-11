@@ -230,7 +230,7 @@ def _ensure_admin_account(db: Session) -> None:
             admin.recovery_phrase_pending = recovery_phrase
             admin.requires_admin_setup = True
 
-        if admin.requires_admin_setup:
+        if admin.requires_admin_setup and not admin.password_hash:
             temporary_password = generate_temporary_password()
             admin.password_hash = hash_password(temporary_password)
             for token in db.query(SessionToken).filter(SessionToken.user_id == admin.id).all():
