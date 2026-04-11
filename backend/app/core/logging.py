@@ -20,11 +20,12 @@ def setup_logging() -> None:
     log_path = _log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    file_formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    stream_formatter = logging.Formatter("%(levelname)s %(message)s")
     handler = RotatingFileHandler(log_path, maxBytes=1_500_000, backupCount=2, encoding="utf-8")
-    handler.setFormatter(formatter)
+    handler.setFormatter(file_formatter)
     stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
+    stream_handler.setFormatter(stream_formatter)
 
     logger.setLevel(logging.INFO)
     logger.addHandler(handler)

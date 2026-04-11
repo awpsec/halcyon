@@ -105,9 +105,9 @@ docker compose up --build -d
 
 That starts:
 
-- `halcyon-postgres`
-- `halcyon-web`
-- `halcyon-worker`
+- `postgres`
+- `web`
+- `worker`
 
 The shipped compose file uses a `60` second background scan interval by default. If you want slower or faster automatic onboarding, edit `HALCYON_SCAN_INTERVAL_SECONDS` in `docker-compose.yml`.
 
@@ -158,7 +158,7 @@ The bootstrap `admin` password is printed in the container logs.
 To find it:
 
 ```bash
-docker compose logs halcyon-web
+docker compose logs web
 ```
 
 Then:
@@ -234,7 +234,7 @@ npm run dev
 
 Current release package:
 
-- `1.1.26-411.002`
+- `1.1.26-411.003`
 
 ## Credits
 

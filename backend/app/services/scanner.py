@@ -380,11 +380,13 @@ def upsert_video_for_path(db: Session, file_path: Path, mounted_root: Path, clas
 
 def scan_selected_folders(db: Session, mounted_roots: list[Path], *, trigger: str = "manual") -> ScanJob:
     trigger_label = "Auto" if trigger == "auto" else "Manual"
+    auto_trigger = trigger == "auto"
     job = ScanJob(scope="library", status="running", started_at=datetime.utcnow(), details={})
     db.add(job)
     db.commit()
     db.refresh(job)
-    logger.info("%s scan started scope=library selected_roots=%s", trigger_label, [str(path) for path in mounted_roots])
+    if not auto_trigger:
+        logger.info("%s scan started scope=library selected_roots=%s", trigger_label, [str(path) for path in mounted_roots])
     try:
         discovered = 0
         selected = db.scalars(select(SelectedFolder).options(joinedload(SelectedFolder.root)).where(SelectedFolder.is_enabled.is_(True))).all()
@@ -425,7 +427,8 @@ def scan_selected_folders(db: Session, mounted_roots: list[Path], *, trigger: st
             if index == total or index % 5 == 0:
                 job.details = {"processed": index, "total": total, "percent": round((index / total) * 100) if total else 100}
                 db.commit()
-                logger.info("%s scan progress processed=%s total=%s percent=%s", trigger_label, index, total, job.details["percent"])
+                if not auto_trigger:
+                    logger.info("%s scan progress processed=%s total=%s percent=%s", trigger_label, index, total, job.details["percent"])
 
         removed = cleanup_missing_files(db, managed_roots, discovered_paths)
         removed += cleanup_orphan_videos(db)
@@ -434,7 +437,8 @@ def scan_selected_folders(db: Session, mounted_roots: list[Path], *, trigger: st
         job.details = {"processed": discovered, "total": total, "percent": 100, "discovered": discovered, "removed": removed}
         db.commit()
         db.refresh(job)
-        logger.info("%s scan completed discovered=%s total=%s removed=%s", trigger_label, discovered, total, removed)
+        if not auto_trigger or discovered or removed:
+            logger.info("%s scan completed discovered=%s total=%s removed=%s", trigger_label, discovered, total, removed)
         return job
     except Exception as exc:
         job.status = "failed"

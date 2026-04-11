@@ -1873,10 +1873,38 @@ body,
   gap: 14px;
 }
 
+.admin-setup-phrase-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .admin-setup-phrase-copy {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.admin-setup-download-button {
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 82%, transparent);
+  background: color-mix(in srgb, var(--panel-strong) 58%, transparent);
+  color: var(--text);
+  padding: 8px 12px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+  white-space: nowrap;
+}
+
+.admin-setup-download-button:hover,
+.admin-setup-download-button:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--panel-strong) 78%, transparent);
+  transform: translateY(-1px);
 }
 
 .admin-setup-phrase-grid {
@@ -1919,6 +1947,17 @@ body,
 
 .admin-setup-confirm span {
   cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  .admin-setup-phrase-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .admin-setup-download-button {
+    width: fit-content;
+  }
 }
 
 .admin-setup-status {

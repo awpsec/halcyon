@@ -42,7 +42,7 @@ async def background_auto_sync_once(settings: Settings) -> None:
         api_key = (sync_settings.youtube_api_key or "").strip() or settings.youtube_api_key
         if sync_settings.automatic_detection_enabled:
             if not active_running_sync_jobs(db):
-                await sync_scope(db, scope="orphans", target_id=None, api_key=api_key)
+                await sync_scope(db, scope="orphans", target_id=None, api_key=api_key, quiet_if_idle=True)
         if not sync_settings.automatic_sync_enabled:
             return
         if active_running_sync_jobs(db):
@@ -54,7 +54,7 @@ async def background_auto_sync_once(settings: Settings) -> None:
         sync_interval = max(configured_interval, 900)
         if sync_settings.last_library_sync_at and datetime.utcnow() - sync_settings.last_library_sync_at < timedelta(seconds=sync_interval):
             return
-        await sync_scope(db, scope="library", target_id=None, api_key=api_key)
+        await sync_scope(db, scope="library", target_id=None, api_key=api_key, quiet_if_idle=True)
 
 
 def background_retention_once() -> None:

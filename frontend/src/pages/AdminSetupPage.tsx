@@ -34,6 +34,29 @@ export function AdminSetupPage({ profile, onComplete }: Props) {
     password.length >= 8 &&
     confirmPassword === password;
 
+  function handleDownloadRecoveryPhrase() {
+    if (!recoveryPhrase.length) {
+      return;
+    }
+    const body = [
+      "halcyon admin recovery phrase",
+      "",
+      `username: ${profile.name}`,
+      `recovery phrase: ${recoveryPhrase.join(" ")}`,
+      "",
+      "Store this file somewhere safe. Anyone with this phrase can recover the admin account.",
+    ].join("\n");
+    const blob = new Blob([body], { type: "text/plain;charset=utf-8" });
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = `halcyon-admin-recovery-${profile.name}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(objectUrl);
+  }
+
   async function handleSubmit() {
     if (!confirmedPhraseSaved) {
       setError("Confirm that you saved the recovery phrase before finishing setup.");
@@ -71,9 +94,18 @@ export function AdminSetupPage({ profile, onComplete }: Props) {
         </div>
 
         <div className="admin-setup-phrase-card">
-          <div className="admin-setup-phrase-copy">
-            <strong>Recovery phrase</strong>
-            <small>This only appears during first-time admin setup.</small>
+          <div className="admin-setup-phrase-header">
+            <div className="admin-setup-phrase-copy">
+              <strong>Recovery phrase</strong>
+              <small>This only appears during first-time admin setup.</small>
+            </div>
+            <button
+              type="button"
+              className="admin-setup-download-button"
+              onClick={handleDownloadRecoveryPhrase}
+            >
+              Download phrase
+            </button>
           </div>
           <div className="admin-setup-phrase-grid">
             {recoveryPhrase.map((word, index) => (

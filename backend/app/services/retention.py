@@ -989,15 +989,16 @@ def run_retention_cycle(db: Session, *, trigger: str = "auto", force: bool = Fal
         raise
 
     _finalize_deleted_retention_paths(delete_finalize_paths, staging_root)
-    logger.info(
-        "Retention run completed trigger=%s marked=%s deleted=%s reverted=%s missing=%s issues=%s",
-        trigger,
-        marked_count,
-        deleted_count,
-        reverted_count,
-        missing_source_count,
-        issue_count,
-    )
+    if trigger != "auto" or any((marked_count, deleted_count, reverted_count, missing_source_count, issue_count)):
+        logger.info(
+            "Retention run completed trigger=%s marked=%s deleted=%s reverted=%s missing=%s issues=%s",
+            trigger,
+            marked_count,
+            deleted_count,
+            reverted_count,
+            missing_source_count,
+            issue_count,
+        )
     return {
         "status": status,
         "message": message,

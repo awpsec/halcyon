@@ -2069,6 +2069,7 @@ async def sync_scope(
     *,
     force: bool = False,
     prefer_high_res_banners_override: bool | None = None,
+    quiet_if_idle: bool = False,
 ) -> SyncJob:
     async with _SYNC_LOCK:
         normalize_channel_assignments(db)
@@ -2171,7 +2172,8 @@ async def sync_scope(
                 "prefer_high_res_banners": prefer_high_res_banners,
             }
             db.commit()
-            logger.info("Sync started scope=%s target_id=%s total=%s", scope, target_id, total)
+            if not (quiet_if_idle and total == 0):
+                logger.info("Sync started scope=%s target_id=%s total=%s", scope, target_id, total)
             async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=REQUEST_HEADERS) as client:
                 for video in videos:
                     def report_status(**extra: dict) -> None:
@@ -2265,7 +2267,8 @@ async def sync_scope(
             }
             db.commit()
             db.refresh(job)
-            logger.info("Sync finished scope=%s target_id=%s matched=%s review=%s errors=%s status=%s", scope, target_id, matched, review, errors, job.status)
+            if not (quiet_if_idle and total == 0 and matched == 0 and review == 0 and errors == 0):
+                logger.info("Sync finished scope=%s target_id=%s matched=%s review=%s errors=%s status=%s", scope, target_id, matched, review, errors, job.status)
             return job
         except YouTubeSyncError as exc:
             job.status = "failed"
