@@ -1,6 +1,6 @@
 [project]
 name = "halcyon-backend"
-version = "1.1.26.post49002"
+version = "1.1.26.post410001"
 description = "halcyon self-hosted offline YouTube-style media server backend"
 requires-python = ">=3.11"
 dependencies = [
@@ -22,3 +22,12 @@ dev = [
 [build-system]
 requires = ["setuptools>=75.8.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["data/*.txt"]
