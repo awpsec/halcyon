@@ -17,7 +17,27 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.logging import get_logger
-from app.models.entities import Channel, RetentionItem, SelectedFolder, SyncJob, SyncSettings, Video, VideoFile, YouTubeChannelSnapshot, YouTubeCommentSnapshot, YouTubeMatch, YouTubeVideoSnapshot
+from app.models.entities import (
+    Channel,
+    MetadataOverride,
+    PlaylistItem,
+    QueueItem,
+    RetentionItem,
+    SavedVideo,
+    SelectedFolder,
+    SyncJob,
+    SyncSettings,
+    TranscodeJob,
+    Video,
+    VideoFile,
+    VideoReaction,
+    WatchHistory,
+    WatchProgress,
+    YouTubeChannelSnapshot,
+    YouTubeCommentSnapshot,
+    YouTubeMatch,
+    YouTubeVideoSnapshot,
+)
 from app.core.config import get_settings
 from app.services.media import download_thumbnail, fingerprint_file, generate_thumbnail
 from app.services.utils import canonicalize_search_text, clean_display_title, is_generic_channel_name, normalize_text, parse_episode_number, resolve_display_name, slugify, tokenize_text
@@ -432,6 +452,144 @@ def video_requires_organization(db: Session, video: Video) -> bool:
         if target_path is not None and _normalized_path(target_path) != _normalized_path(Path(video_file.absolute_path)):
             return True
     return False
+
+
+def _merge_unique_video_relation(
+    db: Session,
+    model,
+    *,
+    source_video_id: int,
+    target_video_id: int,
+    unique_field: str,
+) -> None:
+    rows = db.scalars(select(model).where(model.video_id == source_video_id)).all()
+    for row in rows:
+        unique_value = getattr(row, unique_field)
+        existing = db.scalar(
+            select(model).where(
+                getattr(model, unique_field) == unique_value,
+                model.video_id == target_video_id,
+            )
+        )
+        if existing:
+            if isinstance(row, WatchProgress):
+                existing.position_seconds = max(existing.position_seconds or 0, row.position_seconds or 0)
+                existing.completed = bool(existing.completed or row.completed)
+            db.query(model).filter(model.id == row.id).delete(synchronize_session=False)
+            continue
+        db.query(model).filter(model.id == row.id).update(
+            {model.video_id: target_video_id},
+            synchronize_session=False,
+        )
+
+
+def _merge_duplicate_video_files(db: Session, *, source_video: Video, target_video: Video) -> None:
+    source_files = db.scalars(select(VideoFile).where(VideoFile.video_id == source_video.id)).all()
+    target_files = db.scalars(select(VideoFile).where(VideoFile.video_id == target_video.id)).all()
+    target_fingerprints = {item.fingerprint for item in target_files if item.fingerprint}
+
+    for source_file in source_files:
+        source_path = Path(source_file.absolute_path)
+        if not target_files:
+            source_file.video_id = target_video.id
+            target_files.append(source_file)
+            if source_file.fingerprint:
+                target_fingerprints.add(source_file.fingerprint)
+            continue
+
+        if source_file.fingerprint and source_file.fingerprint in target_fingerprints:
+            if source_path.exists():
+                try:
+                    source_path.unlink()
+                except OSError as exc:
+                    logger.warning(
+                        "Sync duplicate cleanup failed path=%s target_video_id=%s error=%s",
+                        source_path,
+                        target_video.id,
+                        exc,
+                    )
+            retention_item = db.scalar(select(RetentionItem).where(RetentionItem.video_file_id == source_file.id))
+            if retention_item:
+                retention_item.video_id = target_video.id
+                retention_item.video_file_id = None
+            db.delete(source_file)
+            continue
+
+        retention_item = db.scalar(select(RetentionItem).where(RetentionItem.video_file_id == source_file.id))
+        if retention_item:
+            retention_item.video_id = target_video.id
+        if source_path.exists():
+            try:
+                source_path.unlink()
+            except OSError as exc:
+                logger.warning(
+                    "Sync duplicate cleanup failed path=%s target_video_id=%s error=%s",
+                    source_path,
+                    target_video.id,
+                    exc,
+                )
+        db.delete(source_file)
+
+
+def merge_duplicate_video_into_target(db: Session, *, target_video: Video, duplicate_video: Video) -> None:
+    if target_video.id == duplicate_video.id:
+        return
+
+    _merge_unique_video_relation(
+        db,
+        WatchProgress,
+        source_video_id=duplicate_video.id,
+        target_video_id=target_video.id,
+        unique_field="user_id",
+    )
+    _merge_unique_video_relation(
+        db,
+        VideoReaction,
+        source_video_id=duplicate_video.id,
+        target_video_id=target_video.id,
+        unique_field="user_id",
+    )
+    _merge_unique_video_relation(
+        db,
+        SavedVideo,
+        source_video_id=duplicate_video.id,
+        target_video_id=target_video.id,
+        unique_field="user_id",
+    )
+
+    db.query(WatchHistory).filter(WatchHistory.video_id == duplicate_video.id).update(
+        {WatchHistory.video_id: target_video.id},
+        synchronize_session=False,
+    )
+    db.query(QueueItem).filter(QueueItem.video_id == duplicate_video.id).update(
+        {QueueItem.video_id: target_video.id},
+        synchronize_session=False,
+    )
+    db.query(PlaylistItem).filter(PlaylistItem.video_id == duplicate_video.id).update(
+        {PlaylistItem.video_id: target_video.id},
+        synchronize_session=False,
+    )
+    db.query(MetadataOverride).filter(
+        MetadataOverride.target_type == "video",
+        MetadataOverride.target_id == duplicate_video.id,
+    ).update({MetadataOverride.target_id: target_video.id}, synchronize_session=False)
+    db.query(TranscodeJob).filter(TranscodeJob.video_id == duplicate_video.id).update(
+        {TranscodeJob.video_id: target_video.id},
+        synchronize_session=False,
+    )
+    db.query(RetentionItem).filter(RetentionItem.video_id == duplicate_video.id).update(
+        {RetentionItem.video_id: target_video.id},
+        synchronize_session=False,
+    )
+
+    _merge_duplicate_video_files(db, source_video=duplicate_video, target_video=target_video)
+
+    duplicate_match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == duplicate_video.id))
+    if duplicate_match:
+        db.delete(duplicate_match)
+
+    db.delete(duplicate_video)
+    db.flush()
 
 
 def auto_organize_channel_files(
@@ -1612,6 +1770,25 @@ async def apply_sync_item(
     video_id = item.get("id")
     channel_id = snippet.get("channelId")
 
+    if video_id:
+        duplicate_match = db.scalar(
+            select(YouTubeMatch)
+            .options(joinedload(YouTubeMatch.video).joinedload(Video.files))
+            .where(
+                YouTubeMatch.youtube_video_id == video_id,
+                YouTubeMatch.video_id != video.id,
+            )
+            .limit(1)
+        )
+        if duplicate_match and duplicate_match.video:
+            logger.info(
+                "Sync merging duplicate video_id=%s duplicate_video_id=%s youtube_video_id=%s",
+                video.id,
+                duplicate_match.video_id,
+                video_id,
+            )
+            merge_duplicate_video_into_target(db, target_video=video, duplicate_video=duplicate_match.video)
+
     match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
     if not match:
         match = YouTubeMatch(video_id=video.id)
@@ -2176,6 +2353,9 @@ async def sync_scope(
                 logger.info("Sync started scope=%s target_id=%s total=%s", scope, target_id, total)
             async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=REQUEST_HEADERS) as client:
                 for video in videos:
+                    if db.get(Video, video.id) is None:
+                        continue
+
                     def report_status(**extra: dict) -> None:
                         current_percent = round((processed / total) * 100) if total else 100
                         job.details = {

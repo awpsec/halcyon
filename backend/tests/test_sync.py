@@ -10,7 +10,7 @@ import app.services.background as background_service
 import app.services.sync as sync_service
 from app.core.config import Settings
 from app.models.base import Base
-from app.models.entities import Channel, LibraryRoot, RetentionItem, SelectedFolder, SyncJob, SyncSettings, Video, VideoFile, YouTubeChannelSnapshot, YouTubeMatch, YouTubeVideoSnapshot
+from app.models.entities import Channel, LibraryRoot, RetentionItem, SelectedFolder, SyncJob, SyncSettings, UserProfile, Video, VideoFile, WatchProgress, YouTubeChannelSnapshot, YouTubeMatch, YouTubeVideoSnapshot
 from app.services.media import fingerprint_file
 from app.services.scanner import scan_selected_folders
 from app.services.sync import apply_sync_item, auto_organize_channel_files, fetch_channel_about_details, sync_scope, sync_video
@@ -453,7 +453,7 @@ def test_background_auto_sync_clears_stale_running_jobs_before_library_sync(tmp_
     monkeypatch.setattr(background_service, "SessionLocal", session_factory)
     called: list[str] = []
 
-    async def fake_sync_scope(db, scope, target_id, api_key):
+    async def fake_sync_scope(db, scope, target_id, api_key, **kwargs):
         called.append(scope)
         return SyncJob(scope=scope, status="completed", details={})
 
@@ -933,3 +933,142 @@ def test_sync_scope_orphans_reorganizes_existing_matched_file(tmp_path: Path, mo
         assert refreshed_file is not None
         assert refreshed_file.absolute_path == str(organized_path)
         assert refreshed_file.relative_path == "youtube/the-phawx/Asus Zenbook A16 Review - Snapdragon X2 Elite Extreme.mp4"
+
+
+def test_apply_sync_item_merges_duplicate_youtube_video_records(tmp_path: Path, monkeypatch):
+    target_path = tmp_path / "library" / "target.mp4"
+    duplicate_path = tmp_path / "library" / "duplicate.mp4"
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(b"same-video")
+    duplicate_path.write_bytes(b"same-video")
+
+    def fake_settings() -> Settings:
+        return Settings(
+            mounted_roots=[],
+            config_dir=tmp_path / "config",
+            cache_dir=tmp_path / "cache",
+            background_tasks_enabled=False,
+        )
+
+    async def fake_ryd(*args, **kwargs):
+        return None
+
+    async def fake_channel_about(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(sync_service, "get_settings", fake_settings)
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_about)
+    monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
+
+    with make_session(tmp_path) as db:
+        user = UserProfile(name="tester", display_name="Tester", accent_color="#fff")
+        channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add_all([user, channel])
+        db.flush()
+
+        target_video = Video(
+            title="DayZ Part 1",
+            slug="dayz-part-1",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=900,
+            is_available=True,
+        )
+        duplicate_video = Video(
+            title="DayZ Part 1 duplicate",
+            slug="dayz-part-1-duplicate",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=900,
+            is_available=True,
+        )
+        db.add_all([target_video, duplicate_video])
+        db.flush()
+
+        db.add_all(
+            [
+                VideoFile(
+                    video_id=target_video.id,
+                    absolute_path=str(target_path),
+                    relative_path="target.mp4",
+                    file_size=target_path.stat().st_size,
+                    fingerprint="a" * 64,
+                ),
+                VideoFile(
+                    video_id=duplicate_video.id,
+                    absolute_path=str(duplicate_path),
+                    relative_path="duplicate.mp4",
+                    file_size=duplicate_path.stat().st_size,
+                    fingerprint="b" * 64,
+                ),
+                YouTubeMatch(
+                    video_id=duplicate_video.id,
+                    youtube_video_id="dup123",
+                    youtube_channel_id="channel-psi",
+                    status="matched",
+                    confidence=0.91,
+                    reasons=["title"],
+                ),
+                WatchProgress(
+                    user_id=user.id,
+                    video_id=duplicate_video.id,
+                    position_seconds=321,
+                    completed=False,
+                ),
+            ]
+        )
+        db.commit()
+        db.refresh(target_video)
+
+        item = {
+            "id": "dup123",
+            "snippet": {
+                "title": "ARMA 2 DayZ Overpoch Mod - Series 2 - Part 1 - The Curse!",
+                "channelTitle": "PsiSyndicate",
+                "channelId": "channel-psi",
+                "publishedAt": "2026-04-11T12:00:00Z",
+                "description": "Matched metadata",
+                "thumbnails": {},
+            },
+            "statistics": {
+                "viewCount": "1234",
+                "likeCount": "56",
+            },
+            "_waytube_duration_seconds": 900,
+            "_waytube_source": "watch-page",
+        }
+
+        async def run() -> None:
+            async with httpx.AsyncClient() as client:
+                await apply_sync_item(
+                    db,
+                    target_video,
+                    item,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                    api_key=None,
+                    confidence=0.93,
+                    reasons=["title", "duration-tight"],
+                    status="matched",
+                )
+
+        asyncio.run(run())
+
+        remaining_videos = db.scalars(select(Video).order_by(Video.id.asc())).all()
+        merged_match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.youtube_video_id == "dup123"))
+        merged_progress = db.scalar(
+            select(WatchProgress).where(
+                WatchProgress.user_id == user.id,
+                WatchProgress.video_id == target_video.id,
+            )
+        )
+
+        assert len(remaining_videos) == 1
+        assert merged_match is not None
+        assert merged_match.video_id == target_video.id
+        assert merged_progress is not None
+        assert merged_progress.position_seconds == 321
+        assert target_path.exists()
+        assert not duplicate_path.exists()

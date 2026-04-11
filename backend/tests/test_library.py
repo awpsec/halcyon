@@ -148,6 +148,71 @@ def test_scan_selected_folders_preserves_literal_ellipses_in_title(tmp_path: Pat
         assert video.title == "Wait... what happened here"
 
 
+def test_scan_selected_folders_treats_one_folder_playlist_dump_as_series(tmp_path: Path):
+    library_root = tmp_path / "library"
+    playlist_dir = library_root / "ARMA 2 DayZ Overpoch Mod Series 2"
+    playlist_dir.mkdir(parents=True)
+    video_path = playlist_dir / "ARMA 2 DayZ Overpoch Mod - Series 2 - Part 1 - The Curse!.mp4"
+    video_path.write_bytes(b"fake-video-data")
+
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(library_root)])
+
+        scan_selected_folders(db, [library_root])
+
+        video = db.scalar(select(Video))
+
+        assert video is not None
+        assert video.channel_id is not None
+        assert video.series_id is not None
+        assert db.get(Channel, video.channel_id).name == "Unknown Channel"
+        assert db.get(Series, video.series_id).name == "ARMA 2 DayZ Overpoch Mod - Series 2"
+        assert video.episode_number == 1
+
+
+def test_scan_selected_folders_infers_series_from_root_level_title(tmp_path: Path):
+    library_root = tmp_path / "library"
+    library_root.mkdir(parents=True)
+    video_path = library_root / "ARMA 2： DayZ Overpoch Mod — Series 2 — Part 1 — The Curse!.mp4"
+    video_path.write_bytes(b"fake-video-data")
+
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(library_root)])
+
+        scan_selected_folders(db, [library_root])
+
+        video = db.scalar(select(Video))
+
+        assert video is not None
+        assert video.series_id is not None
+        assert db.get(Series, video.series_id).name == "ARMA 2: DayZ Overpoch Mod - Series 2"
+        assert video.episode_number == 1
+
+
+def test_scan_selected_folders_removes_duplicate_fingerprint_copy(tmp_path: Path):
+    library_root = tmp_path / "library"
+    first_dir = library_root / "Alpha"
+    second_dir = library_root / "Beta"
+    first_dir.mkdir(parents=True)
+    second_dir.mkdir(parents=True)
+    first_path = first_dir / "Duplicate Video.mp4"
+    second_path = second_dir / "Duplicate Video copy.mp4"
+    first_path.write_bytes(b"same-video-data")
+    second_path.write_bytes(b"same-video-data")
+
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(library_root)])
+
+        scan_selected_folders(db, [library_root])
+
+        videos = db.scalars(select(Video).order_by(Video.id.asc())).all()
+        files = db.scalars(select(VideoFile).order_by(VideoFile.id.asc())).all()
+
+        assert len(videos) == 1
+        assert len(files) == 1
+        assert first_path.exists() != second_path.exists()
+
+
 def test_scan_selected_folders_skips_ytdlp_fragment_files(tmp_path: Path):
     library_root = tmp_path / "library"
     target_dir = library_root / "CoolCreator"

@@ -127,16 +127,81 @@ def parse_episode_number(name: str) -> int | None:
     return None
 
 
+PLAYLIST_FOLDER_MARKERS = {
+    "arc",
+    "archive",
+    "episodes",
+    "playlist",
+    "playlists",
+    "season",
+    "seasons",
+    "series",
+    "videos",
+    "vod",
+    "vods",
+}
+
+
+def clean_path_label(value: str) -> str:
+    return clean_display_title(value.replace("_", " ").replace(".", " ").strip())
+
+
+def infer_series_name(value: str) -> str | None:
+    cleaned = clean_path_label(value)
+    if not cleaned:
+        return None
+
+    series_match = re.search(
+        r"^(?P<base>.+?)(?:\s*[-|]\s*|\s+)(?:series|season)\s*(?P<number>\d+)\b",
+        canonicalize_search_text(cleaned),
+        flags=re.IGNORECASE,
+    )
+    if series_match:
+        base = clean_path_label(series_match.group("base"))
+        return f"{base} - Series {int(series_match.group('number'))}" if base else None
+
+    short_match = re.search(r"^(?P<base>.+?)\s*[-|]\s*s(?P<number>\d+)\b", cleaned, flags=re.IGNORECASE)
+    if short_match:
+        base = clean_path_label(short_match.group("base"))
+        return f"{base} - Series {int(short_match.group('number'))}" if base else None
+
+    return None
+
+
 def split_title_parts(path: Path) -> tuple[str, str | None]:
     ellipsis_token = "HALCYONELLIPSISMARKER"
     stem = re.sub(r"\.{3,}", ellipsis_token, path.stem)
     stem = clean_display_title(stem.replace("_", " ").replace(".", " ").strip()).replace(ellipsis_token, "...")
     parts = [part for part in path.parts if part not in (path.anchor,)]
     channel = parts[-3] if len(parts) >= 3 else (parts[-2] if len(parts) >= 2 else "Unknown Channel")
-    series = parts[-2] if len(parts) >= 2 else None
+    series = clean_path_label(parts[-2]) if len(parts) >= 2 else infer_series_name(stem)
     if series and series.lower() == channel.lower():
         series = None
     return stem, series
+
+
+def infer_folder_hints(path: Path) -> tuple[str, str, str | None]:
+    title, nested_series = split_title_parts(path)
+    parts = [part for part in path.parts if part not in (path.anchor,)]
+    folder_parts = list(parts[:-1])
+    if not folder_parts:
+        return title, "Unknown Channel", infer_series_name(title)
+    if len(folder_parts) >= 2:
+        return title, folder_parts[0], nested_series
+
+    folder_name = clean_path_label(folder_parts[0])
+    folder_tokens = set(tokenize_text(folder_name))
+    title_tokens = set(tokenize_text(title))
+    overlap = len(folder_tokens & title_tokens) / max(1, len(folder_tokens)) if folder_tokens else 0.0
+    playlistish = bool(folder_tokens & PLAYLIST_FOLDER_MARKERS)
+    episodic = parse_episode_number(title) is not None
+    looks_like_series = playlistish or overlap >= 0.2 or (episodic and len(folder_tokens) >= 2)
+    if looks_like_series:
+        return title, "Unknown Channel", infer_series_name(folder_name) or folder_name
+    title_series = infer_series_name(title)
+    if title_series:
+        return title, "Unknown Channel", title_series
+    return title, folder_name, None
 
 
 def infer_published_at(path: Path) -> datetime | None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
+import hashlib
 import re
 
 from sqlalchemy import func, or_, select
@@ -31,7 +32,7 @@ from app.models.entities import (
     YouTubeVideoSnapshot,
 )
 from app.services.media import generate_preview_clip, generate_thumbnail, fingerprint_file, is_video_file, probe_media
-from app.services.utils import infer_published_at, is_generic_channel_name, parse_episode_number, slugify, split_title_parts
+from app.services.utils import infer_folder_hints, infer_published_at, is_generic_channel_name, parse_episode_number, slugify
 
 settings = get_settings()
 logger = get_logger()
@@ -257,18 +258,84 @@ def _hydrate_local_media_artifacts(video: Video, file_path: Path, fingerprint: s
             generate_preview_clip(file_path, settings.cache_dir, fingerprint)
 
 
-def upsert_video_for_path(db: Session, file_path: Path, mounted_root: Path, classification_root: Path | None = None) -> Video:
+def _content_signature(path: Path) -> tuple[int, str]:
+    stat = path.stat()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        digest.update(handle.read(1024 * 128))
+    return stat.st_size, digest.hexdigest()
+
+
+def upsert_video_for_path(
+    db: Session,
+    file_path: Path,
+    mounted_root: Path,
+    classification_root: Path | None = None,
+) -> tuple[Video, str]:
     relative_path = file_path.relative_to(mounted_root).as_posix()
     classification_relative = file_path.relative_to(classification_root or mounted_root)
-    title, series_hint = split_title_parts(classification_relative)
-    channel_hint = classification_relative.parts[0] if len(classification_relative.parts) >= 2 else "Unknown Channel"
+    title, channel_hint, series_hint = infer_folder_hints(classification_relative)
     episode_number = parse_episode_number(title)
     published_at = infer_published_at(file_path)
+    fingerprint = fingerprint_file(file_path)
+    file_size, content_digest = _content_signature(file_path)
+
+    existing_file = db.scalar(select(VideoFile).where(VideoFile.absolute_path == str(file_path)))
+    if not existing_file:
+        duplicate_candidates = db.scalars(
+            select(VideoFile)
+            .options(joinedload(VideoFile.video))
+            .where(
+                VideoFile.file_size == file_size,
+                VideoFile.absolute_path != str(file_path),
+            )
+        ).all()
+        duplicate_file = None
+        for candidate in duplicate_candidates:
+            candidate_path = Path(candidate.absolute_path)
+            if not candidate_path.exists():
+                continue
+            try:
+                _candidate_size, candidate_digest = _content_signature(candidate_path)
+            except OSError:
+                continue
+            if candidate_digest == content_digest:
+                duplicate_file = candidate
+                break
+
+        if duplicate_file:
+            duplicate_path = Path(duplicate_file.absolute_path)
+            if duplicate_path.exists():
+                try:
+                    file_path.unlink()
+                    if duplicate_file.video:
+                        duplicate_file.video.is_available = True
+                    db.flush()
+                    logger.info(
+                        "Scan deleted duplicate file path=%s duplicate_of=%s video_id=%s",
+                        file_path,
+                        duplicate_path,
+                        duplicate_file.video_id,
+                    )
+                    return duplicate_file.video, duplicate_file.absolute_path
+                except OSError as exc:
+                    logger.warning(
+                        "Scan duplicate cleanup failed path=%s duplicate_of=%s error=%s",
+                        file_path,
+                        duplicate_path,
+                        exc,
+                    )
+                    if duplicate_file.video:
+                        duplicate_file.video.is_available = True
+                    return duplicate_file.video, duplicate_file.absolute_path
+
+            duplicate_file.absolute_path = str(file_path)
+            duplicate_file.relative_path = relative_path
+            existing_file = duplicate_file
 
     channel = get_or_create_channel(db, channel_hint)
     series = get_or_create_series(db, series_hint) if series_hint else None
 
-    existing_file = db.scalar(select(VideoFile).where(VideoFile.absolute_path == str(file_path)))
     fallback_retention_item = None
     fallback_created_at = None
     if existing_file:
@@ -282,7 +349,7 @@ def upsert_video_for_path(db: Session, file_path: Path, mounted_root: Path, clas
                 .where(
                     or_(
                         RetentionItem.original_absolute_path == str(file_path),
-                        RetentionItem.file_fingerprint == fingerprint_file(file_path),
+                        RetentionItem.file_fingerprint == fingerprint,
                     )
                 )
                 .order_by(RetentionItem.updated_at.desc(), RetentionItem.id.desc())
@@ -362,11 +429,11 @@ def upsert_video_for_path(db: Session, file_path: Path, mounted_root: Path, clas
     if unchanged:
         video.is_available = True
         db.flush()
-        return video
+        return video, video_file.absolute_path
 
     metadata = probe_media(file_path)
     video.duration_seconds = metadata["duration_seconds"]
-    fingerprint = video_file.fingerprint if existing_file and video_file.fingerprint else fingerprint_file(file_path)
+    fingerprint = video_file.fingerprint if existing_file and video_file.fingerprint else fingerprint
     video_file.relative_path = relative_path
     video_file.file_size = metadata["file_size"]
     video_file.modified_at = modified_at
@@ -375,7 +442,7 @@ def upsert_video_for_path(db: Session, file_path: Path, mounted_root: Path, clas
     video_file.fingerprint = fingerprint
     _hydrate_local_media_artifacts(video, file_path, fingerprint, metadata["duration_seconds"])
     db.flush()
-    return video
+    return video, video_file.absolute_path
 
 
 def scan_selected_folders(db: Session, mounted_roots: list[Path], *, trigger: str = "manual") -> ScanJob:
@@ -421,8 +488,8 @@ def scan_selected_folders(db: Session, mounted_roots: list[Path], *, trigger: st
 
         discovered_paths: set[str] = set()
         for index, (path, root, classification_root) in enumerate(candidates, start=1):
-            discovered_paths.add(_normalize_fs_path(path))
-            upsert_video_for_path(db, path, root, classification_root=classification_root)
+            _video, tracked_path = upsert_video_for_path(db, path, root, classification_root=classification_root)
+            discovered_paths.add(_normalize_fs_path(tracked_path))
             discovered += 1
             if index == total or index % 5 == 0:
                 job.details = {"processed": index, "total": total, "percent": round((index / total) * 100) if total else 100}
