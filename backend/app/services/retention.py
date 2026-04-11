@@ -11,7 +11,13 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.core.timezone import localize_utc_to_server, server_now, server_timezone_name
+from app.core.timezone import (
+    coerce_datetime_to_timezone,
+    localize_utc_to_timezone,
+    normalize_timezone_name,
+    server_now,
+    server_timezone_name,
+)
 from app.models.entities import (
     Channel,
     RetentionExclusion,
@@ -37,6 +43,10 @@ RETENTION_DELETE_BUFFER_DIRNAME = ".pending-delete"
 VALID_RETENTION_AUTO_SCHEDULE_KINDS = {"interval", "daily", "weekly"}
 NOOP_AUTO_RETENTION_MESSAGES = {"Retention disabled", "Retention not due yet"}
 RetentionUndoAction: TypeAlias = tuple[str, Path, Path]
+
+
+def _retention_timezone_name(settings_row: RetentionSettings) -> str:
+    return normalize_timezone_name(settings_row.auto_timezone) or server_timezone_name()
 
 
 def _retention_file_label(*, relative_path: str | None = None, absolute_path: str | None = None) -> str:
@@ -117,7 +127,7 @@ def _normalize_retention_settings(settings_row: RetentionSettings) -> bool:
         settings_row.auto_weekday = auto_weekday
         changed = True
 
-    auto_timezone = server_timezone_name()
+    auto_timezone = normalize_timezone_name(settings_row.auto_timezone) or server_timezone_name()
     if settings_row.auto_timezone != auto_timezone:
         settings_row.auto_timezone = auto_timezone
         changed = True
@@ -762,13 +772,12 @@ def _most_recent_weekly_schedule(settings_row: RetentionSettings, now: datetime)
 
 def _retention_schedule_now(settings_row: RetentionSettings, now: datetime | None = None) -> datetime:
     if now is None:
-        return server_now()
-    return now.astimezone()
+        return coerce_datetime_to_timezone(server_now(), _retention_timezone_name(settings_row))
+    return coerce_datetime_to_timezone(now, _retention_timezone_name(settings_row))
 
 
 def _retention_localize_utc(stored_at: datetime | None, settings_row: RetentionSettings) -> datetime | None:
-    del settings_row
-    return localize_utc_to_server(stored_at)
+    return localize_utc_to_timezone(stored_at, _retention_timezone_name(settings_row))
 
 
 def retention_auto_run_due(settings_row: RetentionSettings, *, now: datetime | None = None) -> bool:

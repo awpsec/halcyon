@@ -45,6 +45,8 @@ const RETENTION_WEEKDAY_OPTIONS: Array<SettingsSelectOption<RetentionWeekdayValu
   { value: "5", label: "Saturday" },
   { value: "6", label: "Sunday" },
 ];
+const FALLBACK_RETENTION_TIMEZONE_LABEL = "Server local time";
+const LEGACY_RETENTION_TIMEZONE_LABELS = new Set(["", "UTC", "Etc/UTC", "GMT", FALLBACK_RETENTION_TIMEZONE_LABEL]);
 
 type AvatarCropDraft = {
   zoom: number;
@@ -79,6 +81,11 @@ function isNearBottom(node: HTMLDivElement) {
 function isUsefulChannel(value: string | null | undefined) {
   const normalized = (value ?? "").trim().toLowerCase();
   return normalized.length > 0 && normalized !== "unknown channel" && normalized !== "offline library";
+}
+
+function detectBrowserTimeZone() {
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone?.trim();
+  return zone ? zone : "";
 }
 
 function uploadMetadataStatus(video: VideoSummary) {
@@ -460,6 +467,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
     auto_time_hour: 4,
     auto_time_minute: 0,
     auto_weekday: 0,
+    auto_timezone: detectBrowserTimeZone(),
   });
   const [syncDirty, setSyncDirty] = useState(false);
   const [syncSaving, setSyncSaving] = useState(false);
@@ -473,13 +481,10 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
     const usedUnits = syncState.data?.youtube_api_quota_used_units ?? 0;
     const remainingUnits = syncState.data?.youtube_api_quota_remaining_units ?? Math.max(0, dailyLimit - usedUnits);
     const remainingPercent = Math.max(0, Math.min(100, syncState.data?.youtube_api_quota_remaining_percent ?? ((remainingUnits / dailyLimit) * 100)));
-    const fillColor = `color-mix(in srgb, var(--accent) ${Math.max(18, Math.round(remainingPercent))}%, var(--text-muted))`;
     return {
       dailyLimit,
-      usedUnits,
       remainingUnits,
       remainingPercent,
-      fillColor,
       estimated: syncState.data?.youtube_api_quota_estimated ?? true,
     };
   }, [syncState.data]);
@@ -623,8 +628,29 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
       auto_time_hour: retentionState.data.settings.auto_time_hour ?? 4,
       auto_time_minute: retentionState.data.settings.auto_time_minute ?? 0,
       auto_weekday: retentionState.data.settings.auto_weekday ?? 0,
+      auto_timezone: retentionState.data.settings.auto_timezone ?? detectBrowserTimeZone(),
     });
   }, [retentionDirty, retentionSaving, retentionState.data]);
+
+  useEffect(() => {
+    if (!isAdmin || retentionDirty || retentionSaving || !retentionState.data) return;
+    const detectedTimezone = detectBrowserTimeZone();
+    const currentTimezone = (retentionState.data.settings.auto_timezone ?? "").trim();
+    if (!detectedTimezone || detectedTimezone === currentTimezone || !LEGACY_RETENTION_TIMEZONE_LABELS.has(currentTimezone)) return;
+    void api.updateRetentionSettings({
+      enabled: retentionState.data.settings.enabled,
+      retention_days: retentionState.data.settings.retention_days ?? 30,
+      staging_folder_path: retentionState.data.settings.staging_folder_path ?? null,
+      auto_schedule_kind: retentionState.data.settings.auto_schedule_kind ?? "interval",
+      auto_interval_minutes: retentionState.data.settings.auto_interval_minutes ?? 15,
+      auto_time_hour: retentionState.data.settings.auto_time_hour ?? 4,
+      auto_time_minute: retentionState.data.settings.auto_time_minute ?? 0,
+      auto_weekday: retentionState.data.settings.auto_weekday ?? 0,
+      auto_timezone: detectedTimezone,
+    })
+      .then((next) => retentionState.setData(next))
+      .catch(() => undefined);
+  }, [isAdmin, retentionDirty, retentionSaving, retentionState.data, retentionState.setData]);
 
   useEffect(() => {
     if (!(retentionState.data?.pending_items.length ?? 0)) return undefined;
@@ -1018,6 +1044,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
         auto_time_hour: retentionDraft.auto_time_hour,
         auto_time_minute: retentionDraft.auto_time_minute,
         auto_weekday: retentionDraft.auto_weekday,
+        auto_timezone: retentionDraft.auto_timezone || detectBrowserTimeZone() || null,
       });
       retentionState.setData(next);
       setRetentionDraft({
@@ -1029,6 +1056,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
         auto_time_hour: next.settings.auto_time_hour ?? 4,
         auto_time_minute: next.settings.auto_time_minute ?? 0,
         auto_weekday: next.settings.auto_weekday ?? 0,
+        auto_timezone: next.settings.auto_timezone ?? detectBrowserTimeZone(),
       });
       setRetentionDirty(false);
       if (!options?.silent) {
@@ -1921,14 +1949,10 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                   <div className="settings-quota-meter-bar" aria-hidden="true">
                     <div
                       className="settings-quota-meter-fill"
-                      style={{
-                        width: `${youtubeQuotaSummary.remainingPercent}%`,
-                        background: youtubeQuotaSummary.fillColor,
-                      }}
+                      style={{ width: `${youtubeQuotaSummary.remainingPercent}%` }}
                     />
                   </div>
                   <div className="settings-quota-meter-meta">
-                    <span>{youtubeQuotaSummary.usedUnits.toLocaleString()} / {youtubeQuotaSummary.dailyLimit.toLocaleString()} units used</span>
                     <span>{youtubeQuotaSummary.estimated ? "Estimated from halcyon requests. Resets daily." : "Live quota usage."}</span>
                   </div>
                 </div>
@@ -2236,7 +2260,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                   ) : null}
                 </div>
                 <small className="muted-copy retention-frequency-note">
-                  Uses server time: {retentionState.data?.settings.auto_timezone ?? "Server local time"}
+                  Uses time zone: {(retentionState.data?.settings.auto_timezone ?? retentionDraft.auto_timezone) || FALLBACK_RETENTION_TIMEZONE_LABEL}
                 </small>
               </div>
               <div className="settings-field">
@@ -2684,7 +2708,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                 {profilePermissionsDirty
                   ? "Unsaved changes"
                   : retentionState.data?.settings.auto_timezone
-                    ? `Server time zone: ${retentionState.data.settings.auto_timezone}`
+                    ? `Retention time zone: ${retentionState.data.settings.auto_timezone}`
                     : "Permissions saved"}
               </small>
             </div>

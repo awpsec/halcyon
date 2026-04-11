@@ -6078,8 +6078,7 @@ body,
   margin-top: -6px;
 }
 
-.settings-page .settings-quota-meter-header,
-.settings-page .settings-quota-meter-meta {
+.settings-page .settings-quota-meter-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -6107,7 +6106,13 @@ body,
   height: 100%;
   min-width: 0;
   border-radius: inherit;
-  transition: width 180ms ease, background 180ms ease;
+  background: linear-gradient(90deg, #4e7fff, #61b4ff);
+  transition: width 180ms ease;
+}
+
+.settings-page .settings-quota-meter-meta {
+  font-size: 0.82rem;
+  color: var(--text-muted);
 }
 
 .settings-page .settings-inline-select-wrap {

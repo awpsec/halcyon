@@ -21,6 +21,7 @@ LEGACY_ENV_ALIASES = {
     "WAYTUBE_POSTGRES_HOST": "HALCYON_POSTGRES_HOST",
     "WAYTUBE_UPDATE_MANIFEST_URL": "HALCYON_UPDATE_MANIFEST_URL",
     "WAYTUBE_REPOSITORY_URL": "HALCYON_REPOSITORY_URL",
+    "WAYTUBE_SERVER_TIMEZONE": "HALCYON_SERVER_TIMEZONE",
 }
 
 
@@ -48,6 +49,7 @@ class Settings(BaseSettings):
     allow_origin: str | None = None
     update_manifest_url: str = "https://raw.githubusercontent.com/awpsec/halcyon/main/halcyon-release.json"
     repository_url: str = "https://github.com/awpsec/halcyon"
+    server_timezone: str | None = None
 
     model_config = SettingsConfigDict(
         env_prefix="HALCYON_",

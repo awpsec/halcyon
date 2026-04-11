@@ -322,7 +322,23 @@ def test_retention_settings_lock_timezone_to_server(tmp_path: Path):
 
         refreshed = get_or_create_retention_settings(db)
 
-        assert refreshed.auto_timezone == expected_timezone
+        assert refreshed.auto_timezone == "Pacific/Auckland"
+
+
+def test_retention_auto_run_due_uses_saved_timezone(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        settings_row = get_or_create_retention_settings(db)
+        settings_row.auto_schedule_kind = "daily"
+        settings_row.auto_time_hour = 9
+        settings_row.auto_time_minute = 0
+        settings_row.auto_timezone = "America/Los_Angeles"
+        settings_row.last_auto_run_at = datetime(2026, 4, 6, 15, 30, 0)
+
+        assert retention_auto_run_due(settings_row, now=datetime(2026, 4, 6, 16, 5, 0)) is True
+
+        settings_row.last_auto_run_at = datetime(2026, 4, 6, 16, 1, 0)
+
+        assert retention_auto_run_due(settings_row, now=datetime(2026, 4, 6, 16, 5, 0)) is False
 
 
 def test_auto_retention_deletes_due_staged_files_even_when_retention_is_disabled(tmp_path: Path):

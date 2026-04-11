@@ -99,6 +99,8 @@ If you use MeTube, set its download directory to the same `library` folder. halc
 
 Copy `.env.example` to `.env` only if you want to override defaults.
 
+If your Docker host or server process reports the wrong local time, set `HALCYON_SERVER_TIMEZONE` to an IANA zone such as `America/New_York`. Retention scheduling also stores the admin browser time zone when it replaces an old `UTC` default, so existing installs can self-correct from the Settings page.
+
 ### 4. Start halcyon
 
 ```bash

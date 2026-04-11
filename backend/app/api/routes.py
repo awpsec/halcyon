@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.api.deps import get_configured_admin_user, get_current_admin_user, get_current_user, resolve_session_token
 from app.core.config import get_settings
 from app.core.logging import read_log_lines
-from app.core.timezone import server_timezone_name
+from app.core.timezone import normalize_timezone_name, server_timezone_name
 from app.db.init_db import DEFAULT_ADMIN_USERNAME, clear_bootstrap_admin_credentials
 from app.db.session import get_db
 from app.models.entities import (
@@ -2766,7 +2766,7 @@ def update_retention_settings_route(
     settings_row.auto_time_hour = payload.auto_time_hour
     settings_row.auto_time_minute = payload.auto_time_minute
     settings_row.auto_weekday = payload.auto_weekday
-    settings_row.auto_timezone = server_timezone_name()
+    settings_row.auto_timezone = normalize_timezone_name(payload.auto_timezone) or server_timezone_name()
     if settings_row.auto_schedule_kind not in {"interval", "daily", "weekly"}:
         raise HTTPException(status_code=400, detail="Unsupported retention frequency")
     if settings_row.auto_schedule_kind == "interval":

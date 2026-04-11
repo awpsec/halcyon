@@ -344,11 +344,18 @@ export type TranscodeItem = {
   updated_at: string;
 };
 
+function browserTimeZone(): string | null {
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone?.trim();
+  return zone ? zone : null;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const timezone = browserTimeZone();
   const response = await fetch(path, {
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
+      ...(timezone ? { "X-Halcyon-Timezone": timezone } : {}),
       ...(init?.headers ?? {})
     },
     ...init
@@ -478,6 +485,7 @@ export const api = {
     auto_time_hour: number;
     auto_time_minute: number;
     auto_weekday: number;
+    auto_timezone?: string | null;
   }) =>
     request<RetentionOverview>("/api/retention/settings", { method: "PUT", body: JSON.stringify(payload) }),
   runRetention: () => request<{ result: { status: string; message: string; marked: number; deleted: number; reverted: number; run_token?: string | null }; settings: RetentionSettings; pending_items: RetentionPendingItem[]; history: RetentionRun[] }>("/api/retention/run", { method: "POST" }),
