@@ -8,6 +8,8 @@ halcyon is a self-hosted video library for people who miss following creators on
 
 It is meant to feel closer to the older web: subscriptions first, your own library, your own pace, and a lot less recommendation sludge. The name is deliberate. halcyon is about calm, familiarity, and getting back to media that you actually chose.
 
+No shorts. No algorithm. Make it your own again.
+
 If you want the smoothest setup, pair halcyon with [MeTube](https://github.com/alexta69/metube) and point MeTube downloads at the same library folder halcyon scans.
 
 ## Screenshots

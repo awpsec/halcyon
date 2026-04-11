@@ -20,6 +20,11 @@ def _watch_ref(video: Video) -> str:
     return str(video.id)
 
 
+def _thumbnail_url(video: Video) -> str:
+    version_source = video.updated_at or video.created_at or datetime.utcnow()
+    return f"/api/videos/{video.id}/thumbnail?v={int(version_source.timestamp())}"
+
+
 def _video_feed_query():
     return select(Video).options(joinedload(Video.channel), joinedload(Video.series), joinedload(Video.youtube_match)).where(Video.is_available.is_(True))
 
@@ -109,7 +114,7 @@ def _video_to_card(video: Video, progress_by_video: dict[int, WatchProgress], re
         series_id=video.series_id,
         channel_avatar_url=channel_avatar_url,
         duration_seconds=video.duration_seconds,
-        thumbnail_url=f"/api/videos/{video.id}/thumbnail",
+        thumbnail_url=_thumbnail_url(video),
         watched=bool(progress and progress.completed),
         progress_seconds=_visible_progress_seconds(progress),
         reason=reason,
@@ -311,7 +316,7 @@ def summarize_video(video: Video, progress: WatchProgress | None = None, db: Ses
         description=description,
         created_at=overridden.created_at,
         published_at=published_at,
-        thumbnail_url=f"/api/videos/{overridden.id}/thumbnail",
+        thumbnail_url=_thumbnail_url(overridden),
         watched=bool(progress and progress.completed),
         progress_seconds=_visible_progress_seconds(progress),
         youtube_view_count=view_count,

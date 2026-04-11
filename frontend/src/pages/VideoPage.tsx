@@ -2103,9 +2103,9 @@ export function VideoPage({
                     text={description || "No description yet."}
                     className="watch-description-copy linkified-text"
                   />
-                  {canExpandDescription ? (
+                  {canExpandDescription || addedAtLabel ? (
                     <div className="watch-description-footer">
-                      {!descriptionExpanded ? (
+                      {canExpandDescription && !descriptionExpanded ? (
                         <button
                           className="description-text-button description-ellipsis-button"
                           onClick={(event) => {
@@ -2116,7 +2116,7 @@ export function VideoPage({
                         >
                           ...
                         </button>
-                      ) : (
+                      ) : canExpandDescription ? (
                         <button
                           className="description-text-button"
                           onClick={(event) => {
@@ -2127,8 +2127,8 @@ export function VideoPage({
                         >
                           Show less
                         </button>
-                      )}
-                      {descriptionExpanded && addedAtLabel ? (
+                      ) : null}
+                      {addedAtLabel && (descriptionExpanded || !canExpandDescription) ? (
                         <small className="watch-added-at">Added on {addedAtLabel}</small>
                       ) : null}
                     </div>
