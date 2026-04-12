@@ -93,6 +93,7 @@ from app.schemas.common import (
     SessionOut,
     SeriesOut,
     SwitchSessionIn,
+    SyncReviewManualIn,
     SyncSettingsIn,
     SyncSettingsOut,
     UpdateStatusOut,
@@ -127,9 +128,13 @@ from app.services.retention import (
 from app.services.scanner import scan_selected_folders
 from app.services.sync import (
     REQUEST_HEADERS,
+    allow_fallback_art_enabled,
+    apply_sync_item,
     build_youtube_api_quota_summary,
+    fetch_watch_page_candidate,
     monitored_live_channel_ids,
     normalize_youtube_api_quota,
+    prefer_high_res_banners_enabled,
     reconcile_sync_job,
     refresh_live_streams,
     sync_scope,
@@ -162,10 +167,23 @@ AUTH_ADMIN_RECOVERY_WINDOW_SECONDS = 15 * 60
 LIVE_REFRESH_INTERVAL_SECONDS = 900
 LIVE_STALE_AFTER_SECONDS = 1800
 DEFAULT_LIBRARY_SENTINEL = ".halcyon-library-root"
+YOUTUBE_VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
 def _normalize_fs_path(value: str | Path) -> str:
     return str(Path(value).resolve(strict=False)).replace("/", "\\").rstrip("\\").casefold()
+
+
+def _extract_youtube_video_id(value: str) -> str | None:
+    normalized = (value or "").strip()
+    if not normalized:
+        return None
+    if YOUTUBE_VIDEO_ID_PATTERN.fullmatch(normalized):
+        return normalized
+    match = re.search(r"(?:v=|/embed/|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})", normalized)
+    if match:
+        return match.group(1)
+    return None
 
 
 def _dedupe_storage_roots(paths: list[Path]) -> list[Path]:
@@ -3285,7 +3303,10 @@ def sync_review(
 ) -> dict:
     del current_user
     review_items = db.scalars(
-        select(YouTubeMatch).options(joinedload(YouTubeMatch.video)).where(YouTubeMatch.status == "review").order_by(YouTubeMatch.confidence.desc())
+        select(YouTubeMatch)
+        .options(joinedload(YouTubeMatch.video).joinedload(Video.channel))
+        .where(YouTubeMatch.status == "review")
+        .order_by(YouTubeMatch.confidence.desc())
     ).all()
     return {
         "items": [
@@ -3293,9 +3314,33 @@ def sync_review(
                 "id": item.id,
                 "video_id": item.video_id,
                 "video_title": item.video.title if item.video else None,
+                "channel_name": item.video.channel.name if item.video and item.video.channel else None,
                 "youtube_video_id": item.youtube_video_id,
+                "youtube_title": (
+                    db.scalar(
+                        select(YouTubeVideoSnapshot.title).where(
+                            YouTubeVideoSnapshot.youtube_video_id == item.youtube_video_id
+                        )
+                    )
+                    if item.youtube_video_id
+                    else None
+                ),
+                "youtube_channel_title": (
+                    db.scalar(
+                        select(YouTubeChannelSnapshot.title).where(
+                            YouTubeChannelSnapshot.youtube_channel_id == item.youtube_channel_id
+                        )
+                    )
+                    if item.youtube_channel_id
+                    else None
+                ),
+                "youtube_watch_url": (
+                    f"https://www.youtube.com/watch?v={item.youtube_video_id}"
+                    if item.youtube_video_id
+                    else None
+                ),
                 "confidence": item.confidence,
-                "reasons": item.reasons,
+                "reasons": item.reasons or [],
             }
             for item in review_items
         ]
@@ -3333,4 +3378,61 @@ def unlink_match(
     match.confidence = 0.0
     match.reasons = []
     db.commit()
+    return {"ok": True}
+
+
+@router.post("/sync/review/{match_id}/manual")
+async def manually_match_review_item(
+    match_id: int,
+    payload: SyncReviewManualIn,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_configured_admin_user),
+) -> dict:
+    del current_user
+    match = db.get(YouTubeMatch, match_id)
+    if not match:
+        raise HTTPException(status_code=404, detail="Match not found")
+    video = _video_by_id(db, match.video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    youtube_video_id = _extract_youtube_video_id(payload.youtube_ref)
+    if not youtube_video_id:
+        raise HTTPException(status_code=400, detail="Enter a valid YouTube URL or video ID")
+
+    settings_row = db.scalar(select(SyncSettings))
+    comment_limit = settings_row.comment_limit if settings_row and settings_row.comment_limit else 100
+    requests_per_second = settings_row.requests_per_second if settings_row and settings_row.requests_per_second else 3
+    api_key = _active_youtube_api_key(db)
+
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        headers=REQUEST_HEADERS,
+        timeout=20.0,
+    ) as client:
+        candidate = await fetch_watch_page_candidate(
+            client,
+            youtube_video_id,
+            requests_per_second,
+        )
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Unable to fetch that YouTube video right now")
+
+        await apply_sync_item(
+            db,
+            video,
+            candidate,
+            comment_limit=comment_limit,
+            requests_per_second=requests_per_second,
+            client=client,
+            api_key=api_key,
+            channel_cache={},
+            playlist_cache={} if api_key else None,
+            allow_fallback_art=allow_fallback_art_enabled(db),
+            prefer_high_res_banners=prefer_high_res_banners_enabled(db),
+            confidence=max(match.confidence or 0.0, 0.99),
+            reasons=list(dict.fromkeys([*(match.reasons or []), "manual-review"])),
+            status="matched",
+        )
+
     return {"ok": True}

@@ -9,11 +9,11 @@ from sqlalchemy.orm import Session, sessionmaker
 import app.db.init_db as init_db_module
 import app.services.scanner as scanner_service
 from app.api import routes as routes_module
-from app.api.routes import _indexed_library_storage_bytes, _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage, list_roots, list_selected_folders, list_videos, update_sync_settings
+from app.api.routes import _indexed_library_storage_bytes, _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage, list_roots, list_selected_folders, list_videos, manually_match_review_item, update_sync_settings
 from app.db.init_db import seed_defaults
 from app.models.base import Base
 from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, SyncSettings, UserProfile, Video, VideoFile, YouTubeMatch, YouTubeVideoSnapshot
-from app.schemas.common import SyncSettingsIn
+from app.schemas.common import SyncReviewManualIn, SyncSettingsIn
 from app.services.scanner import scan_selected_folders
 
 
@@ -201,6 +201,82 @@ def test_update_sync_settings_can_clear_api_key(tmp_path: Path):
 
         db.refresh(settings_row)
         assert settings_row.youtube_api_key is None
+
+
+def test_manual_sync_review_match_accepts_youtube_url(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        admin = UserProfile(name="admin", display_name="Admin", accent_color="#fff", is_admin=True)
+        channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
+        db.add_all([admin, channel])
+        db.flush()
+
+        video = Video(
+            title="LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+            slug="lady-bandits-ep-30",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=1443,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+
+        match = YouTubeMatch(
+            video_id=video.id,
+            youtube_video_id="oldmatch1234",
+            youtube_channel_id="old-channel",
+            status="review",
+            confidence=0.61,
+            reasons=["channel-mismatch"],
+        )
+        db.add(match)
+        db.commit()
+
+        async def fake_fetch_watch_page_candidate(*args, **kwargs):
+            return {
+                "id": "abc123def45",
+                "snippet": {
+                    "title": "LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+                    "channelTitle": "FRANKIEonPCin1080p",
+                    "channelId": "channel-frankie",
+                    "publishedAt": "2026-04-12T12:00:00Z",
+                    "description": "Manual review pick",
+                    "thumbnails": {},
+                },
+                "statistics": {},
+                "_waytube_duration_seconds": 1443,
+                "_waytube_source": "watch-page",
+            }
+
+        async def fake_apply_sync_item(db: Session, video: Video, item: dict, **kwargs):
+            review_match = db.get(YouTubeMatch, match.id)
+            review_match.youtube_video_id = item["id"]
+            review_match.youtube_channel_id = item["snippet"]["channelId"]
+            review_match.status = kwargs["status"]
+            review_match.confidence = kwargs["confidence"]
+            review_match.reasons = kwargs["reasons"]
+            db.commit()
+            return review_match
+
+        monkeypatch.setattr(routes_module, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+        monkeypatch.setattr(routes_module, "apply_sync_item", fake_apply_sync_item)
+
+        result = asyncio.run(
+            manually_match_review_item(
+                match.id,
+                SyncReviewManualIn(youtube_ref="https://youtu.be/abc123def45"),
+                db=db,
+                current_user=admin,
+            )
+        )
+
+        refreshed_match = db.get(YouTubeMatch, match.id)
+
+        assert result == {"ok": True}
+        assert refreshed_match is not None
+        assert refreshed_match.youtube_video_id == "abc123def45"
+        assert refreshed_match.status == "matched"
+        assert "manual-review" in (refreshed_match.reasons or [])
 
 
 def test_list_videos_prefers_uploaded_date_over_added_date(tmp_path: Path):

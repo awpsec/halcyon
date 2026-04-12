@@ -7090,6 +7090,88 @@ body,
   cursor: default;
 }
 
+.sync-review-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.sync-review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 520px;
+}
+
+.sync-review-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--panel-strong) 72%, transparent);
+}
+
+.sync-review-copy {
+  display: grid;
+  gap: 8px;
+}
+
+.sync-review-title-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sync-review-confidence {
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.sync-review-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.sync-review-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sync-review-reason-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel-soft) 82%, transparent);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.sync-review-actions,
+.sync-review-manual {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.sync-review-manual input {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
 .delete-user-modal {
   display: grid;
   gap: 14px;

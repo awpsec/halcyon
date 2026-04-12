@@ -15,6 +15,7 @@ import {
 import { AvatarImage } from "../components/AvatarImage";
 import { Modal } from "../components/Modal";
 import { SettingsPageSkeleton } from "../components/PageSkeletons";
+import { SyncReviewPanel } from "../components/SyncReviewPanel";
 import { useAsyncData } from "../hooks/useAsyncData";
 import { formatAbsoluteDateTime, formatRelativeDate, parseApiDate } from "../lib/format";
 import { pushToast } from "../lib/notifications";
@@ -2930,6 +2931,13 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                     : "Permissions saved"}
               </small>
             </div>
+          </section>
+
+          <section className="settings-section">
+            <SyncReviewPanel
+              title="Sync review"
+              note="When the scanner lands in the middle, approve the current candidate, reject it, or paste the exact YouTube URL/ID you want halcyon to use."
+            />
           </section>
         </div>
       ) : null}

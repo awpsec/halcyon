@@ -252,6 +252,23 @@ export type LiveOverview = {
   items: LiveStream[];
 };
 
+export type SyncReviewItem = {
+  id: number;
+  video_id: number;
+  video_title: string | null;
+  channel_name: string | null;
+  youtube_video_id: string | null;
+  youtube_title: string | null;
+  youtube_channel_title: string | null;
+  youtube_watch_url: string | null;
+  confidence: number;
+  reasons: string[];
+};
+
+export type SyncReviewQueue = {
+  items: SyncReviewItem[];
+};
+
 export type RetentionSettings = {
   id: number;
   enabled: boolean;
@@ -550,9 +567,11 @@ export const api = {
   syncSeries: (id: number) => request(`/api/sync/series/${id}`, { method: "POST" }),
   syncVideo: (id: number, options?: { force?: boolean }) =>
     request(`/api/sync/video/${id}${options?.force ? "?force=true" : ""}`, { method: "POST" }),
-  syncReview: () => request<any>("/api/sync/review"),
+  syncReview: () => request<SyncReviewQueue>("/api/sync/review"),
   approveMatch: (id: number) => request(`/api/sync/review/${id}/approve`, { method: "POST" }),
   unlinkMatch: (id: number) => request(`/api/sync/review/${id}/unlink`, { method: "POST" }),
+  manualMatch: (id: number, youtubeRef: string) =>
+    request(`/api/sync/review/${id}/manual`, { method: "POST", body: JSON.stringify({ youtube_ref: youtubeRef }) }),
   jobs: () => request<any[]>("/api/jobs"),
   jobsStatus: () => request<{ items: JobStatusItem[] }>("/api/jobs/status"),
   transcodes: () => request<{ items: TranscodeItem[] }>("/api/transcodes"),
