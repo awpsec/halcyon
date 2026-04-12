@@ -209,15 +209,47 @@ export type SyncSettings = {
   scan_interval_seconds: number;
   allow_fallback_art: boolean;
   prefer_high_res_banners: boolean;
+  live_tab_enabled: boolean;
+  live_monitored_channel_ids: number[];
   comment_limit: number;
   requests_per_second: number;
   last_library_sync_at: string | null;
+  last_live_sync_at: string | null;
   youtube_api_key_configured: boolean;
   youtube_api_quota_daily_limit: number;
   youtube_api_quota_used_units: number;
   youtube_api_quota_remaining_units: number;
   youtube_api_quota_remaining_percent: number;
   youtube_api_quota_estimated: boolean;
+};
+
+export type LiveStream = {
+  youtube_video_id: string;
+  youtube_channel_id: string;
+  title: string;
+  description: string | null;
+  thumbnail_url: string | null;
+  channel_id: number | null;
+  channel_name: string | null;
+  channel_slug: string | null;
+  channel_avatar_url: string | null;
+  channel_banner_url: string | null;
+  scheduled_start_at: string | null;
+  actual_start_at: string | null;
+  concurrent_viewers: number | null;
+  is_live: boolean;
+  last_seen_at: string;
+  fetched_at: string;
+  watch_url: string;
+  embed_url: string;
+  chat_enabled: boolean;
+};
+
+export type LiveOverview = {
+  enabled: boolean;
+  api_key_configured: boolean;
+  last_live_sync_at: string | null;
+  items: LiveStream[];
 };
 
 export type RetentionSettings = {
@@ -448,6 +480,9 @@ export const api = {
     request<{ reaction: "like" | "dislike" | null }>(`/api/videos/${id}/reaction`, { method: "POST", body: JSON.stringify({ reaction }) }),
   toggleSavedVideo: (id: number) =>
     request<{ saved: boolean }>(`/api/videos/${id}/save`, { method: "POST" }),
+  liveOverview: () => request<LiveOverview>("/api/live"),
+  liveStream: (youtubeVideoId: string) =>
+    request<LiveStream>(`/api/live/${encodeURIComponent(youtubeVideoId)}`),
   setPlaylistSaved: (id: number, saved: boolean) =>
     request<{ saved: boolean; count: number }>(`/api/playlists/${id}/save`, { method: "POST", body: JSON.stringify({ saved }) }),
   channels: () => request<any[]>("/api/channels"),
@@ -473,7 +508,7 @@ export const api = {
   updateMetadataOverride: (payload: { target_type: string; target_id: number; payload: Record<string, unknown> }) =>
     request("/api/admin/metadata-overrides", { method: "POST", body: JSON.stringify(payload) }),
   syncSettings: () => request<SyncSettings>("/api/sync/settings"),
-  updateSyncSettings: (payload: { automatic_detection_enabled: boolean; automatic_sync_enabled: boolean; scan_interval_seconds: number; allow_fallback_art: boolean; prefer_high_res_banners: boolean; comment_limit: number; requests_per_second: number; youtube_api_key?: string | null; clear_youtube_api_key?: boolean }) =>
+  updateSyncSettings: (payload: { automatic_detection_enabled: boolean; automatic_sync_enabled: boolean; scan_interval_seconds: number; allow_fallback_art: boolean; prefer_high_res_banners: boolean; live_tab_enabled: boolean; live_monitored_channel_ids: number[]; comment_limit: number; requests_per_second: number; youtube_api_key?: string | null; clear_youtube_api_key?: boolean }) =>
     request<SyncSettings>("/api/sync/settings", { method: "PUT", body: JSON.stringify(payload) }),
   retentionSettings: () => request<RetentionOverview>("/api/retention/settings"),
   updateRetentionSettings: (payload: {

@@ -262,6 +262,8 @@ class MetadataOverrideIn(BaseModel):
 class SyncSettingsIn(BaseModel):
     automatic_detection_enabled: bool
     automatic_sync_enabled: bool
+    live_tab_enabled: bool = True
+    live_monitored_channel_ids: list[int] = Field(default_factory=list)
     scan_interval_seconds: int = 30
     allow_fallback_art: bool = False
     prefer_high_res_banners: bool = False
@@ -275,12 +277,15 @@ class SyncSettingsOut(OrmModel):
     id: int
     automatic_detection_enabled: bool
     automatic_sync_enabled: bool
+    live_tab_enabled: bool = True
+    live_monitored_channel_ids: list[int] = Field(default_factory=list)
     scan_interval_seconds: int
     allow_fallback_art: bool
     prefer_high_res_banners: bool
     comment_limit: int
     requests_per_second: int
     last_library_sync_at: datetime | None
+    last_live_sync_at: datetime | None = None
     youtube_api_key_configured: bool = False
     youtube_api_quota_daily_limit: int = 10_000
     youtube_api_quota_used_units: int = 0
@@ -375,6 +380,35 @@ class RetentionLookupItem(BaseModel):
 class RetentionFolderCreateIn(BaseModel):
     parent_path: str
     name: str
+
+
+class LiveStreamOut(BaseModel):
+    youtube_video_id: str
+    youtube_channel_id: str
+    title: str
+    description: str | None = None
+    thumbnail_url: str | None = None
+    channel_id: int | None = None
+    channel_name: str | None = None
+    channel_slug: str | None = None
+    channel_avatar_url: str | None = None
+    channel_banner_url: str | None = None
+    scheduled_start_at: datetime | None = None
+    actual_start_at: datetime | None = None
+    concurrent_viewers: int | None = None
+    is_live: bool = True
+    last_seen_at: datetime
+    fetched_at: datetime
+    watch_url: str
+    embed_url: str
+    chat_enabled: bool = True
+
+
+class LiveOverviewOut(BaseModel):
+    enabled: bool = True
+    api_key_configured: bool = False
+    last_live_sync_at: datetime | None = None
+    items: list[LiveStreamOut] = Field(default_factory=list)
 
 
 class JobOut(OrmModel):

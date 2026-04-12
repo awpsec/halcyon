@@ -1,7 +1,7 @@
 import { createPortal } from "react-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
-import { api, type Profile } from "../api/client";
+import { Link, useParams } from "react-router-dom";
+import { api, type LiveStream, type Profile } from "../api/client";
 import { CollectionCard } from "../components/CollectionCard";
 import { EmptyState } from "../components/EmptyState";
 import { LinkifiedText } from "../components/LinkifiedText";
@@ -261,6 +261,7 @@ export function ChannelDetailPage({ profile }: { profile: Profile | null }) {
 
   if (loading) return <ChannelPageSkeleton />;
   if (error || !data) return <div className="panel error">{error ?? "Channel not found"}</div>;
+  const liveStream = (data.live_stream as LiveStream | null | undefined) ?? null;
   const countLine = [
     data.channel.subscriber_count ? `${formatCount(data.channel.subscriber_count)} subscribers` : null,
     `${data.channel.youtube_video_count ?? data.channel.video_count} videos`,
@@ -364,6 +365,7 @@ export function ChannelDetailPage({ profile }: { profile: Profile | null }) {
           </div>
           <div className="channel-hero-text">
             <h1 className="channel-title-row">
+              {liveStream ? <span className="channel-live-badge">LIVE</span> : null}
               <span>{data.channel.name}</span>
               {milestoneBadge ? <img className="channel-inline-badge" src={milestoneBadge.src} alt={milestoneBadge.label} /> : null}
             </h1>
@@ -436,6 +438,39 @@ export function ChannelDetailPage({ profile }: { profile: Profile | null }) {
 
       {activeTab === "Home" ? (
         <>
+          {liveStream ? (
+            <section className="home-block">
+              <div className="section-heading channel-section-heading">
+                <h2>Livestream</h2>
+                <div className="channel-heading-spacer" aria-hidden="true" />
+              </div>
+              <article className="live-card channel-live-card">
+                <Link className="live-card-thumb-link" to={`/live/${liveStream.youtube_video_id}`}>
+                  <div className="live-card-thumb">
+                    {liveStream.thumbnail_url ? (
+                      <img src={liveStream.thumbnail_url} alt={liveStream.title} />
+                    ) : (
+                      <div className="live-card-thumb-fallback">LIVE</div>
+                    )}
+                    <span className="live-pill">LIVE</span>
+                  </div>
+                </Link>
+                <div className="live-card-copy">
+                  <Link className="live-card-title-link" to={`/live/${liveStream.youtube_video_id}`}>
+                    <strong>{liveStream.title}</strong>
+                  </Link>
+                  <div className="live-card-meta">
+                    {liveStream.concurrent_viewers != null ? (
+                      <span>{formatCount(liveStream.concurrent_viewers)} watching</span>
+                    ) : null}
+                    {liveStream.actual_start_at ? (
+                      <span>Started {formatRelativeDate(liveStream.actual_start_at)}</span>
+                    ) : null}
+                  </div>
+                </div>
+              </article>
+            </section>
+          ) : null}
           {recentUploads.length ? (
             <section className="home-block">
               <div className="section-heading channel-section-heading">

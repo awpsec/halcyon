@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointer
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   api,
+  type ChannelSummary,
   type Preferences,
   type Profile,
   type RetentionFolderBrowser,
@@ -239,6 +240,15 @@ function extractApiErrorMessage(error: unknown, fallback: string) {
   }
 }
 
+function matchesChannelSearch(channel: ChannelSummary, query: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+  return (
+    channel.name.toLowerCase().includes(normalizedQuery)
+    || (channel.slug ?? "").toLowerCase().includes(normalizedQuery)
+  );
+}
+
 function formatBytes(value: number | null | undefined) {
   if (value == null || !Number.isFinite(value)) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -434,6 +444,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
   const uploadsState = useAsyncData(() => (isAdmin ? api.videos({ offset: 0, limit: INITIAL_UPLOAD_BATCH }) : Promise.resolve([])), [isAdmin]);
   const retentionState = useAsyncData(() => (isAdmin ? api.retentionSettings() : Promise.resolve(null)), [isAdmin]);
   const profilesState = useAsyncData(() => (isAdmin ? api.profiles() : Promise.resolve([])), [isAdmin]);
+  const channelsState = useAsyncData(() => (isAdmin ? api.channels() : Promise.resolve([])), [isAdmin]);
   const [browserRootId, setBrowserRootId] = useState<number | null>(null);
   const browserState = useAsyncData(
     () => (isAdmin && browserRootId ? api.browse(browserRootId, "") : Promise.resolve(null)),
@@ -454,6 +465,8 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
     scan_interval_seconds: 30,
     allow_fallback_art: false,
     prefer_high_res_banners: false,
+    live_tab_enabled: true,
+    live_monitored_channel_ids: [] as number[],
     comment_limit: 100,
     requests_per_second: 3,
     youtube_api_key: "",
@@ -519,6 +532,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
   const [uploadsLoadingMore, setUploadsLoadingMore] = useState(false);
   const [uploadSyncPending, setUploadSyncPending] = useState<Record<number, "sync" | "force" | undefined>>({});
   const [retentionLookupQuery, setRetentionLookupQuery] = useState("");
+  const [liveMonitorQuery, setLiveMonitorQuery] = useState("");
   const [retentionLookupResults, setRetentionLookupResults] = useState<{
     channels: RetentionLookupItem[];
     series: RetentionLookupItem[];
@@ -537,6 +551,24 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
   const [retentionFolderCreating, setRetentionFolderCreating] = useState(false);
   const [retentionNewFolderOpen, setRetentionNewFolderOpen] = useState(false);
   const [retentionNewFolderName, setRetentionNewFolderName] = useState("");
+  const liveMonitorChannels = useMemo(
+    () =>
+      (channelsState.data ?? [])
+        .filter((channel: ChannelSummary) => channel.slug !== "unknown-channel")
+        .sort((left: ChannelSummary, right: ChannelSummary) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" })),
+    [channelsState.data],
+  );
+  const selectedLiveMonitorChannels = useMemo(() => {
+    const selectedIds = new Set(syncDraft.live_monitored_channel_ids);
+    return liveMonitorChannels.filter((channel) => selectedIds.has(channel.id));
+  }, [liveMonitorChannels, syncDraft.live_monitored_channel_ids]);
+  const liveMonitorSearchResults = useMemo(() => {
+    const selectedIds = new Set(syncDraft.live_monitored_channel_ids);
+    return liveMonitorChannels
+      .filter((channel) => !selectedIds.has(channel.id))
+      .filter((channel) => matchesChannelSearch(channel, liveMonitorQuery))
+      .slice(0, 8);
+  }, [liveMonitorChannels, liveMonitorQuery, syncDraft.live_monitored_channel_ids]);
   const retentionFolderBrowserRef = useRef<HTMLDivElement | null>(null);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -614,6 +646,8 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
       scan_interval_seconds: syncState.data.scan_interval_seconds ?? 30,
       allow_fallback_art: syncState.data.allow_fallback_art ?? false,
       prefer_high_res_banners: syncState.data.prefer_high_res_banners ?? false,
+      live_tab_enabled: syncState.data.live_tab_enabled ?? true,
+      live_monitored_channel_ids: syncState.data.live_monitored_channel_ids ?? [],
       comment_limit: syncState.data.comment_limit,
       requests_per_second: syncState.data.requests_per_second ?? 3,
       youtube_api_key: "",
@@ -1168,6 +1202,8 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
         scan_interval_seconds: next.scan_interval_seconds ?? 30,
         allow_fallback_art: next.allow_fallback_art ?? false,
         prefer_high_res_banners: next.prefer_high_res_banners ?? false,
+        live_tab_enabled: next.live_tab_enabled ?? true,
+        live_monitored_channel_ids: next.live_monitored_channel_ids ?? [],
         comment_limit: next.comment_limit,
         requests_per_second: next.requests_per_second ?? 3,
         youtube_api_key: "",
@@ -1181,6 +1217,28 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
     } finally {
       setSyncSaving(false);
     }
+  }
+
+  function addLiveMonitorChannel(channel: ChannelSummary) {
+    setSyncDraft((current) => {
+      if (current.live_monitored_channel_ids.includes(channel.id)) {
+        return current;
+      }
+      return {
+        ...current,
+        live_monitored_channel_ids: [...current.live_monitored_channel_ids, channel.id].sort((left, right) => left - right),
+      };
+    });
+    setLiveMonitorQuery("");
+    setSyncDirty(true);
+  }
+
+  function removeLiveMonitorChannel(channelId: number) {
+    setSyncDraft((current) => ({
+      ...current,
+      live_monitored_channel_ids: current.live_monitored_channel_ids.filter((value) => value !== channelId),
+    }));
+    setSyncDirty(true);
   }
 
   async function saveAccount() {
@@ -1941,6 +1999,127 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                     <span className="switch-slider" />
                   </button>
                 </div>
+                <div className="switch-row">
+                  <div className="settings-copy">
+                    <div className="settings-label-row">
+                      <strong
+                        className={settingLabelClass("Show a Live tab and only check selected channels for active livestreams.")}
+                        data-tooltip="Show a Live tab and only check selected channels for active livestreams."
+                        tabIndex={0}
+                      >
+                        Live tab
+                      </strong>
+                    </div>
+                    <small className="muted-copy">
+                      {syncState.data?.last_live_sync_at
+                        ? `Last live check ${formatRelativeDate(syncState.data.last_live_sync_at) ?? "recently"}`
+                        : "Enabled by default. Select which channels Halcyon should monitor for streams."}
+                    </small>
+                  </div>
+                  <button
+                    type="button"
+                    className={`switch switch-button ${syncDraft.live_tab_enabled ? "is-on" : ""}`}
+                    role="switch"
+                    aria-checked={syncDraft.live_tab_enabled}
+                    aria-label="Toggle live tab"
+                    onClick={() => {
+                      setSyncDraft((current) => ({
+                        ...current,
+                        live_tab_enabled: !current.live_tab_enabled,
+                      }));
+                      setSyncDirty(true);
+                    }}
+                  >
+                    <span className="switch-slider" />
+                  </button>
+                </div>
+                {syncDraft.live_tab_enabled ? (
+                  <div className="settings-live-monitor-panel">
+                    <div className="settings-live-monitor-header">
+                      <strong>Monitored livestream channels</strong>
+                      <span>{syncDraft.live_monitored_channel_ids.length} selected</span>
+                    </div>
+                    <small className="muted-copy">
+                      Only selected channels are checked for livestreams. Saving this list runs a fresh live check right away. Channels still need a valid YouTube match before they can appear in Live.
+                    </small>
+                    {channelsState.loading ? (
+                      <div className="search-results-empty">Loading channels...</div>
+                    ) : liveMonitorChannels.length ? (
+                      <>
+                        <label className="settings-field settings-live-monitor-search-field">
+                          <span>Add channel</span>
+                          <input
+                            type="text"
+                            value={liveMonitorQuery}
+                            onChange={(event) => setLiveMonitorQuery(event.target.value)}
+                            placeholder="Search channels to monitor for livestreams"
+                          />
+                        </label>
+                        {liveMonitorQuery.trim() ? (
+                          liveMonitorSearchResults.length ? (
+                            <div className="settings-live-monitor-search-results">
+                              {liveMonitorSearchResults.map((channel) => (
+                                <button
+                                  key={channel.id}
+                                  type="button"
+                                  className="settings-live-monitor-item"
+                                  onClick={() => addLiveMonitorChannel(channel)}
+                                >
+                                  <AvatarImage
+                                    src={channel.avatar_url ?? null}
+                                    alt={channel.name}
+                                    fallbackText={channel.name}
+                                    className="settings-live-monitor-avatar"
+                                  />
+                                  <span className="settings-live-monitor-copy">
+                                    <strong>{channel.name}</strong>
+                                    <small>{channel.video_count.toLocaleString()} videos indexed</small>
+                                  </span>
+                                  <span className="settings-live-monitor-action">Add</span>
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="search-results-empty">No channels match that search.</div>
+                          )
+                        ) : (
+                          <div className="settings-field-hint">Search for a channel above, then add it to the monitored list.</div>
+                        )}
+                        {selectedLiveMonitorChannels.length ? (
+                          <div className="settings-live-monitor-selected-wrap">
+                            <div className="settings-live-monitor-list">
+                              {selectedLiveMonitorChannels.map((channel) => (
+                                <div className="settings-live-monitor-item is-selected" key={channel.id}>
+                                  <AvatarImage
+                                    src={channel.avatar_url ?? null}
+                                    alt={channel.name}
+                                    fallbackText={channel.name}
+                                    className="settings-live-monitor-avatar"
+                                  />
+                                  <span className="settings-live-monitor-copy">
+                                    <strong>{channel.name}</strong>
+                                    <small>{channel.video_count.toLocaleString()} videos indexed</small>
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="ghost-button settings-live-monitor-remove"
+                                    onClick={() => removeLiveMonitorChannel(channel.id)}
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="search-results-empty">No channels selected yet.</div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="search-results-empty">Add at least one channel to Halcyon before selecting livestream monitoring.</div>
+                    )}
+                  </div>
+                ) : null}
                 <label className="settings-field">
                   <span>YouTube API key</span>
                   <input

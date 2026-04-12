@@ -9,6 +9,8 @@ import { ChannelsPage } from "./pages/ChannelsPage";
 import { ChannelDetailPage } from "./pages/ChannelDetailPage";
 import { HomePage } from "./pages/HomePage";
 import { LibraryPage } from "./pages/LibraryPage";
+import { LivePage } from "./pages/LivePage";
+import { LiveWatchPage } from "./pages/LiveWatchPage";
 import { PlaylistsPage } from "./pages/PlaylistsPage";
 import { PlaylistDetailPage } from "./pages/PlaylistDetailPage";
 import { ProfilePage } from "./pages/ProfilePage";
@@ -341,6 +343,8 @@ function AppRoutes() {
           <Route path="/profile/:username" element={<ProfilePage currentProfile={profile} />} />
           <Route path="/profile/:username/saved" element={<SavedVideosPage profile={profile} />} />
           <Route path="/library" element={<LibraryPage profile={profile} />} />
+          <Route path="/live" element={<LivePage />} />
+          <Route path="/live/:youtubeVideoId" element={<LiveWatchPage preferences={preferences} />} />
           <Route path="/channels" element={<ChannelsPage profile={profile} />} />
           <Route path="/channels/:channelRef" element={<ChannelDetailPage profile={profile} />} />
           <Route path="/series" element={<SeriesPage />} />

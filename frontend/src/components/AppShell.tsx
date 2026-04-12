@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Link,
   NavLink,
@@ -9,6 +9,7 @@ import {
 import {
   api,
   type JobStatusItem,
+  type LiveOverview,
   type Preferences,
   type Profile,
   type SearchResults,
@@ -26,11 +27,18 @@ type Props = {
   onOpenMenu: (rect: DOMRect) => void;
 };
 
-const baseNavItems = [
+type NavItem = {
+  to: string;
+  label: ReactNode;
+  end?: boolean;
+};
+
+const baseNavItems: NavItem[] = [
   { to: "/", label: "Home", end: true },
   { to: "/channels", label: "Subscriptions", end: true },
   { to: "/playlists", label: "Playlists" },
 ];
+const LIVE_OVERVIEW_POLL_MS = 60_000;
 
 function ThemeIcon({ theme }: { theme: Preferences["theme"] }) {
   return theme === "dark" ? (
@@ -98,6 +106,7 @@ export function AppShell({
     videos: [],
     channels: [],
   });
+  const [liveOverview, setLiveOverview] = useState<LiveOverview | null>(null);
   const [activeJobs, setActiveJobs] = useState<JobStatusItem[]>([]);
   const [jobsOpen, setJobsOpen] = useState(false);
   const searchRef = useRef<HTMLDivElement | null>(null);
@@ -108,15 +117,24 @@ export function AppShell({
       ? "/assets/branding/halcyon_ed_bw.png"
       : "/assets/branding/halcyon_ed_color.png";
   const navItems = useMemo(
-    () => [
-      baseNavItems[0],
-      {
-        to: profile ? `/profile/${profile.name}` : "/profile",
-        label: "Profile",
-      },
-      ...baseNavItems.slice(1),
-    ],
-    [profile],
+    () => {
+      const items = [
+        baseNavItems[0],
+        {
+          to: profile ? `/profile/${profile.name}` : "/profile",
+          label: "Profile",
+        },
+      ];
+      if (liveOverview?.enabled && liveOverview.api_key_configured) {
+        items.push({
+          to: "/live",
+          label: "Live",
+        });
+      }
+      items.push(...baseNavItems.slice(1));
+      return items;
+    },
+    [liveOverview?.api_key_configured, liveOverview?.enabled, profile],
   );
 
   useEffect(() => {
@@ -148,6 +166,29 @@ export function AppShell({
       window.clearTimeout(timeout);
     };
   }, [query, searchOpen]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadLiveOverview() {
+      try {
+        const next = await api.liveOverview();
+        if (!cancelled) {
+          setLiveOverview(next);
+        }
+      } catch {}
+    }
+
+    void loadLiveOverview();
+    const interval = window.setInterval(() => {
+      void loadLiveOverview();
+    }, LIVE_OVERVIEW_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

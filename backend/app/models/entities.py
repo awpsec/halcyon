@@ -80,6 +80,13 @@ class Channel(TimestampMixin, Base):
     videos: Mapped[list["Video"]] = relationship(back_populates="channel")
 
 
+class LiveMonitoredChannel(TimestampMixin, Base):
+    __tablename__ = "live_monitored_channels"
+    __table_args__ = (UniqueConstraint("channel_id", name="uq_live_monitored_channel"),)
+
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), index=True)
+
+
 class Series(TimestampMixin, Base):
     __tablename__ = "series"
 
@@ -253,12 +260,13 @@ class YouTubeChannelSnapshot(TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text, default=None)
     avatar_url: Mapped[str | None] = mapped_column(String(1024), default=None)
     banner_url: Mapped[str | None] = mapped_column(String(1024), default=None)
+    uploads_playlist_id: Mapped[str | None] = mapped_column(String(64), default=None)
     canonical_url: Mapped[str | None] = mapped_column(String(1024), default=None)
     joined_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     links: Mapped[list[dict]] = mapped_column(JSON, default=list)
-    subscriber_count: Mapped[int | None] = mapped_column(Integer, default=None)
-    video_count: Mapped[int | None] = mapped_column(Integer, default=None)
-    view_count: Mapped[int | None] = mapped_column(Integer, default=None)
+    subscriber_count: Mapped[int | None] = mapped_column(BigInteger, default=None)
+    video_count: Mapped[int | None] = mapped_column(BigInteger, default=None)
+    view_count: Mapped[int | None] = mapped_column(BigInteger, default=None)
     fetched_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
@@ -275,9 +283,9 @@ class YouTubeVideoSnapshot(TimestampMixin, Base):
     thumbnail_url: Mapped[str | None] = mapped_column(String(1024), default=None)
     category_id: Mapped[str | None] = mapped_column(String(32), default=None)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
-    view_count: Mapped[int | None] = mapped_column(Integer, default=None)
-    like_count: Mapped[int | None] = mapped_column(Integer, default=None)
-    dislike_count: Mapped[int | None] = mapped_column(Integer, default=None)
+    view_count: Mapped[int | None] = mapped_column(BigInteger, default=None)
+    like_count: Mapped[int | None] = mapped_column(BigInteger, default=None)
+    dislike_count: Mapped[int | None] = mapped_column(BigInteger, default=None)
     rating: Mapped[float | None] = mapped_column(Float, default=None)
     fetched_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
@@ -291,6 +299,25 @@ class YouTubeCommentSnapshot(TimestampMixin, Base):
     like_count: Mapped[int] = mapped_column(Integer, default=0)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     reply_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class YouTubeLiveStreamSnapshot(TimestampMixin, Base):
+    __tablename__ = "youtube_live_stream_snapshots"
+
+    youtube_video_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    youtube_channel_id: Mapped[str] = mapped_column(String(64), index=True)
+    channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id"), default=None, index=True)
+    title: Mapped[str] = mapped_column(String(512))
+    description: Mapped[str | None] = mapped_column(Text, default=None)
+    thumbnail_url: Mapped[str | None] = mapped_column(String(1024), default=None)
+    scheduled_start_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    actual_start_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    concurrent_viewers: Mapped[int | None] = mapped_column(BigInteger, default=None)
+    is_live: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+    channel: Mapped["Channel | None"] = relationship()
 
 
 class SyncJob(TimestampMixin, Base):
@@ -309,12 +336,15 @@ class SyncSettings(TimestampMixin, Base):
 
     automatic_detection_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     automatic_sync_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    live_tab_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     scan_interval_seconds: Mapped[int] = mapped_column(Integer, default=30)
     allow_fallback_art: Mapped[bool] = mapped_column(Boolean, default=False)
     prefer_high_res_banners: Mapped[bool] = mapped_column(Boolean, default=False)
     comment_limit: Mapped[int] = mapped_column(Integer, default=100)
     requests_per_second: Mapped[int] = mapped_column(Integer, default=3)
     last_library_sync_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    last_live_sync_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    last_live_search_sync_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     youtube_api_key: Mapped[str | None] = mapped_column(String(255), default=None)
     youtube_api_quota_day: Mapped[str | None] = mapped_column(String(16), default=None)
     youtube_api_quota_used_units: Mapped[int] = mapped_column(Integer, default=0)

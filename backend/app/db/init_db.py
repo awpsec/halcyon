@@ -57,6 +57,7 @@ def init_db() -> None:
     with engine.begin() as connection:
         inspector = inspect(connection)
         dialect_name = connection.dialect.name
+        datetime_sql_type = "TIMESTAMP" if dialect_name == "postgresql" else "DATETIME"
         user_columns = {column["name"] for column in inspector.get_columns("user_profiles")}
         if "password_hash" not in user_columns:
             connection.execute(text("ALTER TABLE user_profiles ADD COLUMN password_hash VARCHAR(255)"))
@@ -80,6 +81,9 @@ def init_db() -> None:
         if "automatic_detection_enabled" not in sync_columns:
             connection.execute(text("ALTER TABLE sync_settings ADD COLUMN automatic_detection_enabled BOOLEAN DEFAULT TRUE"))
             connection.execute(text("UPDATE sync_settings SET automatic_detection_enabled = TRUE WHERE automatic_detection_enabled IS NULL"))
+        if "live_tab_enabled" not in sync_columns:
+            connection.execute(text("ALTER TABLE sync_settings ADD COLUMN live_tab_enabled BOOLEAN DEFAULT TRUE"))
+            connection.execute(text("UPDATE sync_settings SET live_tab_enabled = TRUE WHERE live_tab_enabled IS NULL"))
         if "scan_interval_seconds" not in sync_columns:
             connection.execute(text("ALTER TABLE sync_settings ADD COLUMN scan_interval_seconds INTEGER DEFAULT 30"))
             connection.execute(text("UPDATE sync_settings SET scan_interval_seconds = 30 WHERE scan_interval_seconds IS NULL"))
@@ -96,6 +100,10 @@ def init_db() -> None:
         if "youtube_api_quota_used_units" not in sync_columns:
             connection.execute(text("ALTER TABLE sync_settings ADD COLUMN youtube_api_quota_used_units INTEGER DEFAULT 0"))
             connection.execute(text("UPDATE sync_settings SET youtube_api_quota_used_units = 0 WHERE youtube_api_quota_used_units IS NULL"))
+        if "last_live_sync_at" not in sync_columns:
+            connection.execute(text(f"ALTER TABLE sync_settings ADD COLUMN last_live_sync_at {datetime_sql_type}"))
+        if "last_live_search_sync_at" not in sync_columns:
+            connection.execute(text(f"ALTER TABLE sync_settings ADD COLUMN last_live_search_sync_at {datetime_sql_type}"))
         if "prefer_high_res_banners" not in sync_columns:
             connection.execute(text("ALTER TABLE sync_settings ADD COLUMN prefer_high_res_banners BOOLEAN DEFAULT FALSE"))
             connection.execute(text("UPDATE sync_settings SET prefer_high_res_banners = FALSE WHERE prefer_high_res_banners IS NULL"))
@@ -109,12 +117,37 @@ def init_db() -> None:
         if "rating" not in youtube_snapshot_columns:
             connection.execute(text("ALTER TABLE youtube_video_snapshots ADD COLUMN rating FLOAT"))
         youtube_channel_columns = {column["name"] for column in inspector.get_columns("youtube_channel_snapshots")}
+        if "uploads_playlist_id" not in youtube_channel_columns:
+            connection.execute(text("ALTER TABLE youtube_channel_snapshots ADD COLUMN uploads_playlist_id VARCHAR(64)"))
         if "canonical_url" not in youtube_channel_columns:
             connection.execute(text("ALTER TABLE youtube_channel_snapshots ADD COLUMN canonical_url VARCHAR(1024)"))
         if "joined_at" not in youtube_channel_columns:
             connection.execute(text("ALTER TABLE youtube_channel_snapshots ADD COLUMN joined_at DATETIME"))
         if "links" not in youtube_channel_columns:
             connection.execute(text("ALTER TABLE youtube_channel_snapshots ADD COLUMN links JSON"))
+        if dialect_name == "postgresql":
+            youtube_channel_bigint_columns = {
+                "subscriber_count": "youtube_channel_snapshots",
+                "video_count": "youtube_channel_snapshots",
+                "view_count": "youtube_channel_snapshots",
+                "view_count__video": "youtube_video_snapshots",
+                "like_count": "youtube_video_snapshots",
+                "dislike_count": "youtube_video_snapshots",
+            }
+            video_snapshot_columns_by_name = {
+                column["name"]: column for column in inspector.get_columns("youtube_video_snapshots")
+            }
+            channel_snapshot_columns_by_name = {
+                column["name"]: column for column in inspector.get_columns("youtube_channel_snapshots")
+            }
+            for column_name, table_name in youtube_channel_bigint_columns.items():
+                actual_column = "view_count" if column_name == "view_count__video" else column_name
+                columns_by_name = video_snapshot_columns_by_name if table_name == "youtube_video_snapshots" else channel_snapshot_columns_by_name
+                current_type = str(columns_by_name.get(actual_column, {}).get("type", "")).upper()
+                if current_type and "BIGINT" not in current_type:
+                    connection.execute(
+                        text(f"ALTER TABLE {table_name} ALTER COLUMN {actual_column} TYPE BIGINT")
+                    )
         transcode_columns = {column["name"] for column in inspector.get_columns("transcode_jobs")}
         if "pid" not in transcode_columns:
             connection.execute(text("ALTER TABLE transcode_jobs ADD COLUMN pid INTEGER"))

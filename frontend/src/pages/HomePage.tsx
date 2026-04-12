@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { api, type Preferences, type Profile, type QueueResponse, type VideoSummary } from "../api/client";
+import { Link, useSearchParams } from "react-router-dom";
+import { api, type LiveStream, type Preferences, type Profile, type QueueResponse, type VideoSummary } from "../api/client";
+import { AvatarImage } from "../components/AvatarImage";
 import { EmptyState } from "../components/EmptyState";
 import { HomePageSkeleton } from "../components/PageSkeletons";
 import { VideoRail } from "../components/VideoRail";
 import { VideoCard } from "../components/VideoRail";
+import { formatCount, formatRelativeDate, normalizeImportedText } from "../lib/format";
 import { clearPlaybackContext } from "../lib/playbackContext";
 import { pushToast } from "../lib/notifications";
 import { useAsyncData } from "../hooks/useAsyncData";
@@ -13,6 +15,7 @@ const PAGE_SIZE = 24;
 const PAGED_TOPICS = new Set(["recent", "random", "explore"]);
 const HOME_FEED_POLL_MS = 10000;
 const HOME_FEED_FAST_POLL_MS = 3500;
+const HOME_LIVE_POLL_MS = 60_000;
 
 type PagedTopic = "recent" | "random" | "explore";
 
@@ -53,9 +56,178 @@ function itemNeedsSync(card: any) {
   return channelName === "unknown channel" || !hasThumbnail || !hasAvatar;
 }
 
+function liveTimestampLabel(value: string | null) {
+  if (!value) return null;
+  return formatRelativeDate(value) ?? null;
+}
+
+function HomeLiveShelf({ items }: { items: LiveStream[] }) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [canScrollBack, setCanScrollBack] = useState(false);
+  const [canScrollForward, setCanScrollForward] = useState(false);
+
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node) return;
+
+    function updateScrollState() {
+      const current = scrollRef.current;
+      if (!current) return;
+      setCanScrollBack(current.scrollLeft > 12);
+      setCanScrollForward(
+        current.scrollLeft + current.clientWidth < current.scrollWidth - 12,
+      );
+    }
+
+    updateScrollState();
+    node.addEventListener("scroll", updateScrollState, { passive: true });
+    window.addEventListener("resize", updateScrollState);
+    return () => {
+      node.removeEventListener("scroll", updateScrollState);
+      window.removeEventListener("resize", updateScrollState);
+    };
+  }, [items]);
+
+  function shiftShelf(direction: "back" | "forward") {
+    const node = scrollRef.current;
+    if (!node) return;
+    const amount = Math.max(280, Math.floor(node.clientWidth * 0.82));
+    node.scrollBy({
+      left: direction === "forward" ? amount : -amount,
+      behavior: "smooth",
+    });
+  }
+
+  return (
+    <section className="rail-section">
+      <div className="section-heading">
+        <h2>
+          <Link className="section-heading-link" to="/live">
+            Live
+          </Link>
+        </h2>
+        <span className="section-count">
+          {items.length} {items.length === 1 ? "stream" : "streams"}
+        </span>
+      </div>
+      <div className="rail-shell">
+        {canScrollBack ? (
+          <button
+            className="rail-arrow rail-arrow-left"
+            onClick={() => shiftShelf("back")}
+            aria-label="Scroll live streams left"
+          >
+            <svg viewBox="0 0 24 24" className="icon-button-svg" aria-hidden="true">
+              <path
+                d="m14.5 5-7 7 7 7"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+        ) : null}
+        <div className="rail-scroll" ref={scrollRef}>
+          {items.map((item) => {
+            const displayTitle = normalizeImportedText(item.title) ?? item.title;
+            const displayChannel =
+              normalizeImportedText(item.channel_name) ?? item.channel_name ?? "Unknown channel";
+            const startedAt = liveTimestampLabel(item.actual_start_at);
+            const scheduledAt = liveTimestampLabel(item.scheduled_start_at);
+            const statsLine = [
+              item.concurrent_viewers != null
+                ? `${formatCount(item.concurrent_viewers)} watching`
+                : null,
+              startedAt ? `Started ${startedAt}` : scheduledAt ? `Scheduled ${scheduledAt}` : null,
+            ]
+              .filter(Boolean)
+              .join(" • ");
+
+            return (
+              <article key={item.youtube_video_id} className="video-tile compact-tile live-home-card">
+                <Link className="live-home-card-link" to={`/live/${item.youtube_video_id}`}>
+                  <div className="tile-thumb media-thumb">
+                    {item.thumbnail_url ? (
+                      <img src={item.thumbnail_url} alt={displayTitle} loading="lazy" />
+                    ) : (
+                      <div className="live-home-thumb-fallback">LIVE</div>
+                    )}
+                    <span className="live-pill live-home-pill">LIVE</span>
+                  </div>
+                </Link>
+                <div className="tile-body">
+                  <div className="tile-meta-row">
+                    {item.channel_slug ? (
+                      <Link
+                        className="channel-avatar avatar-link"
+                        to={`/channels/${item.channel_slug}`}
+                        aria-label={`Open ${displayChannel}`}
+                      >
+                        <AvatarImage
+                          src={item.channel_avatar_url}
+                          alt={displayChannel}
+                          seed={item.channel_slug ?? displayChannel}
+                          fallbackText={displayChannel}
+                        />
+                      </Link>
+                    ) : (
+                      <span className="channel-avatar">
+                        <AvatarImage
+                          src={item.channel_avatar_url}
+                          alt={displayChannel}
+                          seed={displayChannel}
+                          fallbackText={displayChannel}
+                        />
+                      </span>
+                    )}
+                    <div className="tile-copy">
+                      <Link className="live-home-title-link" to={`/live/${item.youtube_video_id}`}>
+                        <strong>{displayTitle}</strong>
+                      </Link>
+                      {item.channel_slug ? (
+                        <Link className="live-home-channel-link" to={`/channels/${item.channel_slug}`}>
+                          {displayChannel}
+                        </Link>
+                      ) : (
+                        <span className="live-home-channel-link">{displayChannel}</span>
+                      )}
+                      <small className="live-home-meta">{statsLine || "Live now"}</small>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+        {canScrollForward ? (
+          <button
+            className="rail-arrow rail-arrow-right"
+            onClick={() => shiftShelf("forward")}
+            aria-label="Scroll live streams right"
+          >
+            <svg viewBox="0 0 24 24" className="icon-button-svg" aria-hidden="true">
+              <path
+                d="m9.5 5 7 7-7 7"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 export function HomePage({ preferences, profile }: { preferences: Preferences; profile: Profile | null }) {
   const canManageVideo = Boolean(profile?.is_admin);
   const { data, loading, error, setData } = useAsyncData(() => api.home(), []);
+  const liveState = useAsyncData(() => api.liveOverview(), []);
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTopic = searchParams.get("topic") ?? "all";
   const [activeTopic, setActiveTopic] = useState(requestedTopic);
@@ -96,10 +268,39 @@ export function HomePage({ preferences, profile }: { preferences: Preferences; p
   });
   const feedSections = useMemo(() => (data ?? []).filter((section) => section.key !== "subscriptions"), [data]);
   const feedSectionsWithoutQueue = useMemo(() => feedSections.filter((section) => section.key !== "queue"), [feedSections]);
+  const homeLiveItems = useMemo(
+    () => (liveState.data?.enabled ? liveState.data.items : []).slice(0, 18),
+    [liveState.data],
+  );
   const hasPendingFeedItems = useMemo(
     () => feedSections.some((section) => section.items.some((item) => itemNeedsSync(item))),
     [feedSections],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshLiveOverview() {
+      try {
+        const next = await api.liveOverview();
+        if (!cancelled) {
+          liveState.setData(next);
+        }
+      } catch {
+        // Keep the current live shelf in place on refresh failures.
+      }
+    }
+
+    void refreshLiveOverview();
+    const interval = window.setInterval(() => {
+      void refreshLiveOverview();
+    }, HOME_LIVE_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [liveState.setData]);
 
   async function refreshHomeFeed() {
     try {
@@ -421,6 +622,12 @@ export function HomePage({ preferences, profile }: { preferences: Preferences; p
             ))}
           </div>
         </section>
+      ) : null}
+
+      {activeTopic === "all" && homeLiveItems.length ? (
+        <div id="section-live-home" className="home-block">
+          <HomeLiveShelf items={homeLiveItems} />
+        </div>
       ) : null}
 
       {activeTopic === "all" && stackedSections.map((section) => (

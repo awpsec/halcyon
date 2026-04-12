@@ -7,10 +7,11 @@ import os
 import re
 import secrets
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from sqlalchemy import and_, case, func, literal, or_, select
@@ -18,12 +19,13 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_configured_admin_user, get_current_admin_user, get_current_user, resolve_session_token
 from app.core.config import get_settings
-from app.core.logging import read_log_lines
+from app.core.logging import get_logger, read_log_lines
 from app.core.timezone import normalize_timezone_name, server_timezone_name
 from app.db.init_db import DEFAULT_ADMIN_USERNAME, clear_bootstrap_admin_credentials
 from app.db.session import get_db
 from app.models.entities import (
     Channel,
+    LiveMonitoredChannel,
     LibraryRoot,
     MetadataOverride,
     Playlist,
@@ -50,6 +52,7 @@ from app.models.entities import (
     YouTubeCommentSnapshot,
     YouTubeChannelSnapshot,
     YouTubeMatch,
+    YouTubeLiveStreamSnapshot,
     YouTubeVideoSnapshot,
 )
 from app.schemas.common import (
@@ -58,6 +61,8 @@ from app.schemas.common import (
     FeedSection,
     JobOut,
     LibraryRootOut,
+    LiveOverviewOut,
+    LiveStreamOut,
     LoginIn,
     MetadataOverrideIn,
     AdminUserPermissionIn,
@@ -120,11 +125,20 @@ from app.services.retention import (
     validate_retention_staging_folder_path,
 )
 from app.services.scanner import scan_selected_folders
-from app.services.sync import build_youtube_api_quota_summary, normalize_youtube_api_quota, reconcile_sync_job, sync_scope
+from app.services.sync import (
+    REQUEST_HEADERS,
+    build_youtube_api_quota_summary,
+    monitored_live_channel_ids,
+    normalize_youtube_api_quota,
+    reconcile_sync_job,
+    refresh_live_streams,
+    sync_scope,
+)
 from app.services.utils import normalize_text, tokenize_text, tokens_match_query
 
 router = APIRouter()
 settings = get_settings()
+logger = get_logger()
 TEMP_DOWNLOAD_MARKERS = (
     ".part",
     ".ytdl",
@@ -145,6 +159,8 @@ AUTH_RESET_LIMIT = 5
 AUTH_RESET_WINDOW_SECONDS = 15 * 60
 AUTH_ADMIN_RECOVERY_LIMIT = 5
 AUTH_ADMIN_RECOVERY_WINDOW_SECONDS = 15 * 60
+LIVE_REFRESH_INTERVAL_SECONDS = 900
+LIVE_STALE_AFTER_SECONDS = 1800
 DEFAULT_LIBRARY_SENTINEL = ".halcyon-library-root"
 
 
@@ -1095,6 +1111,167 @@ def _active_youtube_api_key(db: Session) -> str | None:
     return (settings_row.youtube_api_key if settings_row and settings_row.youtube_api_key else None) or settings.youtube_api_key
 
 
+def _live_tab_enabled(db: Session) -> bool:
+    settings_row = db.scalar(select(SyncSettings))
+    if not settings_row or settings_row.live_tab_enabled is None:
+        return True
+    return bool(settings_row.live_tab_enabled)
+
+
+def _serialize_live_stream(db: Session, stream: YouTubeLiveStreamSnapshot) -> LiveStreamOut:
+    channel = stream.channel or (db.get(Channel, stream.channel_id) if stream.channel_id else None)
+    channel_snapshot = _channel_snapshot_for_channel(db, channel.id) if channel else None
+    channel_name = (
+        channel_snapshot.title
+        if channel_snapshot and channel_snapshot.title
+        else (channel.name if channel else None)
+    )
+    avatar_url = (
+        _channel_image_proxy(
+            channel.id,
+            "avatar",
+            channel.avatar_url or (channel_snapshot.avatar_url if channel_snapshot else None),
+        )
+        if channel
+        else None
+    )
+    banner_url = (
+        _channel_image_proxy(
+            channel.id,
+            "banner",
+            channel.banner_url or (channel_snapshot.banner_url if channel_snapshot else None),
+        )
+        if channel
+        else None
+    )
+    return LiveStreamOut(
+        youtube_video_id=stream.youtube_video_id,
+        youtube_channel_id=stream.youtube_channel_id,
+        title=stream.title,
+        description=stream.description,
+        thumbnail_url=stream.thumbnail_url,
+        channel_id=channel.id if channel else None,
+        channel_name=channel_name,
+        channel_slug=channel.slug if channel else None,
+        channel_avatar_url=avatar_url,
+        channel_banner_url=banner_url,
+        scheduled_start_at=stream.scheduled_start_at,
+        actual_start_at=stream.actual_start_at,
+        concurrent_viewers=stream.concurrent_viewers,
+        is_live=stream.is_live,
+        last_seen_at=stream.last_seen_at,
+        fetched_at=stream.fetched_at,
+        watch_url=f"https://www.youtube.com/watch?v={stream.youtube_video_id}",
+        embed_url=f"https://www.youtube.com/embed/{stream.youtube_video_id}?autoplay=1&playsinline=1&rel=0&modestbranding=1",
+    )
+
+
+async def _detect_live_chat_enabled(youtube_video_id: str) -> bool:
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            headers=REQUEST_HEADERS,
+            timeout=10.0,
+        ) as client:
+            response = await client.get(
+                "https://www.youtube.com/watch",
+                params={"v": youtube_video_id, "hl": "en"},
+            )
+    except httpx.HTTPError:
+        return True
+
+    if response.is_error:
+        return True
+
+    html = response.text
+    return any(
+        marker in html
+        for marker in (
+            '"liveChatRenderer"',
+            '"liveChatHeaderRenderer"',
+            '"conversationBar"',
+        )
+    )
+
+
+def _has_fresh_live_streams(
+    db: Session,
+    *,
+    youtube_video_id: str | None = None,
+) -> bool:
+    fresh_cutoff = datetime.utcnow() - timedelta(seconds=LIVE_STALE_AFTER_SECONDS)
+    query = select(YouTubeLiveStreamSnapshot.id).where(
+        YouTubeLiveStreamSnapshot.is_live.is_(True),
+        YouTubeLiveStreamSnapshot.last_seen_at >= fresh_cutoff,
+    )
+    if youtube_video_id:
+        query = query.where(YouTubeLiveStreamSnapshot.youtube_video_id == youtube_video_id)
+    return db.scalar(query.limit(1)) is not None
+
+
+async def _refresh_live_if_due(
+    db: Session,
+    *,
+    youtube_video_id: str | None = None,
+) -> None:
+    settings_row = db.scalar(select(SyncSettings))
+    if not settings_row or not settings_row.live_tab_enabled:
+        return
+    api_key = _active_youtube_api_key(db)
+    if not api_key:
+        return
+    now = datetime.utcnow()
+    last_live_sync_at = settings_row.last_live_sync_at
+    standard_refresh_due = (
+        not last_live_sync_at
+        or now - last_live_sync_at >= timedelta(seconds=LIVE_REFRESH_INTERVAL_SECONDS)
+    )
+    if not standard_refresh_due:
+        return
+    await refresh_live_streams(
+        db,
+        api_key=api_key,
+        requests_per_second=settings_row.requests_per_second or 3,
+    )
+
+
+def _live_overview_payload(db: Session) -> LiveOverviewOut:
+    settings_row = db.scalar(select(SyncSettings))
+    if not settings_row:
+        return LiveOverviewOut(enabled=True, api_key_configured=bool(settings.youtube_api_key), items=[])
+    fresh_cutoff = datetime.utcnow() - timedelta(seconds=LIVE_STALE_AFTER_SECONDS)
+    rows = db.scalars(
+        select(YouTubeLiveStreamSnapshot)
+        .options(joinedload(YouTubeLiveStreamSnapshot.channel))
+        .where(
+            YouTubeLiveStreamSnapshot.is_live.is_(True),
+            YouTubeLiveStreamSnapshot.last_seen_at >= fresh_cutoff,
+        )
+        .order_by(
+            YouTubeLiveStreamSnapshot.concurrent_viewers.desc().nullslast(),
+            YouTubeLiveStreamSnapshot.actual_start_at.desc().nullslast(),
+            YouTubeLiveStreamSnapshot.last_seen_at.desc(),
+        )
+    ).unique().all()
+    return LiveOverviewOut(
+        enabled=bool(settings_row.live_tab_enabled),
+        api_key_configured=bool(_active_youtube_api_key(db)),
+        last_live_sync_at=settings_row.last_live_sync_at,
+        items=[_serialize_live_stream(db, row) for row in rows],
+    )
+
+
+def _sync_settings_payload(db: Session, settings_row: SyncSettings) -> SyncSettingsOut:
+    return SyncSettingsOut.model_validate(
+        {
+            **settings_row.__dict__,
+            "live_monitored_channel_ids": sorted(monitored_live_channel_ids(db)),
+            "youtube_api_key_configured": bool(_active_youtube_api_key(db)),
+            **build_youtube_api_quota_summary(settings_row),
+        }
+    )
+
+
 @router.get("/session/bootstrap", response_model=AuthBootstrapOut)
 def session_bootstrap_status(db: Session = Depends(get_db)) -> AuthBootstrapOut:
     admin_user = _admin_user(db)
@@ -1766,6 +1943,42 @@ def home_feed(db: Session = Depends(get_db), current_user: UserProfile = Depends
     return build_home_feed(db, current_user.id)
 
 
+@router.get("/live", response_model=LiveOverviewOut)
+async def live_overview(
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+) -> LiveOverviewOut:
+    del current_user
+    await _refresh_live_if_due(db)
+    return _live_overview_payload(db)
+
+
+@router.get("/live/{youtube_video_id}", response_model=LiveStreamOut)
+async def live_stream_detail(
+    youtube_video_id: str,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+) -> LiveStreamOut:
+    del current_user
+    await _refresh_live_if_due(
+        db,
+        youtube_video_id=youtube_video_id,
+    )
+    stream = db.scalar(
+        select(YouTubeLiveStreamSnapshot)
+        .options(joinedload(YouTubeLiveStreamSnapshot.channel))
+        .where(
+            YouTubeLiveStreamSnapshot.youtube_video_id == youtube_video_id,
+            YouTubeLiveStreamSnapshot.is_live.is_(True),
+        )
+    )
+    if not stream:
+        raise HTTPException(status_code=404, detail="Live stream not found")
+    payload = _serialize_live_stream(db, stream)
+    chat_enabled = await _detect_live_chat_enabled(youtube_video_id)
+    return payload.model_copy(update={"chat_enabled": chat_enabled})
+
+
 @router.get("/search")
 def search_library(q: str, db: Session = Depends(get_db), current_user: UserProfile = Depends(get_current_user)) -> dict:
     query = q.strip().lower()
@@ -2296,9 +2509,25 @@ def get_channel(channel_ref: str, db: Session = Depends(get_db), current_user: U
         current_user,
         [_with_channel_display(summarize_video(video, db=db), channel_display_name) for video in videos],
     )
+    fresh_cutoff = datetime.utcnow() - timedelta(seconds=LIVE_STALE_AFTER_SECONDS)
+    live_stream = db.scalar(
+        select(YouTubeLiveStreamSnapshot)
+        .options(joinedload(YouTubeLiveStreamSnapshot.channel))
+        .where(
+            YouTubeLiveStreamSnapshot.channel_id == channel_id,
+            YouTubeLiveStreamSnapshot.is_live.is_(True),
+            YouTubeLiveStreamSnapshot.last_seen_at >= fresh_cutoff,
+        )
+        .order_by(
+            YouTubeLiveStreamSnapshot.concurrent_viewers.desc().nullslast(),
+            YouTubeLiveStreamSnapshot.actual_start_at.desc().nullslast(),
+            YouTubeLiveStreamSnapshot.last_seen_at.desc(),
+        )
+    )
     return {
         "channel": _channel_out(db, channel, user=current_user, subscribed=subscribed, video_count=len(videos)),
         "videos": video_summaries,
+        "live_stream": _serialize_live_stream(db, live_stream) if live_stream else None,
     }
 
 
@@ -2698,6 +2927,10 @@ def get_sync_settings(
         settings_row.automatic_detection_enabled = True
         db.commit()
         db.refresh(settings_row)
+    if settings_row.live_tab_enabled is None:
+        settings_row.live_tab_enabled = True
+        db.commit()
+        db.refresh(settings_row)
     if not settings_row.scan_interval_seconds:
         settings_row.scan_interval_seconds = max(5, min(settings.scan_interval_seconds, 3600))
         db.commit()
@@ -2721,28 +2954,30 @@ def get_sync_settings(
     if changed:
         db.commit()
         db.refresh(settings_row)
-    return SyncSettingsOut.model_validate(
-        {
-            **settings_row.__dict__,
-            "youtube_api_key_configured": bool(_active_youtube_api_key(db)),
-            **build_youtube_api_quota_summary(settings_row),
-        }
-    )
+    return _sync_settings_payload(db, settings_row)
 
 
 @router.put("/sync/settings", response_model=SyncSettingsOut)
-def update_sync_settings(
+async def update_sync_settings(
     payload: SyncSettingsIn,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_configured_admin_user),
 ) -> SyncSettings:
     del current_user
     settings_row = db.scalar(select(SyncSettings))
+    previous_live_tab_enabled = (
+        bool(settings_row.live_tab_enabled)
+        if settings_row and settings_row.live_tab_enabled is not None
+        else True
+    )
+    previous_monitored_ids = monitored_live_channel_ids(db)
+    previous_api_key = _active_youtube_api_key(db)
     if not settings_row:
         settings_row = SyncSettings()
         db.add(settings_row)
     settings_row.automatic_detection_enabled = payload.automatic_detection_enabled
     settings_row.automatic_sync_enabled = payload.automatic_sync_enabled
+    settings_row.live_tab_enabled = payload.live_tab_enabled
     settings_row.scan_interval_seconds = max(5, min(payload.scan_interval_seconds, 3600))
     settings_row.allow_fallback_art = payload.allow_fallback_art
     settings_row.prefer_high_res_banners = payload.prefer_high_res_banners
@@ -2752,16 +2987,45 @@ def update_sync_settings(
         settings_row.youtube_api_key = None
     elif payload.youtube_api_key and payload.youtube_api_key.strip():
         settings_row.youtube_api_key = payload.youtube_api_key.strip()
+    requested_channel_ids = sorted(
+        {
+            int(channel_id)
+            for channel_id in payload.live_monitored_channel_ids
+            if isinstance(channel_id, int) and channel_id > 0
+        }
+    )
+    db.query(LiveMonitoredChannel).delete(synchronize_session=False)
+    db.flush()
+    if requested_channel_ids:
+        valid_channel_ids = db.scalars(
+            select(Channel.id).where(
+                Channel.id.in_(requested_channel_ids),
+                Channel.slug != "unknown-channel",
+            )
+        ).all()
+        for channel_id in sorted({int(channel_id) for channel_id in valid_channel_ids if channel_id}):
+            db.add(LiveMonitoredChannel(channel_id=channel_id))
     normalize_youtube_api_quota(settings_row)
     db.commit()
     db.refresh(settings_row)
-    return SyncSettingsOut.model_validate(
-        {
-            **settings_row.__dict__,
-            "youtube_api_key_configured": bool(_active_youtube_api_key(db)),
-            **build_youtube_api_quota_summary(settings_row),
-        }
+    current_monitored_ids = monitored_live_channel_ids(db)
+    current_api_key = _active_youtube_api_key(db)
+    live_config_changed = (
+        previous_live_tab_enabled != bool(payload.live_tab_enabled)
+        or previous_monitored_ids != current_monitored_ids
+        or previous_api_key != current_api_key
     )
+    if payload.live_tab_enabled and current_api_key and live_config_changed:
+        try:
+            await refresh_live_streams(
+                db,
+                current_api_key,
+                settings_row.requests_per_second,
+            )
+            db.refresh(settings_row)
+        except Exception as exc:
+            logger.exception("Live refresh after sync settings save failed: %s", exc)
+    return _sync_settings_payload(db, settings_row)
 
 
 @router.get("/retention/settings")

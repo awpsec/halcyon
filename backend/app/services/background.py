@@ -9,7 +9,9 @@ from app.db.session import SessionLocal
 from app.models.entities import SyncJob, SyncSettings
 from app.services.retention import run_retention_cycle
 from app.services.scanner import scan_selected_folders_if_idle
-from app.services.sync import normalize_channel_assignments, reconcile_sync_job, sync_scope
+from app.services.sync import normalize_channel_assignments, reconcile_sync_job, refresh_live_streams, sync_scope
+
+LIVE_SYNC_MIN_INTERVAL_SECONDS = 900
 
 
 def current_scan_interval_seconds(settings: Settings) -> int:
@@ -43,6 +45,20 @@ async def background_auto_sync_once(settings: Settings) -> None:
         if sync_settings.automatic_detection_enabled:
             if not active_running_sync_jobs(db):
                 await sync_scope(db, scope="orphans", target_id=None, api_key=api_key, quiet_if_idle=True)
+        if sync_settings.live_tab_enabled and api_key:
+            configured_interval = max(
+                LIVE_SYNC_MIN_INTERVAL_SECONDS,
+                min(sync_settings.scan_interval_seconds or settings.scan_interval_seconds, 3600),
+            )
+            if (
+                not sync_settings.last_live_sync_at
+                or datetime.utcnow() - sync_settings.last_live_sync_at >= timedelta(seconds=configured_interval)
+            ):
+                await refresh_live_streams(
+                    db,
+                    api_key=api_key,
+                    requests_per_second=sync_settings.requests_per_second or 3,
+                )
         if not sync_settings.automatic_sync_enabled:
             return
         if active_running_sync_jobs(db):

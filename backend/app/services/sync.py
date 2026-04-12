@@ -14,6 +14,8 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
@@ -21,6 +23,7 @@ from app.core.logging import get_logger
 from app.db.session import SessionLocal
 from app.models.entities import (
     Channel,
+    LiveMonitoredChannel,
     MetadataOverride,
     PlaylistItem,
     QueueItem,
@@ -38,6 +41,7 @@ from app.models.entities import (
     WatchProgress,
     YouTubeChannelSnapshot,
     YouTubeCommentSnapshot,
+    YouTubeLiveStreamSnapshot,
     YouTubeMatch,
     YouTubeVideoSnapshot,
 )
@@ -298,6 +302,53 @@ async def fetch_channel_playlist_memberships(
 
     playlist_cache[youtube_channel_id] = memberships
     return memberships
+
+
+def ensure_youtube_match_row(db: Session, video_id: int) -> YouTubeMatch:
+    match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video_id))
+    if match:
+        return match
+
+    now = datetime.utcnow()
+    values = {
+        "video_id": video_id,
+        "youtube_video_id": None,
+        "youtube_channel_id": None,
+        "confidence": 0.0,
+        "status": "unmatched",
+        "reasons": [],
+        "last_synced_at": None,
+        "stale": False,
+        "created_at": now,
+        "updated_at": now,
+    }
+    bind = db.get_bind()
+    dialect_name = bind.dialect.name if bind is not None else ""
+    if dialect_name == "postgresql":
+        db.execute(
+            postgresql_insert(YouTubeMatch)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["video_id"])
+        )
+    elif dialect_name == "sqlite":
+        db.execute(
+            sqlite_insert(YouTubeMatch)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["video_id"])
+        )
+    else:
+        match = YouTubeMatch(video_id=video_id)
+        db.add(match)
+        db.flush()
+        return match
+
+    db.flush()
+    match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video_id))
+    if not match:
+        match = YouTubeMatch(video_id=video_id)
+        db.add(match)
+        db.flush()
+    return match
 
 
 def choose_playlist_series_title(
@@ -1794,7 +1845,7 @@ async def fetch_channel_details(client: httpx.AsyncClient, api_key: str, youtube
         client,
         f"{YOUTUBE_API_BASE}/channels",
         params={
-            "part": "snippet,statistics,brandingSettings",
+            "part": "snippet,statistics,brandingSettings,contentDetails",
             "id": youtube_channel_id,
             "maxResults": 1,
             "key": api_key,
@@ -1900,6 +1951,362 @@ async def fetch_video_details_by_id(
     detail["_waytube_duration_seconds"] = parse_iso8601_duration(detail.get("contentDetails", {}).get("duration"))
     detail["_waytube_source"] = "youtube-api"
     return detail
+
+
+def best_thumbnail_url(thumbnails: dict[str, Any] | None) -> str | None:
+    if not isinstance(thumbnails, dict):
+        return None
+    for key in ("maxres", "standard", "high", "medium", "default"):
+        candidate = thumbnails.get(key, {})
+        if isinstance(candidate, dict) and candidate.get("url"):
+            return str(candidate["url"])
+    return None
+
+
+def matched_youtube_channels_by_local_channel(db: Session) -> dict[int, str]:
+    channel_id_map: dict[int, dict[str, int]] = {}
+    rows = db.execute(
+        select(Video.channel_id, YouTubeMatch.youtube_channel_id)
+        .join(YouTubeMatch, YouTubeMatch.video_id == Video.id)
+        .where(
+            Video.channel_id.is_not(None),
+            YouTubeMatch.status == "matched",
+            YouTubeMatch.youtube_channel_id.is_not(None),
+        )
+    ).all()
+    for channel_id, youtube_channel_id in rows:
+        if not channel_id or not youtube_channel_id:
+            continue
+        channel_counts = channel_id_map.setdefault(channel_id, {})
+        channel_counts[youtube_channel_id] = channel_counts.get(youtube_channel_id, 0) + 1
+
+    resolved: dict[int, str] = {}
+    for channel_id, channel_counts in channel_id_map.items():
+        ordered = sorted(
+            channel_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+        if not ordered:
+            continue
+        if len(ordered) == 1:
+            resolved[channel_id] = ordered[0][0]
+            continue
+
+        top_channel_id, top_count = ordered[0]
+        second_count = ordered[1][1]
+        total_count = sum(channel_counts.values())
+        dominance = top_count / max(1, total_count)
+
+        # Accept a clear dominant match and skip only truly ambiguous channels.
+        if top_count >= 2 and dominance >= 0.7 and top_count > second_count:
+            resolved[channel_id] = top_channel_id
+
+    return resolved
+
+
+def monitored_live_channel_ids(db: Session) -> set[int]:
+    return {
+        int(channel_id)
+        for channel_id in db.scalars(select(LiveMonitoredChannel.channel_id)).all()
+        if channel_id
+    }
+
+
+async def fetch_live_stream_candidates(
+    client: httpx.AsyncClient,
+    api_key: str,
+    youtube_channel_id: str,
+    requests_per_second: int,
+) -> list[dict]:
+    response = await throttled_get(
+        client,
+        f"{YOUTUBE_API_BASE}/search",
+        params={
+            "part": "snippet",
+            "channelId": youtube_channel_id,
+            "eventType": "live",
+            "type": "video",
+            "order": "date",
+            "maxResults": 6,
+            "key": api_key,
+        },
+        requests_per_second=requests_per_second,
+    )
+    if response.is_error:
+        message = _extract_api_error(response)
+        raise YouTubeSyncError(
+            f"YouTube live lookup failed: {message}",
+            fatal="quotaExceeded" in message or "rateLimitExceeded" in message,
+    )
+    return response.json().get("items", [])
+
+
+async def fetch_recent_upload_playlist_video_ids(
+    client: httpx.AsyncClient,
+    api_key: str,
+    uploads_playlist_id: str,
+    requests_per_second: int,
+    *,
+    limit: int = 25,
+) -> list[str]:
+    response = await throttled_get(
+        client,
+        f"{YOUTUBE_API_BASE}/playlistItems",
+        params={
+            "part": "snippet,contentDetails",
+            "playlistId": uploads_playlist_id,
+            "maxResults": max(1, min(limit, 50)),
+            "key": api_key,
+        },
+        requests_per_second=requests_per_second,
+    )
+    if response.is_error:
+        message = _extract_api_error(response)
+        raise YouTubeSyncError(
+            f"YouTube uploads playlist lookup failed: {message}",
+            fatal="quotaExceeded" in message or "rateLimitExceeded" in message,
+        )
+    items = response.json().get("items", [])
+    video_ids: list[str] = []
+    for item in items:
+        snippet = item.get("snippet", {}) or {}
+        content_details = item.get("contentDetails", {}) or {}
+        video_id = (
+            content_details.get("videoId")
+            or snippet.get("resourceId", {}).get("videoId")
+        )
+        if not video_id or video_id in video_ids:
+            continue
+        video_ids.append(video_id)
+    return video_ids[:limit]
+
+
+async def fetch_live_video_details(
+    client: httpx.AsyncClient,
+    api_key: str,
+    youtube_video_ids: list[str],
+    requests_per_second: int,
+) -> list[dict]:
+    if not youtube_video_ids:
+        return []
+    hydrated: list[dict] = []
+    for index in range(0, len(youtube_video_ids), 50):
+        chunk = youtube_video_ids[index : index + 50]
+        response = await throttled_get(
+            client,
+            f"{YOUTUBE_API_BASE}/videos",
+            params={
+                "part": "snippet,liveStreamingDetails,statistics",
+                "id": ",".join(chunk),
+                "maxResults": len(chunk),
+                "key": api_key,
+            },
+            requests_per_second=requests_per_second,
+        )
+        if response.is_error:
+            message = _extract_api_error(response)
+            raise YouTubeSyncError(
+                f"YouTube live detail lookup failed: {message}",
+                fatal="quotaExceeded" in message or "rateLimitExceeded" in message,
+            )
+        hydrated.extend(response.json().get("items", []))
+    return hydrated
+
+
+def _parse_iso8601_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+async def refresh_live_streams(
+    db: Session,
+    api_key: str,
+    requests_per_second: int,
+) -> list[YouTubeLiveStreamSnapshot]:
+    settings_row = db.scalar(select(SyncSettings))
+    if settings_row:
+        normalize_youtube_api_quota(settings_row)
+
+    monitored_ids = monitored_live_channel_ids(db)
+    channel_map = {
+        channel_id: youtube_channel_id
+        for channel_id, youtube_channel_id in matched_youtube_channels_by_local_channel(db).items()
+        if channel_id in monitored_ids
+    }
+    now = datetime.utcnow()
+    if not channel_map:
+        for row in db.scalars(
+            select(YouTubeLiveStreamSnapshot).where(YouTubeLiveStreamSnapshot.is_live.is_(True))
+        ).all():
+            row.is_live = False
+        if settings_row:
+            settings_row.last_live_sync_at = now
+        db.commit()
+        return []
+
+    candidate_meta: dict[str, dict[str, Any]] = {}
+    attempted_channel_pairs: list[tuple[int, str]] = []
+    successful_channel_ids: set[str] = set()
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=REQUEST_HEADERS) as client:
+        for channel_id, youtube_channel_id in channel_map.items():
+            attempted_channel_pairs.append((channel_id, youtube_channel_id))
+            channel_snapshot = db.scalar(
+                select(YouTubeChannelSnapshot).where(
+                    YouTubeChannelSnapshot.youtube_channel_id == youtube_channel_id
+                )
+            )
+            uploads_playlist_id = (
+                channel_snapshot.uploads_playlist_id
+                if channel_snapshot and channel_snapshot.uploads_playlist_id
+                else None
+            )
+            if not uploads_playlist_id:
+                channel_details = await fetch_channel_details(
+                    client,
+                    api_key,
+                    youtube_channel_id,
+                    requests_per_second,
+                )
+                content_details = (channel_details or {}).get("contentDetails", {}) or {}
+                uploads_playlist_id = (
+                    content_details.get("relatedPlaylists", {}) or {}
+                ).get("uploads")
+                if uploads_playlist_id:
+                    if not channel_snapshot:
+                        channel_snapshot = YouTubeChannelSnapshot(
+                            youtube_channel_id=youtube_channel_id,
+                            title=(channel_details or {}).get("snippet", {}).get("title", "Unknown Channel"),
+                        )
+                        db.add(channel_snapshot)
+                    channel_snapshot.uploads_playlist_id = uploads_playlist_id
+            if not uploads_playlist_id:
+                logger.info(
+                    "Live lookup skipped channel_id=%s youtube_channel_id=%s reason=missing-uploads-playlist",
+                    channel_id,
+                    youtube_channel_id,
+                )
+                continue
+            try:
+                video_ids = await fetch_recent_upload_playlist_video_ids(
+                    client,
+                    api_key,
+                    uploads_playlist_id,
+                    requests_per_second,
+                )
+            except YouTubeSyncError as exc:
+                logger.warning(
+                    "Live lookup failed channel_id=%s youtube_channel_id=%s error=%s",
+                    channel_id,
+                    youtube_channel_id,
+                    exc,
+                )
+                continue
+            successful_channel_ids.add(youtube_channel_id)
+            for youtube_video_id in video_ids:
+                if not youtube_video_id:
+                    continue
+                candidate_meta[youtube_video_id] = {
+                    "channel_id": channel_id,
+                    "youtube_channel_id": youtube_channel_id,
+                }
+
+        detailed_items: list[dict] = []
+        if candidate_meta:
+            try:
+                detailed_items = await fetch_live_video_details(
+                    client,
+                    api_key,
+                    list(candidate_meta.keys()),
+                    requests_per_second,
+                )
+            except YouTubeSyncError as exc:
+                logger.warning("Live detail lookup failed error=%s", exc)
+
+        live_detected_channel_ids: set[str] = set()
+        for item in detailed_items:
+            youtube_video_id = str(item.get("id") or "").strip()
+            if not youtube_video_id:
+                continue
+            meta = candidate_meta.get(youtube_video_id)
+            if not meta:
+                continue
+            snippet = item.get("snippet", {}) or {}
+            live_details = item.get("liveStreamingDetails", {}) or {}
+            if (
+                snippet.get("liveBroadcastContent") == "live"
+                or (
+                    live_details.get("actualStartTime")
+                    and not live_details.get("actualEndTime")
+                )
+            ):
+                live_detected_channel_ids.add(str(meta["youtube_channel_id"]))
+
+    seen_video_ids: set[str] = set()
+    existing_rows = {
+        row.youtube_video_id: row
+        for row in db.scalars(select(YouTubeLiveStreamSnapshot)).all()
+    }
+    for item in detailed_items:
+        youtube_video_id = str(item.get("id") or "").strip()
+        if not youtube_video_id or youtube_video_id not in candidate_meta:
+            continue
+        snippet = item.get("snippet", {}) or {}
+        live_details = item.get("liveStreamingDetails", {}) or {}
+        is_currently_live = (
+            snippet.get("liveBroadcastContent") == "live"
+            or (
+                live_details.get("actualStartTime")
+                and not live_details.get("actualEndTime")
+            )
+        )
+        if not is_currently_live:
+            continue
+        meta = candidate_meta[youtube_video_id]
+        row = existing_rows.get(youtube_video_id)
+        if not row:
+            row = YouTubeLiveStreamSnapshot(youtube_video_id=youtube_video_id)
+            db.add(row)
+            existing_rows[youtube_video_id] = row
+        row.youtube_channel_id = meta["youtube_channel_id"]
+        row.channel_id = meta["channel_id"]
+        row.title = snippet.get("title") or row.title or "Live stream"
+        row.description = snippet.get("description")
+        row.thumbnail_url = best_thumbnail_url(snippet.get("thumbnails"))
+        row.scheduled_start_at = _parse_iso8601_datetime(live_details.get("scheduledStartTime"))
+        row.actual_start_at = _parse_iso8601_datetime(live_details.get("actualStartTime"))
+        row.concurrent_viewers = parse_maybe_int(live_details.get("concurrentViewers"))
+        row.is_live = True
+        row.last_seen_at = now
+        row.fetched_at = now
+        seen_video_ids.add(youtube_video_id)
+
+    if successful_channel_ids:
+        stale_rows = db.scalars(
+            select(YouTubeLiveStreamSnapshot).where(
+                YouTubeLiveStreamSnapshot.youtube_channel_id.in_(successful_channel_ids)
+            )
+        ).all()
+        for row in stale_rows:
+            if row.youtube_video_id not in seen_video_ids:
+                row.is_live = False
+
+    if settings_row:
+        settings_row.last_live_sync_at = now
+    db.commit()
+    return db.scalars(
+        select(YouTubeLiveStreamSnapshot)
+        .options(joinedload(YouTubeLiveStreamSnapshot.channel))
+        .where(YouTubeLiveStreamSnapshot.is_live.is_(True))
+        .order_by(
+            YouTubeLiveStreamSnapshot.concurrent_viewers.desc().nullslast(),
+            YouTubeLiveStreamSnapshot.actual_start_at.desc().nullslast(),
+            YouTubeLiveStreamSnapshot.last_seen_at.desc(),
+        )
+    ).unique().all()
 
 
 async def fetch_return_youtube_dislike_details(
@@ -2108,11 +2515,7 @@ async def apply_sync_item(
                 db.delete(conflicting_match)
         db.flush()
 
-    match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
-    if not match:
-        match = YouTubeMatch(video_id=video.id)
-        db.add(match)
-        db.flush()
+    match = ensure_youtube_match_row(db, video.id)
 
     match.youtube_video_id = video_id
     match.youtube_channel_id = channel_id
@@ -2212,12 +2615,16 @@ async def apply_sync_item(
             channel_snippet = channel_details.get("snippet", {})
             channel_stats = channel_details.get("statistics", {})
             branding = channel_details.get("brandingSettings", {}).get("image", {})
+            channel_content = channel_details.get("contentDetails", {}).get("relatedPlaylists", {})
             thumbnails = channel_snippet.get("thumbnails", {})
             avatar = thumbnails.get("high", {}).get("url") or thumbnails.get("default", {}).get("url")
 
             channel_snapshot.title = channel_snippet.get("title", channel_snapshot.title)
             channel_snapshot.description = channel_snippet.get("description")
             channel_snapshot.avatar_url = avatar or channel_snapshot.avatar_url
+            channel_snapshot.uploads_playlist_id = (
+                channel_content.get("uploads") or channel_snapshot.uploads_playlist_id
+            )
             banner_url = branding.get("bannerExternalUrl")
             channel_snapshot.banner_url = upgrade_banner_url(banner_url) if prefer_high_res_banners else banner_url
             channel_snapshot.subscriber_count = int(channel_stats["subscriberCount"]) if channel_stats.get("subscriberCount") else None
@@ -2593,11 +3000,7 @@ async def sync_video(
             status=match_status,
         )
     else:
-        match = existing_match or db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
-        if not match:
-            match = YouTubeMatch(video_id=video.id)
-            db.add(match)
-            db.flush()
+        match = existing_match or ensure_youtube_match_row(db, video.id)
         match.status = "unmatched"
         match.confidence = 0.0
         match.reasons = []
