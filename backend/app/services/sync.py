@@ -913,18 +913,21 @@ def track_youtube_api_quota_request(url: str) -> None:
     cost = YOUTUBE_API_QUOTA_COSTS.get(endpoint)
     if not cost:
         return
-    with SessionLocal() as db:
-        settings_row = db.scalar(select(SyncSettings))
-        if not settings_row:
-            settings_row = SyncSettings()
-            db.add(settings_row)
-            db.flush()
-        normalize_youtube_api_quota(settings_row)
-        settings_row.youtube_api_quota_used_units = min(
-            YOUTUBE_API_DAILY_QUOTA_LIMIT,
-            int(settings_row.youtube_api_quota_used_units or 0) + cost,
-        )
-        db.commit()
+    try:
+        with SessionLocal() as db:
+            settings_row = db.scalar(select(SyncSettings))
+            if not settings_row:
+                settings_row = SyncSettings()
+                db.add(settings_row)
+                db.flush()
+            normalize_youtube_api_quota(settings_row)
+            settings_row.youtube_api_quota_used_units = min(
+                YOUTUBE_API_DAILY_QUOTA_LIMIT,
+                int(settings_row.youtube_api_quota_used_units or 0) + cost,
+            )
+            db.commit()
+    except Exception as exc:
+        logger.warning("Skipping YouTube quota tracking endpoint=%s error=%s", endpoint, exc)
 
 
 async def throttled_get(
@@ -2472,7 +2475,11 @@ async def sync_video(
         )
     if not force:
         channel_ids.extend(infer_channel_ids_from_series_neighbors(db, video))
-    if video.channel and not is_generic_channel_name(video.channel.name):
+    deduped_channel_ids: list[str] = []
+    for channel_id in channel_ids:
+        if channel_id not in deduped_channel_ids:
+            deduped_channel_ids.append(channel_id)
+    if not deduped_channel_ids and video.channel and not is_generic_channel_name(video.channel.name):
         if api_key:
             try:
                 for candidate in await fetch_channel_candidates(client, api_key, video.channel.name, requests_per_second):
@@ -2490,11 +2497,8 @@ async def sync_video(
                     title = channel_snapshot.get("snippet", {}).get("title") if channel_snapshot else None
                     channel_id = channel_snapshot.get("id") if channel_snapshot else None
                     if title and channel_id and resolve_display_name(video.channel.name, title) == title:
-                        channel_ids.append(channel_id)
-    deduped_channel_ids: list[str] = []
-    for channel_id in channel_ids:
-        if channel_id not in deduped_channel_ids:
-            deduped_channel_ids.append(channel_id)
+                        deduped_channel_ids.append(channel_id)
+            deduped_channel_ids = list(dict.fromkeys(deduped_channel_ids))
     if not deduped_channel_ids and (not video.channel or is_generic_channel_name(video.channel.name)):
         for channel_id in infer_channel_ids_from_neighbor_titles(db, video):
             if channel_id not in deduped_channel_ids:

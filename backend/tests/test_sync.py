@@ -234,6 +234,9 @@ def test_sync_video_uses_recent_channel_uploads_when_title_search_misses(tmp_pat
                 }
             ]
 
+        async def fail_fetch_channel_candidates(*args, **kwargs):
+            raise AssertionError("sync_video should not hit channel lookup when local channel ids already exist")
+
         async def fake_apply_sync_item(
             db: Session,
             video: Video,
@@ -256,6 +259,7 @@ def test_sync_video_uses_recent_channel_uploads_when_title_search_misses(tmp_pat
 
         monkeypatch.setattr(sync_service, "fetch_search_candidates", fake_fetch_search_candidates)
         monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates", fake_fetch_recent_channel_upload_candidates)
+        monkeypatch.setattr(sync_service, "fetch_channel_candidates", fail_fetch_channel_candidates)
         monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
 
         async def run() -> YouTubeMatch:
@@ -855,11 +859,15 @@ def test_apply_sync_item_assigns_series_from_playlist_membership(tmp_path: Path,
             },
         ]
 
+    async def fake_top_comments(*args, **kwargs):
+        return []
+
     monkeypatch.setattr(sync_service, "get_settings", fake_settings)
     monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
     monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_about)
     monkeypatch.setattr(sync_service, "fetch_channel_details", fake_channel_details)
     monkeypatch.setattr(sync_service, "fetch_channel_playlist_memberships", fake_playlist_memberships)
+    monkeypatch.setattr(sync_service, "fetch_top_comments", fake_top_comments)
     monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
 
     with make_session(tmp_path) as db:
