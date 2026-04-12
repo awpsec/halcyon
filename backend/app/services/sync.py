@@ -3117,8 +3117,8 @@ async def send_video_to_review(
                 channel_ids=deduped_channel_ids[:2] or None,
                 status_callback=status_callback,
             )
-            if not candidates and deduped_channel_ids:
-                candidates = await fetch_search_candidates(
+            if deduped_channel_ids:
+                broader_candidates = await fetch_search_candidates(
                     client,
                     api_key,
                     build_search_queries(video, include_channel=True, channel_hints=channel_hints),
@@ -3126,6 +3126,17 @@ async def send_video_to_review(
                     channel_ids=None,
                     status_callback=status_callback,
                 )
+                if broader_candidates:
+                    seen_candidate_ids = {
+                        item.get("id")
+                        for item in candidates
+                        if item.get("id")
+                    }
+                    candidates.extend(
+                        candidate
+                        for candidate in broader_candidates
+                        if candidate.get("id") and candidate.get("id") not in seen_candidate_ids
+                    )
             if deduped_channel_ids:
                 recent_candidates = await fetch_recent_channel_upload_candidates(
                     client,

@@ -371,6 +371,137 @@ def test_send_video_to_review_researches_and_queues_candidate(tmp_path: Path, mo
         assert "duration-tight" in (refreshed_match.reasons or [])
 
 
+def test_send_video_to_review_broadens_search_when_channel_hints_are_polluted(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+            slug="lady-bandits-ep-30",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=1443,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+
+        polluted_neighbor = Video(
+            title="Another Frankie upload",
+            slug="another-frankie-upload",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=1200,
+            is_available=True,
+        )
+        db.add(polluted_neighbor)
+        db.flush()
+
+        match = YouTubeMatch(
+            video_id=video.id,
+            youtube_video_id="wrongmatch01",
+            youtube_channel_id="wrong-channel",
+            status="matched",
+            confidence=0.87,
+            reasons=["old-match"],
+        )
+        polluted_match = YouTubeMatch(
+            video_id=polluted_neighbor.id,
+            youtube_video_id="wrongmatch02",
+            youtube_channel_id="wrong-channel",
+            status="matched",
+            confidence=0.91,
+            reasons=["old-match"],
+        )
+        db.add_all([match, polluted_match])
+        db.commit()
+
+        async def fake_fetch_channel_candidates(*args, **kwargs):
+            return []
+
+        async def fake_fetch_search_candidates(_client, _api_key, _queries, _requests_per_second, channel_ids=None, status_callback=None):
+            del status_callback
+            if channel_ids:
+                return [
+                    {
+                        "id": "wrongscope01",
+                        "snippet": {
+                            "title": "LADY BANDITS! Turkish kids remix",
+                            "channelTitle": "Bizim Kanal",
+                            "channelId": "wrong-channel",
+                        },
+                        "statistics": {},
+                        "_waytube_duration_seconds": 1443,
+                        "_waytube_source": "youtube-api",
+                    }
+                ]
+            return [
+                {
+                    "id": "abc123def45",
+                    "snippet": {
+                        "title": "LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+                        "channelTitle": "FRANKIEonPCin1080p",
+                        "channelId": "channel-frankie",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 1443,
+                    "_waytube_source": "youtube-api",
+                }
+            ]
+
+        async def fake_fetch_recent_channel_upload_candidates(*args, **kwargs):
+            return []
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return []
+
+        def fake_score_match(_video: Video, item: dict, *, channel_hints=None):
+            del channel_hints
+            if item["id"] == "abc123def45":
+                return 0.78, ["exact-title", "duration-tight"]
+            return 0.34, ["channel-mismatch"]
+
+        async def fake_apply_sync_item(db: Session, video: Video, item: dict, **kwargs):
+            review_match = db.get(YouTubeMatch, match.id)
+            review_match.youtube_video_id = item["id"]
+            review_match.youtube_channel_id = item["snippet"]["channelId"]
+            review_match.status = kwargs["status"]
+            review_match.confidence = kwargs["confidence"]
+            review_match.reasons = kwargs["reasons"]
+            db.commit()
+            return review_match
+
+        monkeypatch.setattr(sync_service, "fetch_channel_candidates", fake_fetch_channel_candidates)
+        monkeypatch.setattr(sync_service, "fetch_search_candidates", fake_fetch_search_candidates)
+        monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates", fake_fetch_recent_channel_upload_candidates)
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "score_match", fake_score_match)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        result = asyncio.run(
+            sync_service.send_video_to_review(
+                db,
+                video,
+                "test-key",
+                100,
+                3,
+                object(),
+            )
+        )
+
+        refreshed_match = db.get(YouTubeMatch, match.id)
+
+        assert result.id == match.id
+        assert refreshed_match is not None
+        assert refreshed_match.youtube_video_id == "abc123def45"
+        assert refreshed_match.youtube_channel_id == "channel-frankie"
+        assert refreshed_match.status == "review"
+        assert refreshed_match.confidence == 0.78
+        assert "admin-review" in (refreshed_match.reasons or [])
+
+
 def test_send_video_to_review_keeps_stubborn_item_in_review_queue(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
