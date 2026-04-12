@@ -1,6 +1,6 @@
 {
   "name": "halcyon-frontend",
-  "version": "1.1.26-411.013",
+  "version": "1.1.26-411.014",
   "private": true,
   "type": "module",
   "scripts": {

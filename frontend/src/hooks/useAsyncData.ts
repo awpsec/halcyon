@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
 
+function formatAsyncErrorMessage(error: Error) {
+  const message = error.message?.trim() ?? "";
+  if (message.toLowerCase() === "failed to fetch") {
+    return "Oops! Having trouble loading that page right now. Try again!";
+  }
+  return message || "Oops! Having trouble loading that page right now. Try again!";
+}
+
 export function useAsyncData<T>(loader: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
@@ -18,7 +26,7 @@ export function useAsyncData<T>(loader: () => Promise<T>, deps: unknown[] = []) 
       })
       .catch((err: Error) => {
         if (!cancelled) {
-          setError(err.message);
+          setError(formatAsyncErrorMessage(err));
         }
       })
       .finally(() => {
