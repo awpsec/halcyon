@@ -567,6 +567,8 @@ export const api = {
   syncSeries: (id: number) => request(`/api/sync/series/${id}`, { method: "POST" }),
   syncVideo: (id: number, options?: { force?: boolean }) =>
     request(`/api/sync/video/${id}${options?.force ? "?force=true" : ""}`, { method: "POST" }),
+  sendVideoToReview: (id: number) =>
+    request<{ ok: boolean; match_id: number; status: string }>(`/api/videos/${id}/send-to-review`, { method: "POST" }),
   syncReview: () => request<SyncReviewQueue>("/api/sync/review"),
   approveMatch: (id: number) => request(`/api/sync/review/${id}/approve`, { method: "POST" }),
   unlinkMatch: (id: number) => request(`/api/sync/review/${id}/unlink`, { method: "POST" }),

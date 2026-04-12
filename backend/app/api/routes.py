@@ -137,6 +137,7 @@ from app.services.sync import (
     prefer_high_res_banners_enabled,
     reconcile_sync_job,
     refresh_live_streams,
+    send_video_to_review,
     sync_scope,
 )
 from app.services.utils import normalize_text, tokenize_text, tokens_match_query
@@ -3294,6 +3295,43 @@ async def sync_video_scope(
 ) -> SyncJob:
     del current_user
     return await _run_sync("video", video_id, db, force=force)
+
+
+@router.post("/videos/{video_id}/send-to-review")
+async def send_video_match_to_review(
+    video_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_configured_admin_user),
+) -> dict:
+    del current_user
+    video = _video_by_id(db, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    settings_row = db.scalar(select(SyncSettings))
+    comment_limit = settings_row.comment_limit if settings_row and settings_row.comment_limit else 100
+    requests_per_second = settings_row.requests_per_second if settings_row and settings_row.requests_per_second else 3
+    api_key = _active_youtube_api_key(db)
+
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        headers=REQUEST_HEADERS,
+        timeout=20.0,
+    ) as client:
+        match = await send_video_to_review(
+            db,
+            video,
+            api_key,
+            comment_limit,
+            requests_per_second,
+            client,
+            channel_cache={},
+            playlist_cache={} if api_key else None,
+            allow_fallback_art=allow_fallback_art_enabled(db),
+            prefer_high_res_banners=prefer_high_res_banners_enabled(db),
+        )
+
+    return {"ok": True, "match_id": match.id, "status": match.status}
 
 
 @router.get("/sync/review")

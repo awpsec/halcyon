@@ -721,6 +721,7 @@ export function VideoPage({
   const params = useParams();
   const navigate = useNavigate();
   const location = useLocation();
+  const canManageVideo = Boolean(profile?.is_admin);
   const videoRef = params.videoId ?? "";
   const { data, loading, error, setData } = useAsyncData(
     () => api.video(videoRef),
@@ -732,6 +733,7 @@ export function VideoPage({
   const [shareOpen, setShareOpen] = useState(false);
   const [shareAtTimestamp, setShareAtTimestamp] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const [playerLoading, setPlayerLoading] = useState(true);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
@@ -1257,6 +1259,35 @@ export function VideoPage({
     } finally {
       setSyncing(false);
       setMenuOpen(false);
+    }
+  }
+
+  async function handleSendToReview() {
+    if (!data) return;
+    setReviewing(true);
+    pushToast(
+      "info",
+      "Sending to review",
+      `${displayVideoTitle} is being re-scored for manual review.`,
+    );
+    try {
+      await api.sendVideoToReview(data.video.id);
+      setData(await api.video(currentVideoRef));
+      pushToast(
+        "success",
+        "Sent to review",
+        "Open the sync review queue to approve or manually re-match it.",
+        { href: "/sync-review" },
+      );
+    } catch (nextError) {
+      pushToast(
+        "error",
+        "Unable to send to review",
+        nextError instanceof Error ? nextError.message : "Unknown review error",
+      );
+    } finally {
+      setReviewing(false);
+      closePlayerMenus();
     }
   }
 
@@ -1896,29 +1927,40 @@ export function VideoPage({
                             Mark as unwatched
                           </button>
                         ) : null}
-                        <button
-                          className="menu-item"
-                          onClick={() => void handleSync()}
-                          disabled={syncing}
-                        >
-                          {syncing ? "Syncing..." : "Sync"}
-                        </button>
-                        <button
-                          className="menu-item"
-                          onClick={() => void handleSync(true)}
-                          disabled={syncing}
-                        >
-                          {syncing ? "Syncing..." : "Force sync"}
-                        </button>
-                        <button
-                          className="menu-item"
-                          onClick={() => {
-                            closePlayerMenus();
-                            setEditOpen(true);
-                          }}
-                        >
-                          Edit metadata
-                        </button>
+                        {canManageVideo ? (
+                          <>
+                            <button
+                              className="menu-item"
+                              onClick={() => void handleSync()}
+                              disabled={syncing || reviewing}
+                            >
+                              {syncing ? "Syncing..." : "Sync"}
+                            </button>
+                            <button
+                              className="menu-item"
+                              onClick={() => void handleSync(true)}
+                              disabled={syncing || reviewing}
+                            >
+                              {syncing ? "Syncing..." : "Force sync"}
+                            </button>
+                            <button
+                              className="menu-item"
+                              onClick={() => void handleSendToReview()}
+                              disabled={syncing || reviewing}
+                            >
+                              {reviewing ? "Sending..." : "Send to review"}
+                            </button>
+                            <button
+                              className="menu-item"
+                              onClick={() => {
+                                closePlayerMenus();
+                                setEditOpen(true);
+                              }}
+                            >
+                              Edit metadata
+                            </button>
+                          </>
+                        ) : null}
                       </div>
                     ) : null}
                   </div>

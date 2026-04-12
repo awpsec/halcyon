@@ -76,6 +76,7 @@ export function VideoCard({
   const [hovered, setHovered] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const [playlistsOpen, setPlaylistsOpen] = useState(false);
   const [playlistsLoading, setPlaylistsLoading] = useState(false);
   const [playlists, setPlaylists] = useState<PlaylistSummary[]>([]);
@@ -265,6 +266,36 @@ export function VideoCard({
     } finally {
       setSyncing(false);
       setMenuOpen(false);
+    }
+  }
+
+  async function handleSendToReview() {
+    setReviewing(true);
+    pushToast(
+      "info",
+      "Sending to review",
+      `${displayTitle} is being re-scored for manual review.`,
+    );
+    try {
+      await api.sendVideoToReview(item.id);
+      pushToast(
+        "success",
+        "Sent to review",
+        "Open the sync review queue to approve or manually re-match it.",
+        { href: "/sync-review" },
+      );
+      await onRefresh?.();
+    } catch (error) {
+      pushToast(
+        "error",
+        "Unable to send to review",
+        error instanceof Error ? error.message : "Unknown review error",
+      );
+    } finally {
+      setReviewing(false);
+      setMenuOpen(false);
+      setMenuAnchor(null);
+      setPlaylistsOpen(false);
     }
   }
 
@@ -670,16 +701,23 @@ export function VideoCard({
                       <button
                         className="menu-item"
                         onClick={() => void handleSync()}
-                        disabled={syncing}
+                        disabled={syncing || reviewing}
                       >
                         {syncing ? "Syncing..." : "Sync"}
                       </button>
                       <button
                         className="menu-item"
                         onClick={() => void handleSync(true)}
-                        disabled={syncing}
+                        disabled={syncing || reviewing}
                       >
                         {syncing ? "Syncing..." : "Force sync"}
+                      </button>
+                      <button
+                        className="menu-item"
+                        onClick={() => void handleSendToReview()}
+                        disabled={syncing || reviewing}
+                      >
+                        {reviewing ? "Sending..." : "Send to review"}
                       </button>
                       <button
                         className="menu-item"
