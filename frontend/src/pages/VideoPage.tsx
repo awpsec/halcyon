@@ -1733,7 +1733,7 @@ export function VideoPage({
                       </svg>
                     </button>
                     <button
-                      className={`icon-button floating-control ${displayMode === "theater" ? "active-chip" : ""}`}
+                      className={`icon-button floating-control floating-control-fades-when-active ${displayMode === "theater" ? "active-chip" : ""}`}
                       onClick={() =>
                         setDisplayMode((current) =>
                           current === "default" ? "theater" : "default",
