@@ -2593,7 +2593,9 @@ async def apply_sync_item(
             channel_snapshot = YouTubeChannelSnapshot(youtube_channel_id=channel_id, title=snippet.get("channelTitle", "Unknown Channel"))
             db.add(channel_snapshot)
         channel_snapshot.title = snippet.get("channelTitle", channel_snapshot.title)
-        target_channel = resolve_synced_channel_target(db, video, channel_id, channel_snapshot.title)
+        target_channel = video.channel
+        if status == "matched":
+            target_channel = resolve_synced_channel_target(db, video, channel_id, channel_snapshot.title)
 
         if channel_cache is not None and channel_id in channel_cache:
             channel_details = channel_cache[channel_id]
@@ -2981,8 +2983,21 @@ async def sync_video(
     if best_item:
         channel_id = best_item.get("snippet", {}).get("channelId")
         known_channel_match = bool(channel_id and channel_id in deduped_channel_ids)
+        local_channel_locked = bool(
+            video.channel
+            and not is_generic_channel_name(video.channel.name)
+            and not force
+        )
+        hard_channel_mismatch = bool(
+            local_channel_locked
+            and channel_id
+            and not known_channel_match
+            and "channel-mismatch" in reasons
+        )
         generic_threshold = 0.72 if "duration-tight" in reasons or "duration" in reasons or "exact-title" in reasons else 0.8
         match_status = "matched" if best_score >= generic_threshold or (known_channel_match and best_score >= 0.58) else "review"
+        if hard_channel_mismatch:
+            match_status = "review"
         return await apply_sync_item(
             db,
             video,

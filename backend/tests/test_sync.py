@@ -533,6 +533,163 @@ def test_sync_video_uses_series_neighbor_channel_hints_for_new_episode_without_a
         assert any("FRANKIEonPCin1080p" in query for query in captured_queries)
 
 
+def test_sync_video_marks_known_channel_mismatch_as_review(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
+        db.add(channel)
+        db.flush()
+
+        video_path = tmp_path / "library" / "frankie.mp4"
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"target")
+        video = Video(
+            title="LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+            slug="lady-bandits-arma-2-dayz-mod-ep-30",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=1443,
+            published_at=datetime(2026, 4, 11),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(video_path),
+                relative_path="frankie.mp4",
+                file_size=video_path.stat().st_size,
+                fingerprint="f" * 64,
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return [
+                {
+                    "id": "bizim123",
+                    "snippet": {
+                        "title": "LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+                        "channelTitle": "Bizim Kanal",
+                        "channelId": "channel-bizim",
+                        "publishedAt": "2026-04-11T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 1443,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "review"
+        assert result.youtube_channel_id == "channel-bizim"
+        assert "channel-mismatch" in (result.reasons or [])
+
+
+def test_apply_sync_item_review_keeps_existing_channel_assignment(tmp_path: Path, monkeypatch):
+    async def fake_ryd(*args, **kwargs):
+        return None
+
+    async def fake_channel_about(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_about)
+    monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
+
+    with make_session(tmp_path) as db:
+        channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+            slug="lady-bandits-arma-2-dayz-mod-ep-30",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=1443,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+
+        item = {
+            "id": "bizim123",
+            "snippet": {
+                "title": "LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+                "channelTitle": "Bizim Kanal",
+                "channelId": "channel-bizim",
+                "publishedAt": "2026-04-11T12:00:00Z",
+                "description": "Wrong channel match",
+                "thumbnails": {},
+            },
+            "statistics": {
+                "viewCount": "90",
+            },
+            "_waytube_duration_seconds": 1443,
+            "_waytube_source": "watch-page",
+        }
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await apply_sync_item(
+                    db,
+                    video,
+                    item,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                    api_key=None,
+                    confidence=0.86,
+                    reasons=["exact-title", "duration-tight", "channel-mismatch"],
+                    status="review",
+                )
+
+        result = asyncio.run(run())
+        refreshed_video = db.get(Video, video.id)
+        created_channel = db.scalar(select(Channel).where(Channel.slug == "bizim-kanal"))
+
+        assert result.status == "review"
+        assert refreshed_video is not None
+        assert refreshed_video.channel_id == channel.id
+        assert created_channel is None
+
+
 def test_force_sync_refreshes_existing_match_by_id_before_researching(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="Asmongold TV", slug="asmongold-tv")

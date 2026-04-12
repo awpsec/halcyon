@@ -106,7 +106,7 @@ export function LivePage() {
           </span>
         </div>
         <p className="muted-copy">
-          Streams from channels Halcyon already knows how to match. Active
+          Streams from channels halcyon already knows how to match. Active
           livestreams appear here automatically when those tracked YouTube
           channels go live.
         </p>
@@ -187,12 +187,9 @@ export function LivePage() {
           })}
         </section>
       ) : (
-        <section className="panel live-empty-panel">
-          <div className="section-heading">
-            <h2>No active streams</h2>
-          </div>
-          <EmptyState message="Nothing is live right now from the channels Halcyon can match." />
-        </section>
+        <p className="muted-copy live-page-status">
+          Nothing is live right now from the channels halcyon can match.
+        </p>
       )}
     </div>
   );

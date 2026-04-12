@@ -8412,6 +8412,10 @@ body,
   font-weight: 600;
 }
 
+.live-page-status {
+  padding: 4px 2px 0;
+}
+
 .live-watch-player-frame:fullscreen,
 .live-watch-player-frame:-webkit-full-screen {
   width: 100vw !important;
