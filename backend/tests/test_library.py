@@ -1,3 +1,4 @@
+import asyncio
 import os
 from datetime import datetime
 from pathlib import Path
@@ -143,19 +144,21 @@ def test_update_sync_settings_preserves_existing_api_key_when_blank(tmp_path: Pa
         db.add(settings_row)
         db.commit()
 
-        update_sync_settings(
-            SyncSettingsIn(
-                automatic_detection_enabled=True,
-                automatic_sync_enabled=True,
-                scan_interval_seconds=45,
-                allow_fallback_art=False,
-                prefer_high_res_banners=False,
-                comment_limit=100,
-                requests_per_second=3,
-                youtube_api_key=None,
-            ),
-            db=db,
-            current_user=admin,
+        asyncio.run(
+            update_sync_settings(
+                SyncSettingsIn(
+                    automatic_detection_enabled=True,
+                    automatic_sync_enabled=True,
+                    scan_interval_seconds=45,
+                    allow_fallback_art=False,
+                    prefer_high_res_banners=False,
+                    comment_limit=100,
+                    requests_per_second=3,
+                    youtube_api_key=None,
+                ),
+                db=db,
+                current_user=admin,
+            )
         )
 
         db.refresh(settings_row)
@@ -179,19 +182,21 @@ def test_update_sync_settings_can_clear_api_key(tmp_path: Path):
         db.add(settings_row)
         db.commit()
 
-        update_sync_settings(
-            SyncSettingsIn(
-                automatic_detection_enabled=True,
-                automatic_sync_enabled=False,
-                scan_interval_seconds=30,
-                allow_fallback_art=False,
-                prefer_high_res_banners=False,
-                comment_limit=100,
-                requests_per_second=3,
-                clear_youtube_api_key=True,
-            ),
-            db=db,
-            current_user=admin,
+        asyncio.run(
+            update_sync_settings(
+                SyncSettingsIn(
+                    automatic_detection_enabled=True,
+                    automatic_sync_enabled=False,
+                    scan_interval_seconds=30,
+                    allow_fallback_art=False,
+                    prefer_high_res_banners=False,
+                    comment_limit=100,
+                    requests_per_second=3,
+                    clear_youtube_api_key=True,
+                ),
+                db=db,
+                current_user=admin,
+            )
         )
 
         db.refresh(settings_row)
