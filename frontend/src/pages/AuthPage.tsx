@@ -118,16 +118,16 @@ export function AuthPage({ storedSessions, onLogin, onRegister, onResetPassword,
   return (
     <div className="hero-page">
       <div className="hero-card auth-card">
-        <div className="auth-switch">
-          <button className={`ghost-button ${mode === "login" ? "active-chip" : ""}`} onClick={() => setMode("login")}>
-            Sign in
-          </button>
-          {allowRegistration ? (
+        {allowRegistration ? (
+          <div className="auth-switch">
+            <button className={`ghost-button ${mode === "login" ? "active-chip" : ""}`} onClick={() => setMode("login")}>
+              Sign in
+            </button>
             <button className={`ghost-button ${mode === "create" ? "active-chip" : ""}`} onClick={() => setMode("create")}>
               Create account
             </button>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
 
         <h1>{title}</h1>
         {bootstrap?.admin_setup_required ? (

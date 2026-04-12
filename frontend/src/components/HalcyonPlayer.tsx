@@ -285,6 +285,18 @@ export function HalcyonPlayer({
         event.preventDefault();
         const duration = Number.isFinite(node.duration) ? node.duration : Number.MAX_SAFE_INTEGER;
         node.currentTime = Math.min(duration, node.currentTime + 5);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        node.muted = false;
+        node.volume = Number(Math.min(1, node.volume + 0.05).toFixed(2));
+        return;
+      }
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        node.muted = false;
+        node.volume = Number(Math.max(0, node.volume - 0.05).toFixed(2));
       }
     }
 
