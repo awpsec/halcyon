@@ -531,7 +531,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
   const syncFollowRef = useRef(true);
   const [uploadsHasMore, setUploadsHasMore] = useState(true);
   const [uploadsLoadingMore, setUploadsLoadingMore] = useState(false);
-  const [uploadSyncPending, setUploadSyncPending] = useState<Record<number, "sync" | "force" | undefined>>({});
+  const [uploadSyncPending, setUploadSyncPending] = useState<Record<number, "sync" | "force" | "review" | undefined>>({});
   const [retentionLookupQuery, setRetentionLookupQuery] = useState("");
   const [liveMonitorQuery, setLiveMonitorQuery] = useState("");
   const [retentionLookupResults, setRetentionLookupResults] = useState<{
@@ -1066,6 +1066,28 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
         "error",
         force ? "Forced video sync failed" : "Video sync failed",
         error instanceof Error ? error.message : "Unknown sync error",
+      );
+    } finally {
+      setUploadSyncPending((current) => ({ ...current, [videoId]: undefined }));
+    }
+  }
+
+  async function triggerVideoReview(videoId: number) {
+    setUploadSyncPending((current) => ({ ...current, [videoId]: "review" }));
+    try {
+      await api.sendVideoToReview(videoId);
+      await refreshServerState();
+      pushToast(
+        "success",
+        "Sent to review",
+        "Open the sync review queue to approve or manually re-match it.",
+        { href: "/sync-review" },
+      );
+    } catch (error) {
+      pushToast(
+        "error",
+        "Unable to send to review",
+        error instanceof Error ? error.message : "Unknown review error",
       );
     } finally {
       setUploadSyncPending((current) => ({ ...current, [videoId]: undefined }));
@@ -2306,6 +2328,14 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                           onClick={() => void triggerVideoSync(video.id, true)}
                         >
                           {uploadSyncPending[video.id] === "force" ? "Syncing..." : "Force sync"}
+                        </button>
+                        <button
+                          className="ghost-button settings-utility-button"
+                          type="button"
+                          disabled={uploadSyncPending[video.id] != null}
+                          onClick={() => void triggerVideoReview(video.id)}
+                        >
+                          {uploadSyncPending[video.id] === "review" ? "Sending..." : "Send to review"}
                         </button>
                       </div>
                       <div className="new-upload-progress-row">
