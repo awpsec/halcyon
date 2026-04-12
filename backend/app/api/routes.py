@@ -13,7 +13,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
-from sqlalchemy import func, literal, or_, select
+from sqlalchemy import and_, case, func, literal, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_configured_admin_user, get_current_admin_user, get_current_user, resolve_session_token
@@ -350,6 +350,20 @@ def _trusted_snapshot_published_at(snapshot: YouTubeVideoSnapshot | None) -> dat
     if snapshot.published_at_source not in TRUSTED_PUBLISHED_AT_SOURCES:
         return None
     return snapshot.published_at
+
+
+def _video_recency_order_clause():
+    trusted_snapshot_published_at = case(
+        (
+            and_(
+                YouTubeVideoSnapshot.published_at.is_not(None),
+                YouTubeVideoSnapshot.published_at_source.in_(TRUSTED_PUBLISHED_AT_SOURCES),
+            ),
+            YouTubeVideoSnapshot.published_at,
+        ),
+        else_=None,
+    )
+    return func.coalesce(trusted_snapshot_published_at, Video.published_at, Video.created_at)
 
 
 def _stable_explore_jitter(user_id: int, video_id: int) -> float:
@@ -1691,7 +1705,13 @@ def list_videos(
 ) -> list[VideoSummary]:
     active_user_id = user_id or current_user.id
     progress_map = {item.video_id: item for item in db.scalars(select(WatchProgress).where(WatchProgress.user_id == active_user_id)).all()}
-    query = _video_query().order_by(Video.created_at.desc()).offset(offset)
+    query = (
+        _video_query()
+        .outerjoin(YouTubeMatch, Video.id == YouTubeMatch.video_id)
+        .outerjoin(YouTubeVideoSnapshot, YouTubeMatch.youtube_video_id == YouTubeVideoSnapshot.youtube_video_id)
+        .order_by(_video_recency_order_clause().desc(), Video.id.desc())
+        .offset(offset)
+    )
     if limit is not None:
         query = query.limit(limit)
     videos = db.scalars(query).unique().all()

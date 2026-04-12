@@ -8,10 +8,10 @@ from sqlalchemy.orm import Session, sessionmaker
 import app.db.init_db as init_db_module
 import app.services.scanner as scanner_service
 from app.api import routes as routes_module
-from app.api.routes import _indexed_library_storage_bytes, _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage, list_roots, list_selected_folders, update_sync_settings
+from app.api.routes import _indexed_library_storage_bytes, _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage, list_roots, list_selected_folders, list_videos, update_sync_settings
 from app.db.init_db import seed_defaults
 from app.models.base import Base
-from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, SyncSettings, UserProfile, Video, VideoFile
+from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, SyncSettings, UserProfile, Video, VideoFile, YouTubeMatch, YouTubeVideoSnapshot
 from app.schemas.common import SyncSettingsIn
 from app.services.scanner import scan_selected_folders
 
@@ -196,6 +196,93 @@ def test_update_sync_settings_can_clear_api_key(tmp_path: Path):
 
         db.refresh(settings_row)
         assert settings_row.youtube_api_key is None
+
+
+def test_list_videos_prefers_uploaded_date_over_added_date(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        admin = UserProfile(name="admin", display_name="Admin", accent_color="#fff", is_admin=True)
+        db.add(admin)
+
+        channel = Channel(name="Channel", slug="channel")
+        db.add(channel)
+        db.flush()
+
+        older_path = tmp_path / "library" / "channel" / "older.mp4"
+        older_path.parent.mkdir(parents=True, exist_ok=True)
+        older_path.write_bytes(b"older")
+        older_video = Video(
+            title="Older upload",
+            slug="older-upload",
+            channel_id=channel.id,
+            created_at=datetime(2026, 4, 11, 12, 0, 0),
+            duration_seconds=1800,
+            is_available=True,
+        )
+        db.add(older_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=older_video.id,
+                absolute_path=str(older_path),
+                relative_path="channel/older.mp4",
+                file_size=older_path.stat().st_size,
+                fingerprint="o" * 64,
+            )
+        )
+
+        newer_path = tmp_path / "library" / "channel" / "newer.mp4"
+        newer_path.write_bytes(b"newer")
+        newer_video = Video(
+            title="Newer upload",
+            slug="newer-upload",
+            channel_id=channel.id,
+            created_at=datetime(2026, 4, 10, 12, 0, 0),
+            duration_seconds=1800,
+            is_available=True,
+        )
+        db.add(newer_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=newer_video.id,
+                absolute_path=str(newer_path),
+                relative_path="channel/newer.mp4",
+                file_size=newer_path.stat().st_size,
+                fingerprint="n" * 64,
+            )
+        )
+
+        db.add_all(
+            [
+                YouTubeMatch(
+                    video_id=older_video.id,
+                    youtube_video_id="yt-older",
+                    status="matched",
+                ),
+                YouTubeMatch(
+                    video_id=newer_video.id,
+                    youtube_video_id="yt-newer",
+                    status="matched",
+                ),
+                YouTubeVideoSnapshot(
+                    youtube_video_id="yt-older",
+                    title=older_video.title,
+                    published_at=datetime(2026, 4, 1, 12, 0, 0),
+                    published_at_source="youtube-api",
+                ),
+                YouTubeVideoSnapshot(
+                    youtube_video_id="yt-newer",
+                    title=newer_video.title,
+                    published_at=datetime(2026, 4, 11, 1, 0, 0),
+                    published_at_source="youtube-api",
+                ),
+            ]
+        )
+        db.commit()
+
+        videos = list_videos(offset=0, limit=None, db=db, current_user=admin)
+
+        assert [video.id for video in videos[:2]] == [newer_video.id, older_video.id]
 
 
 def test_seed_defaults_preserves_existing_avatar(tmp_path: Path):

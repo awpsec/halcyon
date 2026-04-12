@@ -1990,8 +1990,8 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                   </div>
                   <div className="settings-quota-meter-meta">
                     <span>
-                      {youtubeQuotaSummary.usedUnits.toLocaleString()} used today.{" "}
-                      {youtubeQuotaSummary.estimated ? "Estimated from halcyon requests. Resets daily." : "Live quota usage."}
+                      {youtubeQuotaSummary.usedUnits.toLocaleString()} used today --{" "}
+                      {youtubeQuotaSummary.estimated ? "estimated from halcyon requests. Resets daily." : "live quota usage."}
                     </span>
                   </div>
                 </div>
