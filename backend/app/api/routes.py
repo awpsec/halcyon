@@ -2659,6 +2659,7 @@ def get_sync_settings(
     current_user: UserProfile = Depends(get_configured_admin_user),
 ) -> SyncSettings:
     del current_user
+    changed = False
     settings_row = db.scalar(select(SyncSettings))
     if not settings_row:
         settings_row = SyncSettings(
@@ -2695,13 +2696,15 @@ def get_sync_settings(
         db.refresh(settings_row)
     if not settings_row.youtube_api_key and settings.youtube_api_key:
         settings_row.youtube_api_key = settings.youtube_api_key
-    changed = normalize_youtube_api_quota(settings_row)
+        changed = True
+    changed = normalize_youtube_api_quota(settings_row) or changed
     if changed:
         db.commit()
         db.refresh(settings_row)
     return SyncSettingsOut.model_validate(
         {
             **settings_row.__dict__,
+            "youtube_api_key_configured": bool(_active_youtube_api_key(db)),
             **build_youtube_api_quota_summary(settings_row),
         }
     )
@@ -2725,13 +2728,17 @@ def update_sync_settings(
     settings_row.prefer_high_res_banners = payload.prefer_high_res_banners
     settings_row.comment_limit = payload.comment_limit
     settings_row.requests_per_second = max(1, min(payload.requests_per_second, 10))
-    settings_row.youtube_api_key = payload.youtube_api_key.strip() if payload.youtube_api_key else None
+    if payload.clear_youtube_api_key:
+        settings_row.youtube_api_key = None
+    elif payload.youtube_api_key and payload.youtube_api_key.strip():
+        settings_row.youtube_api_key = payload.youtube_api_key.strip()
     normalize_youtube_api_quota(settings_row)
     db.commit()
     db.refresh(settings_row)
     return SyncSettingsOut.model_validate(
         {
             **settings_row.__dict__,
+            "youtube_api_key_configured": bool(_active_youtube_api_key(db)),
             **build_youtube_api_quota_summary(settings_row),
         }
     )

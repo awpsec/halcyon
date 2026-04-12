@@ -6105,9 +6105,38 @@ body,
 .settings-page .settings-quota-meter-fill {
   height: 100%;
   min-width: 0;
-  border-radius: inherit;
+  border-radius: 999px 0 0 999px;
   background: linear-gradient(90deg, #4e7fff, #61b4ff);
   transition: width 180ms ease;
+  position: relative;
+}
+
+.settings-page .settings-quota-meter-fill.is-full {
+  border-radius: inherit;
+}
+
+.settings-page .settings-quota-meter-fill.is-partial::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 2px;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.settings-page .settings-field-hint-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: -8px;
+  margin-bottom: 2px;
+}
+
+.settings-page .settings-field-hint {
+  font-size: 0.82rem;
+  color: var(--text-muted);
 }
 
 .settings-page .settings-quota-meter-meta {

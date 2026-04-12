@@ -98,7 +98,8 @@ export function VideoCard({
       ? Math.min(100, (localProgressSeconds / item.duration_seconds) * 100)
       : 0;
   const isWatched = localWatched ?? progressPercent >= 99.5;
-  const canMarkUnwatched = isWatched || localProgressSeconds > 0;
+  const canMarkUnwatched =
+    isWatched || localProgressSeconds > 0 || item.reason === "continue-watching";
   const displayTitle = normalizeImportedText(item.title) ?? item.title;
   const displayChannel =
     normalizeImportedText(item.channel) ?? item.channel ?? "Unknown channel";

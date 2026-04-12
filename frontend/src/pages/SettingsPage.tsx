@@ -458,6 +458,8 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
     requests_per_second: 3,
     youtube_api_key: "",
   });
+  const [youtubeApiKeyConfigured, setYoutubeApiKeyConfigured] = useState(false);
+  const [clearYoutubeApiKeyRequested, setClearYoutubeApiKeyRequested] = useState(false);
   const [retentionDraft, setRetentionDraft] = useState({
     enabled: false,
     retention_days: 30,
@@ -483,6 +485,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
     const remainingPercent = Math.max(0, Math.min(100, syncState.data?.youtube_api_quota_remaining_percent ?? ((remainingUnits / dailyLimit) * 100)));
     return {
       dailyLimit,
+      usedUnits,
       remainingUnits,
       remainingPercent,
       estimated: syncState.data?.youtube_api_quota_estimated ?? true,
@@ -613,8 +616,10 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
       prefer_high_res_banners: syncState.data.prefer_high_res_banners ?? false,
       comment_limit: syncState.data.comment_limit,
       requests_per_second: syncState.data.requests_per_second ?? 3,
-      youtube_api_key: syncState.data.youtube_api_key ?? "",
+      youtube_api_key: "",
     });
+    setYoutubeApiKeyConfigured(syncState.data.youtube_api_key_configured ?? false);
+    setClearYoutubeApiKeyRequested(false);
   }, [syncDirty, syncSaving, syncState.data]);
 
   useEffect(() => {
@@ -1150,7 +1155,12 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
   async function saveSyncSettings() {
     setSyncSaving(true);
     try {
-      const next = await api.updateSyncSettings(syncDraft);
+      const trimmedApiKey = syncDraft.youtube_api_key.trim();
+      const next = await api.updateSyncSettings({
+        ...syncDraft,
+        youtube_api_key: trimmedApiKey || undefined,
+        clear_youtube_api_key: clearYoutubeApiKeyRequested,
+      });
       syncState.setData(next);
       setSyncDraft({
         automatic_detection_enabled: next.automatic_detection_enabled ?? true,
@@ -1160,8 +1170,10 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
         prefer_high_res_banners: next.prefer_high_res_banners ?? false,
         comment_limit: next.comment_limit,
         requests_per_second: next.requests_per_second ?? 3,
-        youtube_api_key: next.youtube_api_key ?? "",
+        youtube_api_key: "",
       });
+      setYoutubeApiKeyConfigured(next.youtube_api_key_configured ?? false);
+      setClearYoutubeApiKeyRequested(false);
       setSyncDirty(false);
       pushToast("success", "Sync settings saved");
     } catch (error) {
@@ -1932,15 +1944,39 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                 <label className="settings-field">
                   <span>YouTube API key</span>
                   <input
-                    type="password"
-                    autoComplete="new-password"
+                    type="text"
+                    name="halcyon-youtube-api-key"
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    data-1p-ignore="true"
+                    data-lpignore="true"
                     value={syncDraft.youtube_api_key}
+                    placeholder={youtubeApiKeyConfigured && !clearYoutubeApiKeyRequested ? "API key is set." : "Paste a YouTube Data API key"}
                     onChange={(event) => {
                       setSyncDraft((current) => ({ ...current, youtube_api_key: event.target.value }));
+                      setClearYoutubeApiKeyRequested(false);
                       setSyncDirty(true);
                     }}
                   />
                 </label>
+                {youtubeApiKeyConfigured && !clearYoutubeApiKeyRequested ? (
+                  <div className="settings-field-hint-row">
+                    <span className="settings-field-hint">A key is stored. Enter a new key to replace it.</span>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => {
+                        setSyncDraft((current) => ({ ...current, youtube_api_key: "" }));
+                        setClearYoutubeApiKeyRequested(true);
+                        setSyncDirty(true);
+                      }}
+                    >
+                      Clear saved key
+                    </button>
+                  </div>
+                ) : null}
                 <div className="settings-quota-meter" aria-label="Estimated YouTube API usage">
                   <div className="settings-quota-meter-header">
                     <strong>Estimated daily YouTube API quota</strong>
@@ -1948,12 +1984,15 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                   </div>
                   <div className="settings-quota-meter-bar" aria-hidden="true">
                     <div
-                      className="settings-quota-meter-fill"
+                      className={`settings-quota-meter-fill ${youtubeQuotaSummary.remainingPercent >= 100 ? "is-full" : "is-partial"}`}
                       style={{ width: `${youtubeQuotaSummary.remainingPercent}%` }}
                     />
                   </div>
                   <div className="settings-quota-meter-meta">
-                    <span>{youtubeQuotaSummary.estimated ? "Estimated from halcyon requests. Resets daily." : "Live quota usage."}</span>
+                    <span>
+                      {youtubeQuotaSummary.usedUnits.toLocaleString()} used today.{" "}
+                      {youtubeQuotaSummary.estimated ? "Estimated from halcyon requests. Resets daily." : "Live quota usage."}
+                    </span>
                   </div>
                 </div>
                 <div className="settings-inline-grid settings-inline-grid-fields">

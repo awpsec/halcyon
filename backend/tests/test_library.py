@@ -8,10 +8,11 @@ from sqlalchemy.orm import Session, sessionmaker
 import app.db.init_db as init_db_module
 import app.services.scanner as scanner_service
 from app.api import routes as routes_module
-from app.api.routes import _indexed_library_storage_bytes, _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage, list_roots, list_selected_folders
+from app.api.routes import _indexed_library_storage_bytes, _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage, list_roots, list_selected_folders, update_sync_settings
 from app.db.init_db import seed_defaults
 from app.models.base import Base
-from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, UserProfile, Video, VideoFile
+from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, SyncSettings, UserProfile, Video, VideoFile
+from app.schemas.common import SyncSettingsIn
 from app.services.scanner import scan_selected_folders
 
 
@@ -96,6 +97,105 @@ def test_get_sync_settings_uses_configured_scan_interval_when_row_is_missing(tmp
         sync_settings = get_sync_settings(db=db, current_user=admin)
 
         assert sync_settings.scan_interval_seconds == 900
+
+
+def test_get_sync_settings_does_not_echo_stored_api_key(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        admin = UserProfile(name="admin", display_name="Admin", accent_color="#fff", is_admin=True)
+        db.add(admin)
+        db.add(
+            SyncSettings(
+                automatic_detection_enabled=True,
+                automatic_sync_enabled=False,
+                scan_interval_seconds=30,
+                allow_fallback_art=False,
+                prefer_high_res_banners=False,
+                comment_limit=100,
+                requests_per_second=3,
+                youtube_api_key="top-secret-key",
+            )
+        )
+        db.commit()
+
+        configured = type("SettingsStub", (), {"scan_interval_seconds": 900, "youtube_api_key": None})()
+        monkeypatch.setattr(routes_module, "settings", configured)
+
+        sync_settings = get_sync_settings(db=db, current_user=admin)
+
+        assert sync_settings.youtube_api_key_configured is True
+        assert "youtube_api_key" not in sync_settings.model_dump()
+
+
+def test_update_sync_settings_preserves_existing_api_key_when_blank(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        admin = UserProfile(name="admin", display_name="Admin", accent_color="#fff", is_admin=True)
+        db.add(admin)
+        settings_row = SyncSettings(
+            automatic_detection_enabled=True,
+            automatic_sync_enabled=False,
+            scan_interval_seconds=30,
+            allow_fallback_art=False,
+            prefer_high_res_banners=False,
+            comment_limit=100,
+            requests_per_second=3,
+            youtube_api_key="top-secret-key",
+        )
+        db.add(settings_row)
+        db.commit()
+
+        update_sync_settings(
+            SyncSettingsIn(
+                automatic_detection_enabled=True,
+                automatic_sync_enabled=True,
+                scan_interval_seconds=45,
+                allow_fallback_art=False,
+                prefer_high_res_banners=False,
+                comment_limit=100,
+                requests_per_second=3,
+                youtube_api_key=None,
+            ),
+            db=db,
+            current_user=admin,
+        )
+
+        db.refresh(settings_row)
+        assert settings_row.youtube_api_key == "top-secret-key"
+
+
+def test_update_sync_settings_can_clear_api_key(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        admin = UserProfile(name="admin", display_name="Admin", accent_color="#fff", is_admin=True)
+        db.add(admin)
+        settings_row = SyncSettings(
+            automatic_detection_enabled=True,
+            automatic_sync_enabled=False,
+            scan_interval_seconds=30,
+            allow_fallback_art=False,
+            prefer_high_res_banners=False,
+            comment_limit=100,
+            requests_per_second=3,
+            youtube_api_key="top-secret-key",
+        )
+        db.add(settings_row)
+        db.commit()
+
+        update_sync_settings(
+            SyncSettingsIn(
+                automatic_detection_enabled=True,
+                automatic_sync_enabled=False,
+                scan_interval_seconds=30,
+                allow_fallback_art=False,
+                prefer_high_res_banners=False,
+                comment_limit=100,
+                requests_per_second=3,
+                clear_youtube_api_key=True,
+            ),
+            db=db,
+            current_user=admin,
+        )
+
+        db.refresh(settings_row)
+        assert settings_row.youtube_api_key is None
 
 
 def test_seed_defaults_preserves_existing_avatar(tmp_path: Path):

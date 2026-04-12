@@ -212,7 +212,7 @@ export type SyncSettings = {
   comment_limit: number;
   requests_per_second: number;
   last_library_sync_at: string | null;
-  youtube_api_key?: string | null;
+  youtube_api_key_configured: boolean;
   youtube_api_quota_daily_limit: number;
   youtube_api_quota_used_units: number;
   youtube_api_quota_remaining_units: number;
@@ -473,7 +473,7 @@ export const api = {
   updateMetadataOverride: (payload: { target_type: string; target_id: number; payload: Record<string, unknown> }) =>
     request("/api/admin/metadata-overrides", { method: "POST", body: JSON.stringify(payload) }),
   syncSettings: () => request<SyncSettings>("/api/sync/settings"),
-  updateSyncSettings: (payload: { automatic_detection_enabled: boolean; automatic_sync_enabled: boolean; scan_interval_seconds: number; allow_fallback_art: boolean; prefer_high_res_banners: boolean; comment_limit: number; requests_per_second: number; youtube_api_key?: string | null }) =>
+  updateSyncSettings: (payload: { automatic_detection_enabled: boolean; automatic_sync_enabled: boolean; scan_interval_seconds: number; allow_fallback_art: boolean; prefer_high_res_banners: boolean; comment_limit: number; requests_per_second: number; youtube_api_key?: string | null; clear_youtube_api_key?: boolean }) =>
     request<SyncSettings>("/api/sync/settings", { method: "PUT", body: JSON.stringify(payload) }),
   retentionSettings: () => request<RetentionOverview>("/api/retention/settings"),
   updateRetentionSettings: (payload: {
