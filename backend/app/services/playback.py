@@ -165,6 +165,17 @@ def completion_marker_path(output_path: Path) -> Path:
     return output_path.with_suffix(f"{output_path.suffix}.complete")
 
 
+def mobile_transcode_ready(output_path: Path, minimum_bytes: int = 256 * 1024) -> bool:
+    if not output_path.exists():
+        return False
+    try:
+        if output_path.stat().st_size < minimum_bytes:
+            return False
+    except OSError:
+        return False
+    return True
+
+
 def is_process_running(pid: int | None) -> bool:
     if not pid:
         return False
@@ -292,6 +303,8 @@ def ensure_compatible_stream(db: Session, video: Video, cache_dir: Path, profile
         return output_path
 
     if job.status == "running" and is_process_running(job.pid):
+        if profile == "transcode-mp4-mobile" and mobile_transcode_ready(output_path):
+            return output_path
         if wait_for_output_ready(output_path, marker_path, timeout_seconds=90):
             return output_path
         raise RuntimeError("Compatible stream is still being prepared")
@@ -354,12 +367,12 @@ def ensure_compatible_stream(db: Session, video: Video, cache_dir: Path, profile
             "veryfast",
             "-pix_fmt",
             "yuv420p",
+            "-movflags",
+            "+frag_keyframe+empty_moov+default_base_moof",
             "-c:a",
             "aac",
             "-b:a",
             "160k",
-            "-movflags",
-            "+faststart",
             str(output_path),
         ]
     else:
@@ -382,6 +395,32 @@ def ensure_compatible_stream(db: Session, video: Video, cache_dir: Path, profile
             "+faststart",
             str(output_path),
         ]
+
+    if profile == "transcode-mp4-mobile":
+        try:
+            logger.info("Compatible stream start video_id=%s profile=%s output=%s", video.id, profile, output_path)
+            log_path = output_path.parent / "ffmpeg.log"
+            with log_path.open("a", encoding="utf-8", errors="ignore") as handle:
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    **_subprocess_popen_kwargs(),
+                )
+            job.pid = process.pid
+            db.commit()
+        except Exception as exc:
+            job.status = "failed"
+            job.pid = None
+            db.commit()
+            output_path.unlink(missing_ok=True)
+            marker_path.unlink(missing_ok=True)
+            logger.exception("Compatible stream failed video_id=%s profile=%s", video.id, profile)
+            raise RuntimeError("ffmpeg processing failed") from exc
+        if wait_for_transcode_target(output_path, timeout_seconds=12):
+            return output_path
+        raise RuntimeError("Compatible stream is still being prepared")
 
     try:
         logger.info("Compatible stream start video_id=%s profile=%s output=%s", video.id, profile, output_path)
@@ -443,6 +482,23 @@ def reconcile_transcode_job(db: Session, job: TranscodeJob) -> TranscodeJob:
             job.status = "completed"
             job.pid = None
             db.commit()
+        elif job.profile == "transcode-mp4-mobile" and output_exists and not pid_running and job.output_path:
+            output_path = Path(job.output_path)
+            media_info = probe_media(output_path)
+            if media_info.get("codec_summary") == "h264":
+                completion_marker_path(output_path).write_text(
+                    datetime.utcnow().isoformat(),
+                    encoding="utf-8",
+                )
+                job.status = "completed"
+                job.pid = None
+                db.commit()
+            else:
+                job.status = "failed"
+                job.pid = None
+                output_path.unlink(missing_ok=True)
+                completion_marker_path(output_path).unlink(missing_ok=True)
+                db.commit()
         elif not pid_running:
             job.status = "failed"
             job.pid = None
