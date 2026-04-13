@@ -313,9 +313,10 @@ def ensure_compatible_stream(db: Session, video: Video, cache_dir: Path, profile
         return output_path
 
     if job.status == "running" and is_process_running(job.pid):
-        if profile in {"transcode-mp4-mobile", "transcode-mp4-android"} and mobile_transcode_ready(output_path):
+        if profile == "transcode-mp4-mobile" and mobile_transcode_ready(output_path):
             return output_path
-        if wait_for_output_ready(output_path, marker_path, timeout_seconds=90):
+        wait_timeout = 180.0 if profile == "transcode-mp4-android" else 90.0
+        if wait_for_output_ready(output_path, marker_path, timeout_seconds=wait_timeout):
             return output_path
         raise RuntimeError("Compatible stream is still being prepared")
 
@@ -403,14 +404,22 @@ def ensure_compatible_stream(db: Session, video: Video, cache_dir: Path, profile
             "libx264",
             "-preset",
             "veryfast",
+            "-crf",
+            "23",
             "-profile:v",
             "baseline",
             "-level",
             "3.1",
+            "-g",
+            "60",
+            "-keyint_min",
+            "60",
+            "-sc_threshold",
+            "0",
             "-pix_fmt",
             "yuv420p",
             "-movflags",
-            "+frag_keyframe+empty_moov+default_base_moof",
+            "+faststart",
             "-c:a",
             "aac",
             "-ac",
@@ -440,7 +449,7 @@ def ensure_compatible_stream(db: Session, video: Video, cache_dir: Path, profile
             str(output_path),
         ]
 
-    if profile in {"transcode-mp4-mobile", "transcode-mp4-android"}:
+    if profile == "transcode-mp4-mobile":
         try:
             logger.info("Compatible stream start video_id=%s profile=%s output=%s", video.id, profile, output_path)
             log_path = output_path.parent / "ffmpeg.log"
@@ -526,7 +535,7 @@ def reconcile_transcode_job(db: Session, job: TranscodeJob) -> TranscodeJob:
             job.status = "completed"
             job.pid = None
             db.commit()
-        elif job.profile in {"transcode-mp4-mobile", "transcode-mp4-android"} and output_exists and not pid_running and job.output_path:
+        elif job.profile == "transcode-mp4-mobile" and output_exists and not pid_running and job.output_path:
             output_path = Path(job.output_path)
             media_info = probe_media(output_path)
             if media_info.get("codec_summary") == "h264":
