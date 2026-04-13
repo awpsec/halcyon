@@ -2418,7 +2418,7 @@ def compatible_stream(
     if playback.get("source_missing"):
         raise HTTPException(status_code=404, detail="Video source is unavailable")
     profile = playback.get("transcode_profile")
-    if profile not in {"remux-webm", "remux-mp4-copy", "remux-mp4-aac", "transcode-mp4-mobile"}:
+    if profile not in {"remux-webm", "remux-mp4-copy", "remux-mp4-aac", "transcode-mp4-mobile", "transcode-mp4-android"}:
         raise HTTPException(status_code=400, detail="Video does not require compatible-stream processing")
     try:
         output_path = ensure_compatible_stream(db, video, settings.cache_dir, profile)

@@ -83,6 +83,24 @@ def test_resolve_playback_routes_mobile_webm_to_compatible_mp4(tmp_path: Path, m
         assert playback["stream_url"] == f"/api/videos/{video.id}/compatible"
 
 
+def test_resolve_playback_routes_android_webm_to_android_compatible_mp4(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        video = create_video(db, tmp_path, filename="example.webm")
+
+        monkeypatch.setattr(
+            playback_service,
+            "probe_media",
+            lambda _path: {"codec_summary": "vp9", "audio_codec": "opus"},
+        )
+
+        playback = playback_service.resolve_playback(video, client_profile="android")
+
+        assert playback["direct_play"] is False
+        assert playback["requires_transcode"] is True
+        assert playback["transcode_profile"] == "transcode-mp4-android"
+        assert playback["stream_url"] == f"/api/videos/{video.id}/compatible"
+
+
 def test_resolve_playback_routes_mobile_h264_mkv_to_compatible_mp4(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         video = create_video(db, tmp_path, filename="example.mkv")
@@ -102,6 +120,15 @@ def test_resolve_playback_routes_mobile_h264_mkv_to_compatible_mp4(tmp_path: Pat
 
 
 def test_playback_client_profile_detects_mobile_headers():
+    assert playback_service.playback_client_profile(
+        {
+            "user-agent": (
+                "Mozilla/5.0 (Linux; Android 14; Light Phone) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 "
+                "Mobile Safari/537.36"
+            )
+        }
+    ) == "android"
     assert playback_service.playback_client_profile(
         {
             "user-agent": (

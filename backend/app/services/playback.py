@@ -28,6 +28,7 @@ MOBILE_USER_AGENT_PATTERN = re.compile(
     r"Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini",
     re.IGNORECASE,
 )
+ANDROID_USER_AGENT_PATTERN = re.compile(r"Android", re.IGNORECASE)
 logger = get_logger()
 
 
@@ -57,9 +58,11 @@ def playback_client_profile(headers: Mapping[str, str] | None = None) -> str:
     if not headers:
         return "default"
     sec_ch_mobile = (headers.get("sec-ch-ua-mobile") or "").strip()
+    user_agent = headers.get("user-agent") or ""
+    if ANDROID_USER_AGENT_PATTERN.search(user_agent):
+        return "android"
     if sec_ch_mobile == "?1":
         return "mobile"
-    user_agent = headers.get("user-agent") or ""
     if MOBILE_USER_AGENT_PATTERN.search(user_agent):
         return "mobile"
     return "default"
@@ -72,7 +75,7 @@ def _can_direct_play(
     audio_codec: str,
     client_profile: str,
 ) -> bool:
-    if client_profile == "mobile":
+    if client_profile in {"mobile", "android"}:
         return (
             suffix in {".mp4", ".m4v"}
             and video_codec == "h264"
@@ -122,7 +125,14 @@ def resolve_playback(video: Video, client_profile: str = "default") -> dict:
     processing_profile = None
     stream_url = f"/api/videos/{video.id}/stream"
     if not direct_play:
-        if client_profile == "mobile":
+        if client_profile == "android":
+            if video_codec == "h264" and audio_codec in {"", "aac", "mp3"}:
+                processing_profile = "remux-mp4-copy"
+                stream_url = f"/api/videos/{video.id}/compatible"
+            else:
+                processing_profile = "transcode-mp4-android"
+                stream_url = f"/api/videos/{video.id}/compatible"
+        elif client_profile == "mobile":
             if video_codec == "h264":
                 processing_profile = (
                     "remux-mp4-copy"
@@ -303,7 +313,7 @@ def ensure_compatible_stream(db: Session, video: Video, cache_dir: Path, profile
         return output_path
 
     if job.status == "running" and is_process_running(job.pid):
-        if profile == "transcode-mp4-mobile" and mobile_transcode_ready(output_path):
+        if profile in {"transcode-mp4-mobile", "transcode-mp4-android"} and mobile_transcode_ready(output_path):
             return output_path
         if wait_for_output_ready(output_path, marker_path, timeout_seconds=90):
             return output_path
@@ -375,6 +385,40 @@ def ensure_compatible_stream(db: Session, video: Video, cache_dir: Path, profile
             "160k",
             str(output_path),
         ]
+    elif profile == "transcode-mp4-android":
+        cmd = [
+            resolve_binary("ffmpeg"),
+            "-y",
+            "-i",
+            primary_file.absolute_path,
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-vf",
+            "scale='min(854,iw)':-2:force_original_aspect_ratio=decrease",
+            "-r",
+            "30",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-profile:v",
+            "baseline",
+            "-level",
+            "3.1",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+frag_keyframe+empty_moov+default_base_moof",
+            "-c:a",
+            "aac",
+            "-ac",
+            "2",
+            "-b:a",
+            "96k",
+            str(output_path),
+        ]
     else:
         cmd = [
             resolve_binary("ffmpeg"),
@@ -396,7 +440,7 @@ def ensure_compatible_stream(db: Session, video: Video, cache_dir: Path, profile
             str(output_path),
         ]
 
-    if profile == "transcode-mp4-mobile":
+    if profile in {"transcode-mp4-mobile", "transcode-mp4-android"}:
         try:
             logger.info("Compatible stream start video_id=%s profile=%s output=%s", video.id, profile, output_path)
             log_path = output_path.parent / "ffmpeg.log"
@@ -482,7 +526,7 @@ def reconcile_transcode_job(db: Session, job: TranscodeJob) -> TranscodeJob:
             job.status = "completed"
             job.pid = None
             db.commit()
-        elif job.profile == "transcode-mp4-mobile" and output_exists and not pid_running and job.output_path:
+        elif job.profile in {"transcode-mp4-mobile", "transcode-mp4-android"} and output_exists and not pid_running and job.output_path:
             output_path = Path(job.output_path)
             media_info = probe_media(output_path)
             if media_info.get("codec_summary") == "h264":
