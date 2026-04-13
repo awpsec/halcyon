@@ -705,13 +705,15 @@ export function AppShell({
               ) : null}
             </div>
           ) : null}
-          <button
-            className={`icon-button theme-toggle ${isMobileShell ? "mobile-theme-toggle" : ""}`}
-            onClick={onToggleTheme}
-            aria-label="Toggle theme"
-          >
-            <ThemeIcon theme={preferences.theme} />
-          </button>
+          {!isMobileShell ? (
+            <button
+              className="icon-button theme-toggle"
+              onClick={onToggleTheme}
+              aria-label="Toggle theme"
+            >
+              <ThemeIcon theme={preferences.theme} />
+            </button>
+          ) : null}
           <div className="profile-chip">
             <button
               className={`user-menu-trigger ${isMobileShell ? "mobile-user-menu-trigger" : ""}`}

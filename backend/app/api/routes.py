@@ -2061,10 +2061,12 @@ def get_video(video_ref: str, db: Session = Depends(get_db), current_user: UserP
     saved_video = db.scalar(select(SavedVideo).where(SavedVideo.user_id == current_user.id, SavedVideo.video_id == video_id))
     playback = resolve_playback(video)
     primary_file = video.files[0] if video.files else None
-    media_info = probe_media(Path(primary_file.absolute_path)) if primary_file else {}
+    primary_path = Path(primary_file.absolute_path) if primary_file else None
+    source_available = bool(primary_path and primary_path.exists())
+    media_info = probe_media(primary_path) if source_available and primary_path else {}
     caption_tracks = []
-    if primary_file:
-        for index, track in enumerate(find_caption_tracks(Path(primary_file.absolute_path))):
+    if source_available and primary_path:
+        for index, track in enumerate(find_caption_tracks(primary_path)):
             caption_tracks.append(
                 {
                     "id": index,
@@ -2117,6 +2119,7 @@ def get_video(video_ref: str, db: Session = Depends(get_db), current_user: UserP
             **media_info,
             "source_path": primary_file.absolute_path if primary_file else None,
             "transcoding": playback["requires_transcode"],
+            "source_missing": bool(primary_file and not source_available),
         },
         "captions": caption_tracks,
         "resume_point": _resume_point_for(progress, video.duration_seconds),
@@ -2374,7 +2377,10 @@ def stream_video(
     video = _video_by_id(db, video_id)
     if not video or not video.files:
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(video.files[0].absolute_path)
+    source_path = Path(video.files[0].absolute_path)
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Video source is unavailable")
+    return FileResponse(source_path)
 
 
 @router.get("/videos/{video_id}/compatible")
@@ -2387,6 +2393,8 @@ def compatible_stream(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     playback = resolve_playback(video)
+    if playback.get("source_missing"):
+        raise HTTPException(status_code=404, detail="Video source is unavailable")
     profile = playback.get("transcode_profile")
     if profile not in {"remux-webm", "remux-mp4-copy", "remux-mp4-aac"}:
         raise HTTPException(status_code=400, detail="Video does not require compatible-stream processing")
@@ -2408,6 +2416,8 @@ def hls_stream(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     playback = resolve_playback(video)
+    if playback.get("source_missing"):
+        raise HTTPException(status_code=404, detail="Video source is unavailable")
     if not playback["requires_transcode"]:
         raise HTTPException(status_code=400, detail="Video can direct play")
 
@@ -2448,8 +2458,14 @@ def video_thumbnail(
             if downloaded:
                 video.thumbnail_path = downloaded
                 db.commit()
-    if (not video.thumbnail_path or not Path(video.thumbnail_path).exists()) and video.files:
-        generated = generate_thumbnail(Path(video.files[0].absolute_path), settings.cache_dir, video.files[0].fingerprint)
+    source_path = Path(video.files[0].absolute_path) if video.files else None
+    if (
+        (not video.thumbnail_path or not Path(video.thumbnail_path).exists())
+        and video.files
+        and source_path
+        and source_path.exists()
+    ):
+        generated = generate_thumbnail(source_path, settings.cache_dir, video.files[0].fingerprint)
         if generated:
             video.thumbnail_path = generated
             db.commit()
@@ -2467,7 +2483,10 @@ def video_preview(
     video = db.get(Video, video_id)
     if not video or not video.files:
         raise HTTPException(status_code=404, detail="Video not found")
-    preview_path = generate_preview_clip(Path(video.files[0].absolute_path), settings.cache_dir, video.files[0].fingerprint)
+    source_path = Path(video.files[0].absolute_path)
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Video source is unavailable")
+    preview_path = generate_preview_clip(source_path, settings.cache_dir, video.files[0].fingerprint)
     if not preview_path or not Path(preview_path).exists():
         raise HTTPException(status_code=404, detail="Preview not available")
     return FileResponse(preview_path)
@@ -2483,7 +2502,10 @@ def caption_track(
     video = _video_by_id(db, video_id)
     if not video or not video.files:
         raise HTTPException(status_code=404, detail="Video not found")
-    tracks = find_caption_tracks(Path(video.files[0].absolute_path))
+    source_path = Path(video.files[0].absolute_path)
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Video source is unavailable")
+    tracks = find_caption_tracks(source_path)
     if track_index < 0 or track_index >= len(tracks):
         raise HTTPException(status_code=404, detail="Caption track not found")
     track = tracks[track_index]

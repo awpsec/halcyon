@@ -105,14 +105,6 @@ export function LivePage() {
             {overview.items.length} {overview.items.length === 1 ? "stream" : "streams"}
           </span>
         </div>
-        <p className="muted-copy">
-          Streams from channels halcyon already knows how to match. Active
-          livestreams appear here automatically when those tracked YouTube
-          channels go live.
-        </p>
-        <small className="muted-copy">
-          Last checked {liveTimestampLabel(overview.last_live_sync_at) ?? "recently"}
-        </small>
       </section>
 
       {overview.items.length ? (

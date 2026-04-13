@@ -241,6 +241,11 @@ export function HomePage({ preferences, profile }: { preferences: Preferences; p
     random: true,
     explore: true,
   });
+  const [pagedInitialized, setPagedInitialized] = useState<Record<PagedTopic, boolean>>({
+    recent: false,
+    random: false,
+    explore: false,
+  });
   const [pagedLoading, setPagedLoading] = useState<Record<PagedTopic, boolean>>({
     recent: false,
     random: false,
@@ -441,6 +446,7 @@ export function HomePage({ preferences, profile }: { preferences: Preferences; p
         nextError instanceof Error ? nextError.message : "Unable to load more videos",
       );
     } finally {
+      setPagedInitialized((current) => ({ ...current, [topic]: true }));
       loadingMoreRef.current = { ...loadingMoreRef.current, [topic]: false };
       setPagedLoading((current) => ({ ...current, [topic]: false }));
     }
@@ -743,7 +749,7 @@ export function HomePage({ preferences, profile }: { preferences: Preferences; p
               {pagedLoading.explore ? <span className="loading-dots" aria-label="Loading more"><span>.</span><span>.</span><span>.</span></span> : null}
             </div>
           </>
-        ) : pagedLoading.explore ? (
+        ) : pagedLoading.explore || !pagedInitialized.explore ? (
           <div className="explore-sentinel">
             <span className="loading-dots" aria-label="Loading more"><span>.</span><span>.</span><span>.</span></span>
           </div>

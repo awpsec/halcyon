@@ -50,10 +50,28 @@ def _normalize_codec(value: str | None) -> str:
 def resolve_playback(video: Video) -> dict:
     primary_file = video.files[0] if video.files else None
     if not primary_file:
-        return {"direct_play": False, "requires_transcode": False, "stream_url": None}
+        return {
+            "direct_play": False,
+            "requires_transcode": False,
+            "stream_url": None,
+            "source_path": None,
+            "transcode_profile": None,
+            "source_missing": True,
+        }
 
-    media_info = probe_media(Path(primary_file.absolute_path))
-    suffix = Path(primary_file.absolute_path).suffix.lower()
+    source_path = Path(primary_file.absolute_path)
+    if not source_path.exists():
+        return {
+            "direct_play": False,
+            "requires_transcode": False,
+            "stream_url": None,
+            "source_path": primary_file.absolute_path,
+            "transcode_profile": None,
+            "source_missing": True,
+        }
+
+    media_info = probe_media(source_path)
+    suffix = source_path.suffix.lower()
     video_codec = _normalize_codec(media_info.get("codec_summary") or primary_file.codec_summary)
     audio_codec = _normalize_codec(media_info.get("audio_codec"))
     direct_play = (
@@ -80,6 +98,7 @@ def resolve_playback(video: Video) -> dict:
         "stream_url": stream_url,
         "source_path": primary_file.absolute_path,
         "transcode_profile": processing_profile,
+        "source_missing": False,
     }
 
 

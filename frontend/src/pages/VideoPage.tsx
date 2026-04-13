@@ -4,7 +4,6 @@ import {
   useRef,
   useState,
   type FocusEvent,
-  type MouseEvent,
 } from "react";
 import { createPortal } from "react-dom";
 import type Plyr from "plyr";
@@ -38,6 +37,8 @@ import { pushToast } from "../lib/notifications";
 const WATCH_COMPLETION_THRESHOLD = 0.95;
 const SUGGESTION_LOADING_MIN_MS = 180;
 const PLAYER_MODE_STORAGE_KEY = "halcyon.playerMode";
+const STANDARD_COMMENT_PREVIEW_COUNT = 4;
+const COMPACT_COMMENT_PREVIEW_COUNT = 2;
 
 type ParsedChapter = {
   startSeconds: number;
@@ -218,6 +219,100 @@ function createSuggestionFeedState(): SuggestionFeedState {
     loadingInitial: false,
     loadingMore: false,
   };
+}
+
+function GhostWatchPage({
+  displayMode,
+  message = "File was not found in filesystem.",
+}: {
+  displayMode: "default" | "theater";
+  message?: string;
+}) {
+  return (
+    <div
+      className={`page-stack watch-page watch-page-ghost ${displayMode === "theater" ? "watch-page-theater" : ""}`}
+    >
+      <section className="watch-layout">
+        <div className="watch-stage-row">
+          <div className="watch-main-column">
+            <div className="watch-player-slot">
+              <div className="video-frame advanced-player watch-player-frame watch-ghost-player-frame">
+                <div className="watch-ghost-player-topbar" aria-hidden="true">
+                  <span className="watch-ghost-pill" />
+                  <span className="watch-ghost-pill short" />
+                </div>
+                <div className="watch-ghost-player-copy">
+                  <small>Playback unavailable</small>
+                  <strong>Well this is awkward...</strong>
+                  <p>{message}</p>
+                </div>
+                <div className="watch-ghost-player-controls" aria-hidden="true">
+                  <span className="watch-ghost-control wide" />
+                  <span className="watch-ghost-control" />
+                  <span className="watch-ghost-control" />
+                  <span className="watch-ghost-control narrow" />
+                </div>
+              </div>
+            </div>
+
+            <div className="watch-meta-slot">
+              <section className="watch-meta watch-ghost-panel" aria-hidden="true">
+                <div className="watch-ghost-line watch-ghost-line-title" />
+                <div className="watch-ghost-line watch-ghost-line-meta" />
+                <div className="watch-ghost-chip-row">
+                  <span className="watch-ghost-chip" />
+                  <span className="watch-ghost-chip" />
+                  <span className="watch-ghost-chip short" />
+                </div>
+                <div className="watch-ghost-block" />
+              </section>
+            </div>
+
+            <div className="watch-comments-slot">
+              <section className="watch-comments watch-ghost-panel" aria-hidden="true">
+                <div className="watch-ghost-line watch-ghost-line-heading" />
+                <div className="watch-ghost-comment">
+                  <span className="watch-ghost-avatar" />
+                  <div className="watch-ghost-comment-copy">
+                    <div className="watch-ghost-line watch-ghost-line-meta short" />
+                    <div className="watch-ghost-line watch-ghost-line-comment" />
+                    <div className="watch-ghost-line watch-ghost-line-comment short" />
+                  </div>
+                </div>
+                <div className="watch-ghost-comment">
+                  <span className="watch-ghost-avatar" />
+                  <div className="watch-ghost-comment-copy">
+                    <div className="watch-ghost-line watch-ghost-line-meta short" />
+                    <div className="watch-ghost-line watch-ghost-line-comment" />
+                    <div className="watch-ghost-line watch-ghost-line-comment short" />
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+
+          <aside className="watch-sidebar">
+            <section className="watch-sidebar-section watch-ghost-panel" aria-hidden="true">
+              <div className="watch-ghost-chip-row">
+                <span className="watch-ghost-chip" />
+                <span className="watch-ghost-chip short" />
+              </div>
+              {Array.from({ length: 5 }).map((_, index) => (
+                <div className="suggestion-row suggestion-skeleton watch-ghost-suggestion" key={index}>
+                  <div className="suggestion-thumb" />
+                  <div className="suggestion-copy suggestion-copy-skeleton">
+                    <div className="watch-skeleton-line suggestion-skeleton-title" />
+                    <div className="watch-skeleton-line suggestion-skeleton-meta" />
+                    <div className="watch-skeleton-line suggestion-skeleton-meta short" />
+                  </div>
+                </div>
+              ))}
+            </section>
+          </aside>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 type AutoplayTarget = WatchSuggestionItem & {
@@ -1006,7 +1101,30 @@ export function VideoPage({
   }, [data, videoWatched]);
   const activeSuggestionFeed = suggestionFeeds[suggestionFilter];
   const visibleSuggestedItems = activeSuggestionFeed.items;
-  const canCollapseComments = (data?.youtube.comments.length ?? 0) > 1;
+  const totalComments = data?.youtube.comments ?? [];
+  const usesCompactCommentPreview = preferences.density === "compact";
+  const commentPreviewCount = usesCompactCommentPreview
+    ? COMPACT_COMMENT_PREVIEW_COUNT
+    : STANDARD_COMMENT_PREVIEW_COUNT;
+  const canCollapseComments = totalComments.length > commentPreviewCount;
+  const previewedComments = useMemo(
+    () =>
+      commentsExpanded || !canCollapseComments
+        ? totalComments
+        : totalComments.slice(0, commentPreviewCount + 1),
+    [canCollapseComments, commentPreviewCount, commentsExpanded, totalComments],
+  );
+  const previewOverflowCommentIndex =
+    canCollapseComments && !commentsExpanded
+      ? commentPreviewCount
+      : -1;
+  const showCollapsedCommentPreview = canCollapseComments && !commentsExpanded;
+
+  function toggleCommentsExpanded() {
+    if (!canCollapseComments) return;
+    setCommentsExpanded((current) => !current);
+  }
+
   useEffect(() => {
     suggestionRequestTokenRef.current += 1;
     const nextUpId = data?.next_up?.id ?? null;
@@ -1517,13 +1635,6 @@ export function VideoPage({
     }, 180);
   }
 
-  function handleCommentsSectionClick(event: MouseEvent<HTMLElement>) {
-    if (commentsExpanded || !canCollapseComments) return;
-    const target = event.target as HTMLElement | null;
-    if (target?.closest("button, a, input, label")) return;
-    setCommentsExpanded(true);
-  }
-
   async function setReaction(nextReaction: "like" | "dislike") {
     if (!data || !videoId) return;
     const current = data.video.user_reaction ?? null;
@@ -1611,8 +1722,32 @@ export function VideoPage({
       </div>
     );
   }
-  if (error || !data)
+  const normalizedError = (error ?? "").trim().toLowerCase();
+  const isInternalServerError =
+    normalizedError === "internal server error" ||
+    normalizedError.includes("500");
+  if (error || !data) {
+    if (isInternalServerError) {
+      return (
+        <GhostWatchPage
+          displayMode={displayMode}
+          message="Internal server error."
+        />
+      );
+    }
     return <div className="panel error">{error ?? "Video not found"}</div>;
+  }
+
+  const sourceUnavailable =
+    !data.playback.stream_url || Boolean(data.media_info?.source_missing);
+  if (sourceUnavailable) {
+    return (
+      <GhostWatchPage
+        displayMode={displayMode}
+        message="File was not found in filesystem."
+      />
+    );
+  }
 
   return (
     <div
@@ -2184,10 +2319,30 @@ export function VideoPage({
               <section
                 className={`watch-comments ${
                   canCollapseComments ? "is-collapsible" : ""
-                } ${commentsExpanded ? "is-expanded" : "is-collapsed"}`}
-                onClick={handleCommentsSectionClick}
+                } ${commentsExpanded ? "is-expanded" : "is-collapsed"} ${
+                  usesCompactCommentPreview ? "is-compact-preview" : "is-standard-preview"
+                }`}
               >
-                <div className="section-heading">
+                <div
+                  className={`section-heading ${
+                    canCollapseComments ? "watch-comments-summary is-clickable" : ""
+                  }`}
+                  onClick={() => {
+                    if (canCollapseComments) {
+                      toggleCommentsExpanded();
+                    }
+                  }}
+                  role={canCollapseComments ? "button" : undefined}
+                  tabIndex={canCollapseComments ? 0 : undefined}
+                  onKeyDown={(event) => {
+                    if (!canCollapseComments) return;
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      toggleCommentsExpanded();
+                    }
+                  }}
+                  aria-expanded={canCollapseComments ? commentsExpanded : undefined}
+                >
                   <div className="watch-comments-heading">
                     <h2>Comments</h2>
                     {canCollapseComments ? (
@@ -2203,7 +2358,7 @@ export function VideoPage({
                         }
                         onClick={(event) => {
                           event.stopPropagation();
-                          setCommentsExpanded((current) => !current);
+                          toggleCommentsExpanded();
                         }}
                         type="button"
                       >
@@ -2220,80 +2375,129 @@ export function VideoPage({
                       </button>
                     ) : null}
                   </div>
-                  <span>{data.youtube.comments.length}</span>
+                  <span>{totalComments.length}</span>
                 </div>
                 <div
                   className={`comment-stack ${
                     canCollapseComments && !commentsExpanded ? "is-preview" : ""
+                  } ${
+                    !usesCompactCommentPreview && canCollapseComments && !commentsExpanded
+                      ? "is-standard-preview"
+                      : ""
+                  } ${
+                    usesCompactCommentPreview && canCollapseComments && !commentsExpanded
+                      ? "is-compact-preview"
+                      : ""
                   }`}
                 >
-                  {data.youtube.comments.length ? (
-                    data.youtube.comments.map((comment: any, index: number) => (
-                      <article
-                        key={`${comment.author_name}-${index}`}
-                        className="comment-card watch-comment-card"
-                      >
-                        <span className="comment-avatar">
-                          <AvatarImage
-                            src={null}
-                            alt={comment.author_name}
-                            seed={`${comment.author_name}-${index}`}
-                            fallbackText={comment.author_name}
-                          />
-                        </span>
-                        <div className="comment-body">
-                          <strong>{comment.author_name}</strong>
-                          <p>{comment.body}</p>
-                          <div className="comment-actions">
-                            <button
-                              className={`comment-reaction-button is-like ${commentReactions[`${comment.author_name}-${index}`] === "like" ? "is-selected" : ""}`}
-                              onClick={() =>
-                                setCommentReaction(
-                                  `${comment.author_name}-${index}`,
-                                  "like",
-                                )
-                              }
-                              type="button"
-                            >
-                              <ThumbIcon
-                                type="like"
-                                active={
-                                  commentReactions[
-                                    `${comment.author_name}-${index}`
-                                  ] === "like"
-                                }
-                              />
-                              <span>
-                                {formatCount(comment.like_count) || "0"}
-                              </span>
-                            </button>
-                            <button
-                              className={`comment-reaction-button is-dislike ${commentReactions[`${comment.author_name}-${index}`] === "dislike" ? "is-selected" : ""}`}
-                              onClick={() =>
-                                setCommentReaction(
-                                  `${comment.author_name}-${index}`,
-                                  "dislike",
-                                )
-                              }
-                              type="button"
-                            >
-                              <ThumbIcon
-                                type="dislike"
-                                active={
-                                  commentReactions[
-                                    `${comment.author_name}-${index}`
-                                  ] === "dislike"
-                                }
-                              />
-                            </button>
+                  {previewedComments.length ? (
+                    showCollapsedCommentPreview ? (
+                      previewedComments.map((comment: any, index: number) => (
+                        <article
+                          key={`${comment.author_name}-${index}`}
+                          className={`watch-comment-preview-row ${
+                            index === previewOverflowCommentIndex
+                              ? "is-faded-preview"
+                              : ""
+                          }`}
+                        >
+                          <span className="comment-avatar">
+                            <AvatarImage
+                              src={null}
+                              alt={comment.author_name}
+                              seed={`${comment.author_name}-${index}`}
+                              fallbackText={comment.author_name}
+                            />
+                          </span>
+                          <div className="watch-comment-preview-copy">
+                            <strong>{comment.author_name}</strong>
+                            <p>{comment.body}</p>
                           </div>
-                        </div>
-                      </article>
-                    ))
-                  ) : (
+                        </article>
+                      ))
+                    ) : (
+                      previewedComments.map((comment: any, index: number) => (
+                        <article
+                          key={`${comment.author_name}-${index}`}
+                          className={`comment-card watch-comment-card ${
+                            index === previewOverflowCommentIndex
+                              ? "is-faded-preview"
+                              : ""
+                          }`}
+                        >
+                          <span className="comment-avatar">
+                            <AvatarImage
+                              src={null}
+                              alt={comment.author_name}
+                              seed={`${comment.author_name}-${index}`}
+                              fallbackText={comment.author_name}
+                            />
+                          </span>
+                          <div className="comment-body">
+                            <strong>{comment.author_name}</strong>
+                            <p>{comment.body}</p>
+                            <div className="comment-actions">
+                              <button
+                                className={`comment-reaction-button is-like ${commentReactions[`${comment.author_name}-${index}`] === "like" ? "is-selected" : ""}`}
+                                onClick={() =>
+                                  setCommentReaction(
+                                    `${comment.author_name}-${index}`,
+                                    "like",
+                                  )
+                                }
+                                type="button"
+                              >
+                                <ThumbIcon
+                                  type="like"
+                                  active={
+                                    commentReactions[
+                                      `${comment.author_name}-${index}`
+                                    ] === "like"
+                                  }
+                                />
+                                <span>
+                                  {formatCount(comment.like_count) || "0"}
+                                </span>
+                              </button>
+                              <button
+                                className={`comment-reaction-button is-dislike ${commentReactions[`${comment.author_name}-${index}`] === "dislike" ? "is-selected" : ""}`}
+                                onClick={() =>
+                                  setCommentReaction(
+                                    `${comment.author_name}-${index}`,
+                                    "dislike",
+                                  )
+                                }
+                                type="button"
+                              >
+                                <ThumbIcon
+                                  type="dislike"
+                                  active={
+                                    commentReactions[
+                                      `${comment.author_name}-${index}`
+                                    ] === "dislike"
+                                  }
+                                />
+                              </button>
+                            </div>
+                          </div>
+                        </article>
+                      ))
+                    )
+                  ) : totalComments.length === 0 ? (
                     <p className="muted-copy">No synced comments yet.</p>
-                  )}
+                  ) : null}
                 </div>
+                {canCollapseComments &&
+                !commentsExpanded &&
+                !usesCompactCommentPreview ? (
+                  <button
+                    className="watch-comments-preview-action"
+                    onClick={() => setCommentsExpanded(true)}
+                    type="button"
+                  >
+                    Show all comments
+                  </button>
+                ) : null}
               </section>
             </div>
           </div>
