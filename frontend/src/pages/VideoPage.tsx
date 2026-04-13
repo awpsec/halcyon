@@ -42,6 +42,23 @@ const COMPACT_COMMENT_PREVIEW_COUNT = 2;
 const PROGRESS_CHECKPOINT_INTERVAL_SECONDS = 15;
 const PROGRESS_CHECK_INTERVAL_MS = 5_000;
 const PROGRESS_SAVE_MIN_DELTA_SECONDS = 2;
+const PLAYER_OVERLAY_HIDE_DELAY_MS = 2200;
+
+function detectsTouchOverlayDevice() {
+  if (typeof window === "undefined") return false;
+  const userAgent = navigator.userAgent || "";
+  const mobileUserAgent =
+    /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+      userAgent,
+    );
+  if (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(pointer: coarse)").matches
+  ) {
+    return true;
+  }
+  return mobileUserAgent || "ontouchstart" in window || navigator.maxTouchPoints > 0;
+}
 
 type ParsedChapter = {
   startSeconds: number;
@@ -866,8 +883,13 @@ export function VideoPage({
   const [playlists, setPlaylists] = useState<PlaylistSummary[]>([]);
   const [createPlaylistOpen, setCreatePlaylistOpen] = useState(false);
   const [createPlaylistPending, setCreatePlaylistPending] = useState(false);
+  const [touchOverlayDevice] = useState(() => detectsTouchOverlayDevice());
+  const [playerOverlayVisible, setPlayerOverlayVisible] = useState(
+    () => !detectsTouchOverlayDevice(),
+  );
   const videoNodeRef = useRef<HTMLVideoElement | null>(null);
   const statsRef = useRef<number | null>(null);
+  const playerOverlayTimerRef = useRef<number | null>(null);
   const playlistMenuCloseTimerRef = useRef<number | null>(null);
   const autoplayCountdownTimerRef = useRef<number | null>(null);
   const autoplayNavigateTimerRef = useRef<number | null>(null);
@@ -915,6 +937,36 @@ export function VideoPage({
   useEffect(() => {
     setCommentsExpanded(false);
   }, [videoId]);
+
+  useEffect(() => {
+    function clearOverlayTimer() {
+      if (playerOverlayTimerRef.current != null) {
+        window.clearTimeout(playerOverlayTimerRef.current);
+        playerOverlayTimerRef.current = null;
+      }
+    }
+
+    if (!touchOverlayDevice) {
+      clearOverlayTimer();
+      setPlayerOverlayVisible(true);
+      return undefined;
+    }
+
+    if (statsOpen || menuOpen || playlistMenuOpen) {
+      clearOverlayTimer();
+      setPlayerOverlayVisible(true);
+      return undefined;
+    }
+
+    clearOverlayTimer();
+    setPlayerOverlayVisible(true);
+    playerOverlayTimerRef.current = window.setTimeout(() => {
+      playerOverlayTimerRef.current = null;
+      setPlayerOverlayVisible(false);
+    }, PLAYER_OVERLAY_HIDE_DELAY_MS);
+
+    return () => clearOverlayTimer();
+  }, [menuOpen, playlistMenuOpen, statsOpen, touchOverlayDevice, videoId]);
 
   useEffect(() => {
     setDisplayMode(resolvePlayerModePreference(preferences.defaultPlayerMode));
@@ -1904,8 +1956,18 @@ export function VideoPage({
       <section className="watch-layout">
         <div className="watch-stage-row">
           <div className="watch-main-column">
-            <div className="watch-player-slot">
-              <div className="video-frame advanced-player watch-player-frame">
+              <div className="watch-player-slot">
+              <div
+                className={`video-frame advanced-player watch-player-frame ${
+                  touchOverlayDevice ? "touch-overlay-device" : ""
+                } ${playerOverlayVisible ? "player-overlay-visible" : ""} ${
+                  menuOpen || playlistMenuOpen ? "player-menu-open" : ""
+                }`}
+                onPointerDown={() => {
+                  if (!touchOverlayDevice) return;
+                  setPlayerOverlayVisible(true);
+                }}
+              >
                 <HalcyonPlayer
                   source={data.playback.stream_url}
                   autoplay={preferences.autoplay}
@@ -2030,7 +2092,10 @@ export function VideoPage({
                   <div className="player-topbar-right">
                     <button
                       className={`icon-button floating-control ${statsOpen ? "active-chip" : ""}`}
-                      onClick={() => setStatsOpen((current) => !current)}
+                      onClick={() => {
+                        setPlayerOverlayVisible(true);
+                        setStatsOpen((current) => !current);
+                      }}
                       aria-label="Playback stats"
                     >
                       <svg
@@ -2049,11 +2114,12 @@ export function VideoPage({
                     </button>
                     <button
                       className={`icon-button floating-control floating-control-fades-when-active ${displayMode === "theater" ? "active-chip" : ""}`}
-                      onClick={() =>
+                      onClick={() => {
+                        setPlayerOverlayVisible(true);
                         setDisplayMode((current) =>
                           current === "default" ? "theater" : "default",
-                        )
-                      }
+                        );
+                      }}
                       aria-label="Toggle theater mode"
                     >
                       <svg
@@ -2084,6 +2150,7 @@ export function VideoPage({
                       className="icon-button floating-control"
                       onClick={(event) => {
                         event.stopPropagation();
+                        setPlayerOverlayVisible(true);
                         setMenuOpen((current) => !current);
                       }}
                       aria-label="Player actions"

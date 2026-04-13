@@ -5403,6 +5403,17 @@ body,
   opacity: 1;
 }
 
+.watch-player-frame.touch-overlay-device:focus-within .floating-control {
+  opacity: 0;
+}
+
+.watch-player-frame.touch-overlay-device.player-overlay-visible .floating-control,
+.watch-player-frame.touch-overlay-device .floating-control.active-chip:not(.floating-control-fades-when-active),
+.watch-player-frame.touch-overlay-device.player-menu-open .floating-control,
+.watch-player-frame.touch-overlay-device .floating-control:hover {
+  opacity: 1;
+}
+
 .watch-player-frame .floating-control:hover,
 .watch-player-frame .floating-control.active-chip {
   color: #ffffff;
