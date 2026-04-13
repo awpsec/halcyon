@@ -1919,7 +1919,7 @@ export function VideoPage({
                     if (next) setPlayerError(null);
                   }}
                   onFatalError={(message) => setPlayerError(message)}
-                  onReady={(video, player: Plyr) => {
+                  onReady={(video, player: Plyr | null) => {
                     videoNodeRef.current = video;
                     setPlayerError(null);
                     const targetPosition = startAtSeconds ?? resumablePosition;
@@ -1930,7 +1930,8 @@ export function VideoPage({
                       video.currentTime = targetPosition;
                     }
                     if (preferences.autoplay) {
-                      Promise.resolve(player.play()).catch(() => undefined);
+                      const playTarget = player ?? video;
+                      Promise.resolve(playTarget.play()).catch(() => undefined);
                     }
                   }}
                   onPause={(video) => {

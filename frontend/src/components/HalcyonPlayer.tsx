@@ -7,17 +7,31 @@ import "plyr/dist/plyr.css";
 const WAITING_OVERLAY_DELAY_MS = 450;
 const HLS_NETWORK_RECOVERY_LIMIT = 2;
 const HLS_MEDIA_RECOVERY_LIMIT = 2;
+const HLS_HARD_RELOAD_LIMIT = 1;
 const DIRECT_MEDIA_RECOVERY_LIMIT = 1;
 
 function detectsTouchDevice() {
   if (typeof window === "undefined") return false;
+  const userAgent = navigator.userAgent || "";
+  const mobileUserAgent =
+    /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+      userAgent,
+    );
+  const narrowViewport =
+    window.innerWidth <= 900 ||
+    window.visualViewport?.width != null && window.visualViewport.width <= 900;
   if (
     typeof window.matchMedia === "function" &&
     window.matchMedia("(pointer: coarse)").matches
   ) {
     return true;
   }
-  return "ontouchstart" in window || navigator.maxTouchPoints > 0;
+  return (
+    mobileUserAgent ||
+    narrowViewport ||
+    "ontouchstart" in window ||
+    navigator.maxTouchPoints > 0
+  );
 }
 
 type CaptionTrack = {
@@ -54,7 +68,7 @@ export function HalcyonPlayer({
   aspectRatio?: string;
   mode?: "default" | "theater";
   onDimensionsChange?: (aspectRatio: string) => void;
-  onReady?: (video: HTMLVideoElement, player: Plyr) => void;
+  onReady?: (video: HTMLVideoElement, player: Plyr | null) => void;
   onPause?: (video: HTMLVideoElement) => void;
   onEnded?: (video: HTMLVideoElement) => void;
   onLoadingChange?: (loading: boolean) => void;
@@ -77,6 +91,7 @@ export function HalcyonPlayer({
   const hlsNetworkRecoveryAttemptsRef = useRef(0);
   const hlsMediaRecoveryAttemptsRef = useRef(0);
   const directMediaRecoveryAttemptsRef = useRef(0);
+  const hlsHardReloadAttemptsRef = useRef(0);
   const pendingRestoreTimeRef = useRef<number | null>(null);
   const pendingAutoplayAfterRecoveryRef = useRef(false);
   const touchDeviceRef = useRef(detectsTouchDevice());
@@ -112,8 +127,10 @@ export function HalcyonPlayer({
     hlsNetworkRecoveryAttemptsRef.current = 0;
     hlsMediaRecoveryAttemptsRef.current = 0;
     directMediaRecoveryAttemptsRef.current = 0;
+    hlsHardReloadAttemptsRef.current = 0;
     pendingRestoreTimeRef.current = null;
     pendingAutoplayAfterRecoveryRef.current = false;
+    node.controls = touchDeviceRef.current;
     const plyrRatio = aspectRatio.replace("/", ":").replace(/\s+/g, "");
 
     if (source.endsWith(".m3u8")) {
@@ -151,6 +168,26 @@ export function HalcyonPlayer({
             hls.recoverMediaError();
             return;
           }
+          if (
+            touchDeviceRef.current &&
+            hlsHardReloadAttemptsRef.current < HLS_HARD_RELOAD_LIMIT
+          ) {
+            hlsHardReloadAttemptsRef.current += 1;
+            pendingRestoreTimeRef.current = node.currentTime || null;
+            pendingAutoplayAfterRecoveryRef.current = !node.paused || autoplay;
+            emitLoadingChange(true);
+            try {
+              hls.stopLoad();
+              hls.loadSource(source);
+              hls.startLoad(-1);
+              if (pendingAutoplayAfterRecoveryRef.current) {
+                void node.play().catch(() => undefined);
+              }
+              return;
+            } catch {
+              // Fall through to the fatal error handler below.
+            }
+          }
           emitLoadingChange(false);
           onFatalErrorRef.current?.("This stream was terminated. Refresh to resume.");
         });
@@ -164,34 +201,36 @@ export function HalcyonPlayer({
       node.src = source;
     }
 
-    const player = new Plyr(node, {
-      autoplay,
-      seekTime: 5,
-      ratio: plyrRatio,
-      hideControls: !touchDeviceRef.current,
-      captions: { active: captions.length > 0, language: "auto", update: true },
-      controls: [
-        "play-large",
-        "restart",
-        "rewind",
-        "play",
-        "fast-forward",
-        "progress",
-        "current-time",
-        "duration",
-        "mute",
-        "volume",
-        "captions",
-        "settings",
-        "pip",
-        "fullscreen",
-      ],
-      fullscreen: {
-        enabled: true,
-        iosNative: true,
-      },
-      settings: ["captions", "speed"],
-    });
+    const player = touchDeviceRef.current
+      ? null
+      : new Plyr(node, {
+          autoplay,
+          seekTime: 5,
+          ratio: plyrRatio,
+          hideControls: true,
+          captions: { active: captions.length > 0, language: "auto", update: true },
+          controls: [
+            "play-large",
+            "restart",
+            "rewind",
+            "play",
+            "fast-forward",
+            "progress",
+            "current-time",
+            "duration",
+            "mute",
+            "volume",
+            "captions",
+            "settings",
+            "pip",
+            "fullscreen",
+          ],
+          fullscreen: {
+            enabled: true,
+            iosNative: true,
+          },
+          settings: ["captions", "speed"],
+        });
     playerRef.current = player;
     onReadyRef.current?.(node, player);
 
@@ -212,12 +251,14 @@ export function HalcyonPlayer({
       clearWaitingTimer();
       hlsNetworkRecoveryAttemptsRef.current = 0;
       hlsMediaRecoveryAttemptsRef.current = 0;
+      hlsHardReloadAttemptsRef.current = 0;
       emitLoadingChange(false);
     };
     const playingHandler = () => {
       clearWaitingTimer();
       hlsNetworkRecoveryAttemptsRef.current = 0;
       hlsMediaRecoveryAttemptsRef.current = 0;
+      hlsHardReloadAttemptsRef.current = 0;
       emitLoadingChange(false);
     };
     const metadataHandler = () => {
@@ -289,7 +330,7 @@ export function HalcyonPlayer({
       node.removeEventListener("error", errorHandler);
       clearWaitingTimer();
       loadingStateRef.current = false;
-      player.destroy();
+      player?.destroy();
       playerRef.current = null;
       if (hlsRef.current) {
         hlsRef.current.destroy();
