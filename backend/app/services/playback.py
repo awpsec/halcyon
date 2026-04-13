@@ -91,7 +91,9 @@ def _can_direct_play(
     audio_codec: str,
     client_profile: str,
 ) -> bool:
-    if client_profile in {"mobile", "android"}:
+    if client_profile == "android":
+        return False
+    if client_profile == "mobile":
         return (
             suffix in {".mp4", ".m4v"}
             and video_codec == "h264"

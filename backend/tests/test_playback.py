@@ -119,6 +119,24 @@ def test_resolve_playback_routes_mobile_h264_mkv_to_compatible_mp4(tmp_path: Pat
         assert playback["stream_url"] == f"/api/videos/{video.id}/compatible?client_profile=mobile"
 
 
+def test_resolve_playback_routes_android_h264_mp4_to_compatible_mp4(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        video = create_video(db, tmp_path, filename="example.mp4")
+
+        monkeypatch.setattr(
+            playback_service,
+            "probe_media",
+            lambda _path: {"codec_summary": "h264", "audio_codec": "aac"},
+        )
+
+        playback = playback_service.resolve_playback(video, client_profile="android")
+
+        assert playback["direct_play"] is False
+        assert playback["requires_transcode"] is True
+        assert playback["transcode_profile"] == "remux-mp4-copy"
+        assert playback["stream_url"] == f"/api/videos/{video.id}/compatible?client_profile=android"
+
+
 def test_normalize_playback_client_profile_defaults_invalid_values():
     assert playback_service.normalize_playback_client_profile(None) == "default"
     assert playback_service.normalize_playback_client_profile("") == "default"

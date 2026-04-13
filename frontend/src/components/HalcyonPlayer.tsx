@@ -10,6 +10,16 @@ const HLS_MEDIA_RECOVERY_LIMIT = 2;
 const HLS_HARD_RELOAD_LIMIT = 1;
 const DIRECT_MEDIA_RECOVERY_LIMIT = 1;
 
+function isHlsSource(source: string) {
+  if (!source) return false;
+  try {
+    const pathname = new URL(source, typeof window !== "undefined" ? window.location.origin : "http://localhost").pathname;
+    return pathname.toLowerCase().endsWith(".m3u8");
+  } catch {
+    return source.split("?", 1)[0].toLowerCase().endsWith(".m3u8");
+  }
+}
+
 function detectsTouchDevice() {
   if (typeof window === "undefined") return false;
   const userAgent = navigator.userAgent || "";
@@ -133,12 +143,13 @@ export function HalcyonPlayer({
     node.controls = touchDeviceRef.current;
     const plyrRatio = aspectRatio.replace("/", ":").replace(/\s+/g, "");
 
-    if (source.endsWith(".m3u8")) {
+    if (isHlsSource(source)) {
       const supportsNativeHls =
         typeof node.canPlayType === "function" &&
         node.canPlayType("application/vnd.apple.mpegurl") !== "";
       if (supportsNativeHls) {
         node.src = source;
+        node.load();
       } else if (Hls.isSupported()) {
         const hls = new Hls({
           maxBufferLength: 180,
@@ -196,9 +207,11 @@ export function HalcyonPlayer({
         hlsRef.current = hls;
       } else {
         node.src = source;
+        node.load();
       }
     } else {
       node.src = source;
+      node.load();
     }
 
     const player = touchDeviceRef.current
