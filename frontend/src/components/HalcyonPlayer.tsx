@@ -4,6 +4,8 @@ import Hls from "hls.js";
 import Plyr from "plyr";
 import "plyr/dist/plyr.css";
 
+const WAITING_OVERLAY_DELAY_MS = 450;
+
 type CaptionTrack = {
   id: number;
   label: string;
@@ -56,6 +58,8 @@ export function HalcyonPlayer({
   const onEndedRef = useRef(onEnded);
   const onLoadingRef = useRef(onLoadingChange);
   const onFatalErrorRef = useRef(onFatalError);
+  const waitingTimerRef = useRef<number | null>(null);
+  const loadingStateRef = useRef(false);
 
   useEffect(() => {
     onReadyRef.current = onReady;
@@ -65,11 +69,26 @@ export function HalcyonPlayer({
     onFatalErrorRef.current = onFatalError;
   }, [onEnded, onFatalError, onLoadingChange, onPause, onReady]);
 
+  function emitLoadingChange(nextLoading: boolean) {
+    if (loadingStateRef.current === nextLoading) return;
+    loadingStateRef.current = nextLoading;
+    onLoadingRef.current?.(nextLoading);
+  }
+
+  function clearWaitingTimer() {
+    if (waitingTimerRef.current != null) {
+      window.clearTimeout(waitingTimerRef.current);
+      waitingTimerRef.current = null;
+    }
+  }
+
   useEffect(() => {
     const node = videoRef.current;
     if (!node) return;
     setDurationSeconds(null);
     setChapterHost(null);
+    clearWaitingTimer();
+    loadingStateRef.current = false;
     const plyrRatio = aspectRatio.replace("/", ":").replace(/\s+/g, "");
 
     if (source.endsWith(".m3u8")) {
@@ -83,7 +102,8 @@ export function HalcyonPlayer({
         });
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (!data.fatal) return;
-          onLoadingRef.current?.(false);
+          clearWaitingTimer();
+          emitLoadingChange(false);
           onFatalErrorRef.current?.("This stream was terminated. Refresh to resume.");
         });
         hls.loadSource(source);
@@ -128,10 +148,25 @@ export function HalcyonPlayer({
 
     const pauseHandler = () => onPauseRef.current?.(node);
     const endedHandler = () => onEndedRef.current?.(node);
-    const loadStartHandler = () => onLoadingRef.current?.(true);
-    const waitingHandler = () => onLoadingRef.current?.(true);
-    const canPlayHandler = () => onLoadingRef.current?.(false);
-    const playingHandler = () => onLoadingRef.current?.(false);
+    const loadStartHandler = () => {
+      clearWaitingTimer();
+      emitLoadingChange(true);
+    };
+    const waitingHandler = () => {
+      clearWaitingTimer();
+      waitingTimerRef.current = window.setTimeout(() => {
+        waitingTimerRef.current = null;
+        emitLoadingChange(true);
+      }, WAITING_OVERLAY_DELAY_MS);
+    };
+    const canPlayHandler = () => {
+      clearWaitingTimer();
+      emitLoadingChange(false);
+    };
+    const playingHandler = () => {
+      clearWaitingTimer();
+      emitLoadingChange(false);
+    };
     const metadataHandler = () => {
       if (node.videoWidth > 0 && node.videoHeight > 0) {
         onDimensionsChange?.(`${node.videoWidth} / ${node.videoHeight}`);
@@ -145,7 +180,8 @@ export function HalcyonPlayer({
       setCurrentTimeSeconds(node.currentTime || 0);
     };
     const errorHandler = () => {
-      onLoadingRef.current?.(false);
+      clearWaitingTimer();
+      emitLoadingChange(false);
       onFatalErrorRef.current?.("This stream was terminated. Refresh to resume.");
     };
     node.addEventListener("pause", pauseHandler);
@@ -170,6 +206,8 @@ export function HalcyonPlayer({
       node.removeEventListener("timeupdate", timeUpdateHandler);
       node.removeEventListener("seeked", timeUpdateHandler);
       node.removeEventListener("error", errorHandler);
+      clearWaitingTimer();
+      loadingStateRef.current = false;
       player.destroy();
       playerRef.current = null;
       if (hlsRef.current) {

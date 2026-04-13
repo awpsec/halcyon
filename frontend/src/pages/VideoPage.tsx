@@ -39,6 +39,9 @@ const SUGGESTION_LOADING_MIN_MS = 180;
 const PLAYER_MODE_STORAGE_KEY = "halcyon.playerMode";
 const STANDARD_COMMENT_PREVIEW_COUNT = 4;
 const COMPACT_COMMENT_PREVIEW_COUNT = 2;
+const PROGRESS_CHECKPOINT_INTERVAL_SECONDS = 15;
+const PROGRESS_CHECK_INTERVAL_MS = 5_000;
+const PROGRESS_SAVE_MIN_DELTA_SECONDS = 2;
 
 type ParsedChapter = {
   startSeconds: number;
@@ -872,6 +875,12 @@ export function VideoPage({
   const suggestionFeedsRef = useRef(suggestionFeeds);
   const suggestionRequestTokenRef = useRef(0);
   const autoplayTransitionRef = useRef(false);
+  const lastPersistedProgressRef = useRef(0);
+  const lastPersistedCompletedRef = useRef(false);
+  const lastBackgroundProgressRef = useRef<{
+    positionSeconds: number;
+    completed: boolean;
+  } | null>(null);
   const videoId = data?.video.id ?? null;
   const currentVideoRef = data?.video.watch_ref ?? videoRef;
   const startAtSeconds = useMemo(() => {
@@ -885,6 +894,23 @@ export function VideoPage({
     setPlayerLoading(true);
     setPlayerError(null);
   }, [data?.playback.stream_url, videoId]);
+
+  useEffect(() => {
+    lastPersistedProgressRef.current = Math.max(
+      0,
+      Math.floor(data?.resume_point ?? data?.video.progress_seconds ?? 0),
+    );
+    lastPersistedCompletedRef.current = Boolean(
+      data?.video?.watched ?? (data as any)?.video?.completed,
+    );
+    lastBackgroundProgressRef.current = null;
+  }, [
+    data?.resume_point,
+    data?.video.progress_seconds,
+    data?.video.watched,
+    (data as any)?.video?.completed,
+    videoId,
+  ]);
 
   useEffect(() => {
     setCommentsExpanded(false);
@@ -1126,6 +1152,64 @@ export function VideoPage({
   }
 
   useEffect(() => {
+    if (!profile || !videoId) return undefined;
+
+    const intervalId = window.setInterval(() => {
+      const node = videoNodeRef.current;
+      if (
+        !node ||
+        node.paused ||
+        node.ended ||
+        playerLoading ||
+        Boolean(playerError)
+      ) {
+        return;
+      }
+      const currentTimeSeconds = normalizeProgressPosition(node.currentTime);
+      if (currentTimeSeconds <= 0) return;
+      const progressedEnough =
+        currentTimeSeconds - lastPersistedProgressRef.current >=
+        PROGRESS_CHECKPOINT_INTERVAL_SECONDS;
+      const rewoundEnough =
+        currentTimeSeconds <
+        lastPersistedProgressRef.current - PROGRESS_SAVE_MIN_DELTA_SECONDS;
+      if (!progressedEnough && !rewoundEnough) return;
+      void persistProgress(currentTimeSeconds, false);
+    }, PROGRESS_CHECK_INTERVAL_MS);
+
+    return () => window.clearInterval(intervalId);
+  }, [playerError, playerLoading, profile, videoId]);
+
+  useEffect(() => {
+    if (!profile || !videoId) return undefined;
+
+    function flushCurrentProgress() {
+      const node = videoNodeRef.current;
+      if (!node || node.ended) return;
+      const currentTimeSeconds = normalizeProgressPosition(node.currentTime);
+      if (currentTimeSeconds <= 0) return;
+      persistProgressInBackground(currentTimeSeconds, false);
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "hidden") {
+        flushCurrentProgress();
+      }
+    }
+
+    window.addEventListener("pagehide", flushCurrentProgress);
+    window.addEventListener("beforeunload", flushCurrentProgress);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      flushCurrentProgress();
+      window.removeEventListener("pagehide", flushCurrentProgress);
+      window.removeEventListener("beforeunload", flushCurrentProgress);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [profile, videoId]);
+
+  useEffect(() => {
     suggestionRequestTokenRef.current += 1;
     const nextUpId = data?.next_up?.id ?? null;
     const seededSuggested = normalizeSuggestionItems(
@@ -1331,13 +1415,77 @@ export function VideoPage({
     }));
   }
 
-  async function persistProgress(positionSeconds: number, completed: boolean) {
+  function normalizeProgressPosition(positionSeconds: number) {
+    if (!Number.isFinite(positionSeconds)) return 0;
+    return Math.max(0, Math.floor(positionSeconds));
+  }
+
+  function shouldPersistProgress(
+    positionSeconds: number,
+    completed: boolean,
+    force = false,
+  ) {
+    if (force) return true;
+    if (completed !== lastPersistedCompletedRef.current) return true;
+    if (completed) return false;
+    return (
+      Math.abs(positionSeconds - lastPersistedProgressRef.current) >=
+      PROGRESS_SAVE_MIN_DELTA_SECONDS
+    );
+  }
+
+  async function persistProgress(
+    positionSeconds: number,
+    completed: boolean,
+    options?: { force?: boolean },
+  ) {
     if (!profile || !videoId) return;
+    const safePosition = normalizeProgressPosition(positionSeconds);
+    if (!shouldPersistProgress(safePosition, completed, options?.force)) return;
     await api.updateProgress(videoId, {
       user_id: profile.id,
-      position_seconds: positionSeconds,
+      position_seconds: safePosition,
       completed,
     });
+    lastPersistedProgressRef.current = safePosition;
+    lastPersistedCompletedRef.current = completed;
+  }
+
+  function persistProgressInBackground(
+    positionSeconds: number,
+    completed: boolean,
+    options?: { force?: boolean },
+  ) {
+    if (!profile || !videoId) return;
+    const safePosition = normalizeProgressPosition(positionSeconds);
+    if (!shouldPersistProgress(safePosition, completed, options?.force)) return;
+    if (
+      lastBackgroundProgressRef.current?.positionSeconds === safePosition &&
+      lastBackgroundProgressRef.current?.completed === completed
+    ) {
+      return;
+    }
+    lastBackgroundProgressRef.current = {
+      positionSeconds: safePosition,
+      completed,
+    };
+    lastPersistedProgressRef.current = safePosition;
+    lastPersistedCompletedRef.current = completed;
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone?.trim();
+    void fetch(`/api/videos/${videoId}/progress`, {
+      method: "POST",
+      credentials: "include",
+      keepalive: true,
+      headers: {
+        "Content-Type": "application/json",
+        ...(timezone ? { "X-Halcyon-Timezone": timezone } : {}),
+      },
+      body: JSON.stringify({
+        user_id: profile.id,
+        position_seconds: safePosition,
+        completed,
+      }),
+    }).catch(() => undefined);
   }
 
   async function handleSync(force = false) {
