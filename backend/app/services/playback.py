@@ -131,8 +131,8 @@ def resolve_playback(video: Video, client_profile: str = "default") -> dict:
                 )
                 stream_url = f"/api/videos/{video.id}/compatible"
             else:
-                processing_profile = "hls-default"
-                stream_url = f"/api/videos/{video.id}/hls/index.m3u8"
+                processing_profile = "transcode-mp4-mobile"
+                stream_url = f"/api/videos/{video.id}/compatible"
         elif video_codec in WEBM_VIDEO_CODECS and audio_codec in WEBM_AUDIO_CODECS:
             processing_profile = "remux-webm"
             stream_url = f"/api/videos/{video.id}/compatible"
@@ -334,6 +334,30 @@ def ensure_compatible_stream(db: Session, video: Video, cache_dir: Path, profile
             "copy",
             "-c:a",
             "copy",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+    elif profile == "transcode-mp4-mobile":
+        cmd = [
+            resolve_binary("ffmpeg"),
+            "-y",
+            "-i",
+            primary_file.absolute_path,
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
             "-movflags",
             "+faststart",
             str(output_path),

@@ -65,7 +65,7 @@ def test_resolve_playback_keeps_desktop_webm_direct_play(tmp_path: Path, monkeyp
         assert playback["stream_url"] == f"/api/videos/{video.id}/stream"
 
 
-def test_resolve_playback_routes_mobile_webm_to_hls(tmp_path: Path, monkeypatch):
+def test_resolve_playback_routes_mobile_webm_to_compatible_mp4(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         video = create_video(db, tmp_path, filename="example.webm")
 
@@ -79,8 +79,8 @@ def test_resolve_playback_routes_mobile_webm_to_hls(tmp_path: Path, monkeypatch)
 
         assert playback["direct_play"] is False
         assert playback["requires_transcode"] is True
-        assert playback["transcode_profile"] == "hls-default"
-        assert playback["stream_url"] == f"/api/videos/{video.id}/hls/index.m3u8"
+        assert playback["transcode_profile"] == "transcode-mp4-mobile"
+        assert playback["stream_url"] == f"/api/videos/{video.id}/compatible"
 
 
 def test_resolve_playback_routes_mobile_h264_mkv_to_compatible_mp4(tmp_path: Path, monkeypatch):
