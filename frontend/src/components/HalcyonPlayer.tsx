@@ -5,6 +5,20 @@ import Plyr from "plyr";
 import "plyr/dist/plyr.css";
 
 const WAITING_OVERLAY_DELAY_MS = 450;
+const HLS_NETWORK_RECOVERY_LIMIT = 2;
+const HLS_MEDIA_RECOVERY_LIMIT = 2;
+const DIRECT_MEDIA_RECOVERY_LIMIT = 1;
+
+function detectsTouchDevice() {
+  if (typeof window === "undefined") return false;
+  if (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(pointer: coarse)").matches
+  ) {
+    return true;
+  }
+  return "ontouchstart" in window || navigator.maxTouchPoints > 0;
+}
 
 type CaptionTrack = {
   id: number;
@@ -60,6 +74,12 @@ export function HalcyonPlayer({
   const onFatalErrorRef = useRef(onFatalError);
   const waitingTimerRef = useRef<number | null>(null);
   const loadingStateRef = useRef(false);
+  const hlsNetworkRecoveryAttemptsRef = useRef(0);
+  const hlsMediaRecoveryAttemptsRef = useRef(0);
+  const directMediaRecoveryAttemptsRef = useRef(0);
+  const pendingRestoreTimeRef = useRef<number | null>(null);
+  const pendingAutoplayAfterRecoveryRef = useRef(false);
+  const touchDeviceRef = useRef(detectsTouchDevice());
 
   useEffect(() => {
     onReadyRef.current = onReady;
@@ -89,10 +109,20 @@ export function HalcyonPlayer({
     setChapterHost(null);
     clearWaitingTimer();
     loadingStateRef.current = false;
+    hlsNetworkRecoveryAttemptsRef.current = 0;
+    hlsMediaRecoveryAttemptsRef.current = 0;
+    directMediaRecoveryAttemptsRef.current = 0;
+    pendingRestoreTimeRef.current = null;
+    pendingAutoplayAfterRecoveryRef.current = false;
     const plyrRatio = aspectRatio.replace("/", ":").replace(/\s+/g, "");
 
     if (source.endsWith(".m3u8")) {
-      if (Hls.isSupported()) {
+      const supportsNativeHls =
+        typeof node.canPlayType === "function" &&
+        node.canPlayType("application/vnd.apple.mpegurl") !== "";
+      if (supportsNativeHls) {
+        node.src = source;
+      } else if (Hls.isSupported()) {
         const hls = new Hls({
           maxBufferLength: 180,
           backBufferLength: 180,
@@ -103,6 +133,24 @@ export function HalcyonPlayer({
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (!data.fatal) return;
           clearWaitingTimer();
+          if (
+            data.type === Hls.ErrorTypes.NETWORK_ERROR &&
+            hlsNetworkRecoveryAttemptsRef.current < HLS_NETWORK_RECOVERY_LIMIT
+          ) {
+            hlsNetworkRecoveryAttemptsRef.current += 1;
+            emitLoadingChange(true);
+            hls.startLoad();
+            return;
+          }
+          if (
+            data.type === Hls.ErrorTypes.MEDIA_ERROR &&
+            hlsMediaRecoveryAttemptsRef.current < HLS_MEDIA_RECOVERY_LIMIT
+          ) {
+            hlsMediaRecoveryAttemptsRef.current += 1;
+            emitLoadingChange(true);
+            hls.recoverMediaError();
+            return;
+          }
           emitLoadingChange(false);
           onFatalErrorRef.current?.("This stream was terminated. Refresh to resume.");
         });
@@ -120,6 +168,7 @@ export function HalcyonPlayer({
       autoplay,
       seekTime: 5,
       ratio: plyrRatio,
+      hideControls: !touchDeviceRef.current,
       captions: { active: captions.length > 0, language: "auto", update: true },
       controls: [
         "play-large",
@@ -161,10 +210,14 @@ export function HalcyonPlayer({
     };
     const canPlayHandler = () => {
       clearWaitingTimer();
+      hlsNetworkRecoveryAttemptsRef.current = 0;
+      hlsMediaRecoveryAttemptsRef.current = 0;
       emitLoadingChange(false);
     };
     const playingHandler = () => {
       clearWaitingTimer();
+      hlsNetworkRecoveryAttemptsRef.current = 0;
+      hlsMediaRecoveryAttemptsRef.current = 0;
       emitLoadingChange(false);
     };
     const metadataHandler = () => {
@@ -174,6 +227,14 @@ export function HalcyonPlayer({
       if (Number.isFinite(node.duration) && node.duration > 0) {
         setDurationSeconds(node.duration);
       }
+      if (
+        pendingRestoreTimeRef.current != null &&
+        Number.isFinite(node.duration) &&
+        node.duration > 0
+      ) {
+        node.currentTime = Math.min(pendingRestoreTimeRef.current, node.duration);
+        pendingRestoreTimeRef.current = null;
+      }
       setCurrentTimeSeconds(node.currentTime || 0);
     };
     const timeUpdateHandler = () => {
@@ -181,6 +242,26 @@ export function HalcyonPlayer({
     };
     const errorHandler = () => {
       clearWaitingTimer();
+      if (hlsRef.current) {
+        return;
+      }
+      const mediaError = node.error;
+      if (!mediaError) return;
+      if (
+        (mediaError.code === MediaError.MEDIA_ERR_NETWORK ||
+          mediaError.code === MediaError.MEDIA_ERR_DECODE) &&
+        directMediaRecoveryAttemptsRef.current < DIRECT_MEDIA_RECOVERY_LIMIT
+      ) {
+        directMediaRecoveryAttemptsRef.current += 1;
+        pendingRestoreTimeRef.current = node.currentTime || 0;
+        pendingAutoplayAfterRecoveryRef.current = !node.paused;
+        emitLoadingChange(true);
+        node.load();
+        if (pendingAutoplayAfterRecoveryRef.current) {
+          void node.play().catch(() => undefined);
+        }
+        return;
+      }
       emitLoadingChange(false);
       onFatalErrorRef.current?.("This stream was terminated. Refresh to resume.");
     };
