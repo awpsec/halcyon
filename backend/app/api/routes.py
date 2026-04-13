@@ -117,6 +117,7 @@ from app.services.playback import (
     resolve_playback,
     stop_transcode_job,
     transcode_is_throttled,
+    wait_for_transcode_target,
     wait_for_transcode_playlist,
 )
 from app.services.retention import (
@@ -2456,6 +2457,8 @@ def hls_stream(
 
     if target == playlist_path and not target.exists():
         wait_for_transcode_playlist(playlist_path)
+    elif not target.exists():
+        wait_for_transcode_target(target)
 
     if not target.exists():
         raise HTTPException(status_code=404, detail="HLS segment not found")

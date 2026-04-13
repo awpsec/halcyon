@@ -473,3 +473,21 @@ def wait_for_output_ready(output_path: Path, marker_path: Path, timeout_seconds:
             return True
         time.sleep(0.35)
     return output_path.exists() and output_path.stat().st_size > 0 and marker_path.exists()
+
+
+def wait_for_transcode_target(target_path: Path, timeout_seconds: float = 8.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if target_path.exists():
+            try:
+                if target_path.stat().st_size > 0:
+                    return True
+            except OSError:
+                pass
+        time.sleep(0.25)
+    if not target_path.exists():
+        return False
+    try:
+        return target_path.stat().st_size > 0
+    except OSError:
+        return False
