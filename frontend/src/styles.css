@@ -190,7 +190,7 @@ p {
   top: 0;
   z-index: 10;
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 20px;
   min-height: 72px;
@@ -227,8 +227,8 @@ p {
   align-items: center;
   justify-self: start;
   position: relative;
-  width: clamp(136px, 12vw, 178px);
-  min-width: clamp(136px, 12vw, 178px);
+  width: clamp(160px, 14vw, 210px);
+  min-width: clamp(160px, 14vw, 210px);
   min-height: 44px;
   overflow: visible;
 }
@@ -840,8 +840,8 @@ body.mobile-nav-open {
 }
 
 .watch-search-shell {
-  width: min(820px, calc(100vw - 380px));
-  max-width: min(820px, calc(100vw - 380px));
+  width: min(760px, calc(100vw - 540px));
+  max-width: min(760px, calc(100vw - 540px));
 }
 
 .home-search-shell {
