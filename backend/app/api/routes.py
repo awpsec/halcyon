@@ -109,7 +109,16 @@ from app.services.auth import hash_password, hash_session_token, verify_password
 from app.services.auth_rate_limit import clear_failures, is_limited, register_failure
 from app.services.feed import build_home_feed, build_suggested_feed, summarize_video
 from app.services.media import download_thumbnail, find_caption_tracks, generate_preview_clip, generate_thumbnail, is_video_file, placeholder_thumbnail_svg, probe_media, srt_to_vtt
-from app.services.playback import ensure_compatible_stream, ensure_hls_transcode, reconcile_transcode_job, resolve_playback, stop_transcode_job, transcode_is_throttled, wait_for_transcode_playlist
+from app.services.playback import (
+    ensure_compatible_stream,
+    ensure_hls_transcode,
+    playback_client_profile,
+    reconcile_transcode_job,
+    resolve_playback,
+    stop_transcode_job,
+    transcode_is_throttled,
+    wait_for_transcode_playlist,
+)
 from app.services.retention import (
     browse_retention_folders,
     create_retention_folder,
@@ -332,6 +341,12 @@ def _auth_limit_key(bucket: str, *, request: Request | None, username: str | Non
     identity = _client_ip(request).casefold()
     subject = (username or "").strip().casefold() or "anonymous"
     return f"{bucket}:{identity}:{subject}"
+
+
+def _playback_profile_for_request(request: Request | None) -> str:
+    if request is None:
+        return "default"
+    return playback_client_profile(request.headers)
 
 
 def _enforce_auth_rate_limit(key: str, *, limit: int, window_seconds: int) -> None:
@@ -2050,7 +2065,12 @@ def search_library(q: str, db: Session = Depends(get_db), current_user: UserProf
 
 
 @router.get("/videos/{video_ref}")
-def get_video(video_ref: str, db: Session = Depends(get_db), current_user: UserProfile = Depends(get_current_user)) -> dict:
+def get_video(
+    video_ref: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+) -> dict:
     video = _resolve_video_ref(db, video_ref)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -2059,7 +2079,7 @@ def get_video(video_ref: str, db: Session = Depends(get_db), current_user: UserP
     progress = db.scalar(select(WatchProgress).where(WatchProgress.user_id == current_user.id, WatchProgress.video_id == video_id))
     reaction = db.scalar(select(VideoReaction).where(VideoReaction.user_id == current_user.id, VideoReaction.video_id == video_id))
     saved_video = db.scalar(select(SavedVideo).where(SavedVideo.user_id == current_user.id, SavedVideo.video_id == video_id))
-    playback = resolve_playback(video)
+    playback = resolve_playback(video, client_profile=_playback_profile_for_request(request))
     primary_file = video.files[0] if video.files else None
     primary_path = Path(primary_file.absolute_path) if primary_file else None
     source_available = bool(primary_path and primary_path.exists())
@@ -2386,13 +2406,14 @@ def stream_video(
 @router.get("/videos/{video_id}/compatible")
 def compatible_stream(
     video_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ) -> FileResponse:
     video = _video_by_id(db, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    playback = resolve_playback(video)
+    playback = resolve_playback(video, client_profile=_playback_profile_for_request(request))
     if playback.get("source_missing"):
         raise HTTPException(status_code=404, detail="Video source is unavailable")
     profile = playback.get("transcode_profile")
@@ -2409,13 +2430,14 @@ def compatible_stream(
 def hls_stream(
     video_id: int,
     segment_path: str,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ) -> FileResponse:
     video = _video_by_id(db, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    playback = resolve_playback(video)
+    playback = resolve_playback(video, client_profile=_playback_profile_for_request(request))
     if playback.get("source_missing"):
         raise HTTPException(status_code=404, detail="Video source is unavailable")
     if not playback["requires_transcode"]:

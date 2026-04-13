@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import shutil
 import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Mapping
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -22,6 +24,10 @@ DIRECT_PLAY_AUDIO_CODECS = {"aac", "opus", "vorbis", "mp3"}
 DIRECT_PLAY_EXTENSIONS = {".mp4", ".webm", ".m4v"}
 WEBM_VIDEO_CODECS = {"vp9", "av1"}
 WEBM_AUDIO_CODECS = {"opus", "vorbis"}
+MOBILE_USER_AGENT_PATTERN = re.compile(
+    r"Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini",
+    re.IGNORECASE,
+)
 logger = get_logger()
 
 
@@ -47,7 +53,39 @@ def _normalize_codec(value: str | None) -> str:
     return normalized
 
 
-def resolve_playback(video: Video) -> dict:
+def playback_client_profile(headers: Mapping[str, str] | None = None) -> str:
+    if not headers:
+        return "default"
+    sec_ch_mobile = (headers.get("sec-ch-ua-mobile") or "").strip()
+    if sec_ch_mobile == "?1":
+        return "mobile"
+    user_agent = headers.get("user-agent") or ""
+    if MOBILE_USER_AGENT_PATTERN.search(user_agent):
+        return "mobile"
+    return "default"
+
+
+def _can_direct_play(
+    *,
+    suffix: str,
+    video_codec: str,
+    audio_codec: str,
+    client_profile: str,
+) -> bool:
+    if client_profile == "mobile":
+        return (
+            suffix in {".mp4", ".m4v"}
+            and video_codec == "h264"
+            and (not audio_codec or audio_codec in {"aac", "mp3"})
+        )
+    return (
+        suffix in DIRECT_PLAY_EXTENSIONS
+        and (not video_codec or video_codec in DIRECT_PLAY_VIDEO_CODECS)
+        and (not audio_codec or audio_codec in DIRECT_PLAY_AUDIO_CODECS)
+    )
+
+
+def resolve_playback(video: Video, client_profile: str = "default") -> dict:
     primary_file = video.files[0] if video.files else None
     if not primary_file:
         return {
@@ -74,16 +112,28 @@ def resolve_playback(video: Video) -> dict:
     suffix = source_path.suffix.lower()
     video_codec = _normalize_codec(media_info.get("codec_summary") or primary_file.codec_summary)
     audio_codec = _normalize_codec(media_info.get("audio_codec"))
-    direct_play = (
-        suffix in DIRECT_PLAY_EXTENSIONS
-        and (not video_codec or video_codec in DIRECT_PLAY_VIDEO_CODECS)
-        and (not audio_codec or audio_codec in DIRECT_PLAY_AUDIO_CODECS)
+    direct_play = _can_direct_play(
+        suffix=suffix,
+        video_codec=video_codec,
+        audio_codec=audio_codec,
+        client_profile=client_profile,
     )
 
     processing_profile = None
     stream_url = f"/api/videos/{video.id}/stream"
     if not direct_play:
-        if video_codec in WEBM_VIDEO_CODECS and audio_codec in WEBM_AUDIO_CODECS:
+        if client_profile == "mobile":
+            if video_codec == "h264":
+                processing_profile = (
+                    "remux-mp4-copy"
+                    if audio_codec in {"", "aac", "mp3"}
+                    else "remux-mp4-aac"
+                )
+                stream_url = f"/api/videos/{video.id}/compatible"
+            else:
+                processing_profile = "hls-default"
+                stream_url = f"/api/videos/{video.id}/hls/index.m3u8"
+        elif video_codec in WEBM_VIDEO_CODECS and audio_codec in WEBM_AUDIO_CODECS:
             processing_profile = "remux-webm"
             stream_url = f"/api/videos/{video.id}/compatible"
         elif video_codec == "h264":
