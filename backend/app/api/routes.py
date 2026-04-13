@@ -112,6 +112,7 @@ from app.services.media import download_thumbnail, find_caption_tracks, generate
 from app.services.playback import (
     ensure_compatible_stream,
     ensure_hls_transcode,
+    normalize_playback_client_profile,
     playback_client_profile,
     reconcile_transcode_job,
     resolve_playback,
@@ -348,6 +349,13 @@ def _playback_profile_for_request(request: Request | None) -> str:
     if request is None:
         return "default"
     return playback_client_profile(request.headers)
+
+
+def _resolved_playback_profile(request: Request | None, client_profile: str | None) -> str:
+    explicit_profile = normalize_playback_client_profile(client_profile)
+    if explicit_profile != "default":
+        return explicit_profile
+    return _playback_profile_for_request(request)
 
 
 def _enforce_auth_rate_limit(key: str, *, limit: int, window_seconds: int) -> None:
@@ -2069,6 +2077,7 @@ def search_library(q: str, db: Session = Depends(get_db), current_user: UserProf
 def get_video(
     video_ref: str,
     request: Request,
+    client_profile: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ) -> dict:
@@ -2080,7 +2089,7 @@ def get_video(
     progress = db.scalar(select(WatchProgress).where(WatchProgress.user_id == current_user.id, WatchProgress.video_id == video_id))
     reaction = db.scalar(select(VideoReaction).where(VideoReaction.user_id == current_user.id, VideoReaction.video_id == video_id))
     saved_video = db.scalar(select(SavedVideo).where(SavedVideo.user_id == current_user.id, SavedVideo.video_id == video_id))
-    playback = resolve_playback(video, client_profile=_playback_profile_for_request(request))
+    playback = resolve_playback(video, client_profile=_resolved_playback_profile(request, client_profile))
     primary_file = video.files[0] if video.files else None
     primary_path = Path(primary_file.absolute_path) if primary_file else None
     source_available = bool(primary_path and primary_path.exists())
@@ -2408,13 +2417,14 @@ def stream_video(
 def compatible_stream(
     video_id: int,
     request: Request,
+    client_profile: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ) -> FileResponse:
     video = _video_by_id(db, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    playback = resolve_playback(video, client_profile=_playback_profile_for_request(request))
+    playback = resolve_playback(video, client_profile=_resolved_playback_profile(request, client_profile))
     if playback.get("source_missing"):
         raise HTTPException(status_code=404, detail="Video source is unavailable")
     profile = playback.get("transcode_profile")
@@ -2432,13 +2442,14 @@ def hls_stream(
     video_id: int,
     segment_path: str,
     request: Request,
+    client_profile: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ) -> FileResponse:
     video = _video_by_id(db, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    playback = resolve_playback(video, client_profile=_playback_profile_for_request(request))
+    playback = resolve_playback(video, client_profile=_resolved_playback_profile(request, client_profile))
     if playback.get("source_missing"):
         raise HTTPException(status_code=404, detail="Video source is unavailable")
     if not playback["requires_transcode"]:

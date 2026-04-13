@@ -30,6 +30,7 @@ MOBILE_USER_AGENT_PATTERN = re.compile(
 )
 ANDROID_USER_AGENT_PATTERN = re.compile(r"Android", re.IGNORECASE)
 logger = get_logger()
+VALID_PLAYBACK_CLIENT_PROFILES = {"default", "mobile", "android"}
 
 
 def _subprocess_popen_kwargs() -> dict:
@@ -68,6 +69,21 @@ def playback_client_profile(headers: Mapping[str, str] | None = None) -> str:
     return "default"
 
 
+def normalize_playback_client_profile(value: str | None) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in VALID_PLAYBACK_CLIENT_PROFILES:
+        return normalized
+    return "default"
+
+
+def _append_playback_profile(url: str, client_profile: str) -> str:
+    normalized = normalize_playback_client_profile(client_profile)
+    if normalized == "default":
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}client_profile={normalized}"
+
+
 def _can_direct_play(
     *,
     suffix: str,
@@ -89,6 +105,7 @@ def _can_direct_play(
 
 
 def resolve_playback(video: Video, client_profile: str = "default") -> dict:
+    client_profile = normalize_playback_client_profile(client_profile)
     primary_file = video.files[0] if video.files else None
     if not primary_file:
         return {
@@ -128,10 +145,10 @@ def resolve_playback(video: Video, client_profile: str = "default") -> dict:
         if client_profile == "android":
             if video_codec == "h264" and audio_codec in {"", "aac", "mp3"}:
                 processing_profile = "remux-mp4-copy"
-                stream_url = f"/api/videos/{video.id}/compatible"
+                stream_url = _append_playback_profile(f"/api/videos/{video.id}/compatible", client_profile)
             else:
                 processing_profile = "transcode-mp4-android"
-                stream_url = f"/api/videos/{video.id}/compatible"
+                stream_url = _append_playback_profile(f"/api/videos/{video.id}/compatible", client_profile)
         elif client_profile == "mobile":
             if video_codec == "h264":
                 processing_profile = (
@@ -139,10 +156,10 @@ def resolve_playback(video: Video, client_profile: str = "default") -> dict:
                     if audio_codec in {"", "aac", "mp3"}
                     else "remux-mp4-aac"
                 )
-                stream_url = f"/api/videos/{video.id}/compatible"
+                stream_url = _append_playback_profile(f"/api/videos/{video.id}/compatible", client_profile)
             else:
                 processing_profile = "transcode-mp4-mobile"
-                stream_url = f"/api/videos/{video.id}/compatible"
+                stream_url = _append_playback_profile(f"/api/videos/{video.id}/compatible", client_profile)
         elif video_codec in WEBM_VIDEO_CODECS and audio_codec in WEBM_AUDIO_CODECS:
             processing_profile = "remux-webm"
             stream_url = f"/api/videos/{video.id}/compatible"
@@ -151,7 +168,7 @@ def resolve_playback(video: Video, client_profile: str = "default") -> dict:
             stream_url = f"/api/videos/{video.id}/compatible"
         else:
             processing_profile = "hls-default"
-            stream_url = f"/api/videos/{video.id}/hls/index.m3u8"
+            stream_url = _append_playback_profile(f"/api/videos/{video.id}/hls/index.m3u8", client_profile)
     return {
         "direct_play": direct_play,
         "requires_transcode": not direct_play,

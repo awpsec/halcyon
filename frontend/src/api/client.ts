@@ -398,6 +398,16 @@ function browserTimeZone(): string | null {
   return zone ? zone : null;
 }
 
+function playbackClientProfile(): "default" | "mobile" | "android" {
+  if (typeof navigator === "undefined") return "default";
+  const userAgent = navigator.userAgent || "";
+  if (/Android/i.test(userAgent)) return "android";
+  if (/webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent)) {
+    return "mobile";
+  }
+  return "default";
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const timezone = browserTimeZone();
   const response = await fetch(path, {
@@ -479,7 +489,15 @@ export const api = {
   },
   explore: (offset = 0, limit = 30) => request<ExploreResponse>(`/api/library/explore?offset=${offset}&limit=${limit}`),
   suggested: (offset = 0, limit = 30) => request<ExploreResponse>(`/api/library/suggested?offset=${offset}&limit=${limit}`),
-  video: (videoRef: number | string) => request<any>(`/api/videos/${encodeURIComponent(String(videoRef))}`),
+  video: (videoRef: number | string) => {
+    const profile = playbackClientProfile();
+    const params = new URLSearchParams();
+    if (profile !== "default") {
+      params.set("client_profile", profile);
+    }
+    const query = params.toString();
+    return request<any>(`/api/videos/${encodeURIComponent(String(videoRef))}${query ? `?${query}` : ""}`);
+  },
   videoSuggestions: (
     videoRef: number | string,
     mode: "suggested" | "related",

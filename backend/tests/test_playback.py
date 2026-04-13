@@ -80,7 +80,7 @@ def test_resolve_playback_routes_mobile_webm_to_compatible_mp4(tmp_path: Path, m
         assert playback["direct_play"] is False
         assert playback["requires_transcode"] is True
         assert playback["transcode_profile"] == "transcode-mp4-mobile"
-        assert playback["stream_url"] == f"/api/videos/{video.id}/compatible"
+        assert playback["stream_url"] == f"/api/videos/{video.id}/compatible?client_profile=mobile"
 
 
 def test_resolve_playback_routes_android_webm_to_android_compatible_mp4(tmp_path: Path, monkeypatch):
@@ -98,7 +98,7 @@ def test_resolve_playback_routes_android_webm_to_android_compatible_mp4(tmp_path
         assert playback["direct_play"] is False
         assert playback["requires_transcode"] is True
         assert playback["transcode_profile"] == "transcode-mp4-android"
-        assert playback["stream_url"] == f"/api/videos/{video.id}/compatible"
+        assert playback["stream_url"] == f"/api/videos/{video.id}/compatible?client_profile=android"
 
 
 def test_resolve_playback_routes_mobile_h264_mkv_to_compatible_mp4(tmp_path: Path, monkeypatch):
@@ -116,7 +116,14 @@ def test_resolve_playback_routes_mobile_h264_mkv_to_compatible_mp4(tmp_path: Pat
         assert playback["direct_play"] is False
         assert playback["requires_transcode"] is True
         assert playback["transcode_profile"] == "remux-mp4-copy"
-        assert playback["stream_url"] == f"/api/videos/{video.id}/compatible"
+        assert playback["stream_url"] == f"/api/videos/{video.id}/compatible?client_profile=mobile"
+
+
+def test_normalize_playback_client_profile_defaults_invalid_values():
+    assert playback_service.normalize_playback_client_profile(None) == "default"
+    assert playback_service.normalize_playback_client_profile("") == "default"
+    assert playback_service.normalize_playback_client_profile("ANDROID") == "android"
+    assert playback_service.normalize_playback_client_profile("weird") == "default"
 
 
 def test_playback_client_profile_detects_mobile_headers():
