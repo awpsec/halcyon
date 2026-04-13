@@ -39,6 +39,20 @@ const baseNavItems: NavItem[] = [
   { to: "/playlists", label: "Playlists" },
 ];
 const LIVE_OVERVIEW_POLL_MS = 60_000;
+const MOBILE_SHELL_MAX_WIDTH = 980;
+
+function matchesMobileUserAgent() {
+  if (typeof navigator === "undefined") return false;
+  const userAgentData = (
+    navigator as Navigator & { userAgentData?: { mobile?: boolean } }
+  ).userAgentData;
+  if (typeof userAgentData?.mobile === "boolean") {
+    return userAgentData.mobile;
+  }
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+    navigator.userAgent,
+  );
+}
 
 function ThemeIcon({ theme }: { theme: Preferences["theme"] }) {
   return theme === "dark" ? (
@@ -92,6 +106,20 @@ function SearchIcon() {
   );
 }
 
+function MenuIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="icon-button-svg" aria-hidden="true">
+      <path
+        d="M4 7h16M4 12h16M4 17h16"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 export function AppShell({
   profile,
   preferences,
@@ -109,6 +137,8 @@ export function AppShell({
   const [liveOverview, setLiveOverview] = useState<LiveOverview | null>(null);
   const [activeJobs, setActiveJobs] = useState<JobStatusItem[]>([]);
   const [jobsOpen, setJobsOpen] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [isMobileShell, setIsMobileShell] = useState(false);
   const searchRef = useRef<HTMLDivElement | null>(null);
   const jobsRef = useRef<HTMLDivElement | null>(null);
   const isWatchPage = location.pathname.startsWith("/video/");
@@ -136,6 +166,21 @@ export function AppShell({
     },
     [liveOverview?.api_key_configured, liveOverview?.enabled, profile],
   );
+
+  useEffect(() => {
+    function updateMobileShell() {
+      if (typeof window === "undefined") {
+        setIsMobileShell(false);
+        return;
+      }
+      const hasCompactWidth = window.innerWidth <= MOBILE_SHELL_MAX_WIDTH;
+      setIsMobileShell(matchesMobileUserAgent() || hasCompactWidth);
+    }
+
+    updateMobileShell();
+    window.addEventListener("resize", updateMobileShell);
+    return () => window.removeEventListener("resize", updateMobileShell);
+  }, []);
 
   useEffect(() => {
     const context = readPlaybackContext();
@@ -218,6 +263,12 @@ export function AppShell({
   }, []);
 
   useEffect(() => {
+    setMobileNavOpen(false);
+    setSearchOpen(false);
+    setJobsOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
     function handlePointerDown(event: MouseEvent) {
       const target = event.target as Node;
       if (searchRef.current && !searchRef.current.contains(target)) {
@@ -234,6 +285,7 @@ export function AppShell({
         setSearchOpen(false);
         setQuery("");
         setJobsOpen(false);
+        setMobileNavOpen(false);
       }
     }
 
@@ -244,6 +296,21 @@ export function AppShell({
       document.removeEventListener("keydown", handleKeydown);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.body.classList.toggle(
+      "mobile-nav-open",
+      isMobileShell && mobileNavOpen,
+    );
+    return () => document.body.classList.remove("mobile-nav-open");
+  }, [isMobileShell, mobileNavOpen]);
+
+  useEffect(() => {
+    if (!isMobileShell) {
+      setMobileNavOpen(false);
+    }
+  }, [isMobileShell]);
 
   const jobProgress = useMemo(() => {
     const numeric = activeJobs
@@ -319,199 +386,280 @@ export function AppShell({
     return activeJobLabel ?? "Working";
   }
 
-  return (
-    <div className={`app-shell density-${preferences.density}`}>
-      <header className="top-shell">
-        <Link
-          className="brand compact-brand home-logo-link"
-          to="/"
-          onClick={() => {
-            setSearchOpen(false);
-          }}
-        >
-          <img
-            className="brand-image"
-            src={headerLogoSrc}
-            alt="halcyon"
+  const searchControl = (
+    <div className="header-search-control" ref={searchRef}>
+      {isWatchPage && !isMobileShell ? (
+        <div className="search-shell watch-search-shell">
+          <input
+            type="search"
+            value={query}
+            onFocus={() => setSearchOpen(true)}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                openSearchPage(query);
+              }
+            }}
+            placeholder="Search videos and channels"
           />
-        </Link>
+        </div>
+      ) : null}
+      <button
+        className={`icon-button search-toggle ${isWatchPage && !isMobileShell ? "watch-search-toggle" : ""} ${searchOpen ? "active-chip" : ""}`}
+        onClick={() => {
+          setSearchOpen((current) => !current);
+          setJobsOpen(false);
+          setMobileNavOpen(false);
+        }}
+        aria-label="Search library"
+      >
+        <SearchIcon />
+      </button>
+      {searchOpen ? (
+        <div className={`header-search-popover search-popover-enter ${isMobileShell ? "mobile-search-popover" : ""}`}>
+          <div className="search-shell header-search-shell">
+            <input
+              autoFocus
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  openSearchPage(query);
+                }
+              }}
+              placeholder="Search videos and channels"
+            />
+          </div>
+          {query.trim().length < 2 ? (
+            <div className="search-results-empty">
+              Type at least 2 characters.
+            </div>
+          ) : (
+            <div className="search-results-panel">
+              {results.channels.length ? (
+                <div className="search-group">
+                  <div className="menu-section-label">Channels</div>
+                  {results.channels.slice(0, 4).map((channel) => (
+                    <button
+                      key={`channel-${channel.id}`}
+                      className="search-result-row"
+                      onClick={() => {
+                        setSearchOpen(false);
+                        setQuery("");
+                        navigate(`/channels/${channel.slug}`);
+                      }}
+                    >
+                      <span className="menu-account-avatar">
+                        {channel.avatar_url ? (
+                          <img
+                            src={channel.avatar_url}
+                            alt={channel.name}
+                          />
+                        ) : (
+                          channel.name.slice(0, 2).toUpperCase()
+                        )}
+                      </span>
+                      <span className="menu-account-copy">
+                        <strong>
+                          {normalizeImportedText(channel.name) ??
+                            channel.name}
+                        </strong>
+                        <small>{`${formatCount(channel.video_count)} videos`}</small>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {results.videos.length ? (
+                <div className="search-group">
+                  <div className="menu-section-label">Videos</div>
+                  {results.videos.slice(0, 8).map((video) => (
+                    <button
+                      key={`video-${video.id}`}
+                      className="search-result-row"
+                      onClick={() => {
+                        setSearchOpen(false);
+                        setQuery("");
+                        navigate(`/video/${video.watch_ref ?? video.id}`);
+                      }}
+                    >
+                      <span className="search-result-thumb">
+                        <img
+                          src={
+                            video.thumbnail_url ??
+                            `/api/videos/${video.id}/thumbnail`
+                          }
+                          alt={
+                            normalizeImportedText(video.title) ??
+                            video.title
+                          }
+                        />
+                      </span>
+                      <span className="menu-account-copy">
+                        <strong>
+                          {normalizeImportedText(video.title) ??
+                            video.title}
+                        </strong>
+                        <small>
+                          {normalizeImportedText(video.channel_name) ??
+                            video.channel_name ??
+                            "Unknown channel"}
+                        </small>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {!results.channels.length && !results.videos.length ? (
+                <div className="search-results-empty">
+                  No matches for "{query}".
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+
+  return (
+    <div className={`app-shell density-${preferences.density} ${isMobileShell ? "mobile-shell" : ""}`}>
+      {isMobileShell && mobileNavOpen ? (
+        <>
+          <button
+            className="mobile-nav-backdrop"
+            type="button"
+            aria-label="Close navigation menu"
+            onClick={() => setMobileNavOpen(false)}
+          />
+          <aside className="mobile-nav-drawer" aria-label="Navigation menu">
+            <div className="mobile-nav-header">
+              <div className="mobile-nav-user">
+                <strong>{profile?.display_name ?? "Select user"}</strong>
+                <small>@{profile?.name ?? "guest"}</small>
+              </div>
+              <button
+                className="icon-button mobile-nav-close"
+                type="button"
+                aria-label="Close navigation menu"
+                onClick={() => setMobileNavOpen(false)}
+              >
+                <svg viewBox="0 0 24 24" className="icon-button-svg" aria-hidden="true">
+                  <path
+                    d="m6 6 12 12M18 6 6 18"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+            </div>
+            <nav className="mobile-nav-links">
+              {navItems.map((item) => (
+                <NavLink
+                  key={item.to}
+                  className="mobile-nav-link"
+                  to={item.to}
+                  end={item.end}
+                  onClick={() => setMobileNavOpen(false)}
+                >
+                  {item.label}
+                </NavLink>
+              ))}
+            </nav>
+            <div className="mobile-nav-actions">
+              <button
+                className="ghost-button mobile-drawer-button"
+                type="button"
+                onClick={() => {
+                  setMobileNavOpen(false);
+                  onToggleTheme();
+                }}
+              >
+                <ThemeIcon theme={preferences.theme} />
+                <span>{preferences.theme === "dark" ? "Light mode" : "Dark mode"}</span>
+              </button>
+              {activeJobs.length ? (
+                <div className="mobile-job-panel">
+                  <div className="menu-section-label">Server activity</div>
+                  {activeJobs.map((job) => (
+                    <div className="job-popover-row" key={`${job.scope}-${job.id}`}>
+                      <strong>{describeJob(job)}</strong>
+                      <small>{jobSecondary(job)}</small>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </aside>
+        </>
+      ) : null}
+      <header className={`top-shell ${isMobileShell ? "mobile-top-shell" : ""}`}>
+        {isMobileShell ? (
+          <div className="mobile-header-start">
+            <button
+              className="icon-button mobile-menu-toggle"
+              type="button"
+              aria-label="Open navigation menu"
+              aria-expanded={mobileNavOpen}
+              onClick={() => {
+                setMobileNavOpen(true);
+                setSearchOpen(false);
+                setJobsOpen(false);
+              }}
+            >
+              <MenuIcon />
+            </button>
+          </div>
+        ) : (
+          <Link
+            className="brand compact-brand home-logo-link"
+            to="/"
+            onClick={() => {
+              setSearchOpen(false);
+            }}
+          >
+            <img
+              className="brand-image"
+              src={headerLogoSrc}
+              alt="halcyon"
+            />
+          </Link>
+        )}
+        {isMobileShell ? (
+          <Link
+            className="brand compact-brand home-logo-link mobile-brand"
+            to="/"
+            onClick={() => {
+              setSearchOpen(false);
+              setMobileNavOpen(false);
+            }}
+          >
+            <img
+              className="brand-image"
+              src={headerLogoSrc}
+              alt="halcyon"
+            />
+          </Link>
+        ) : null}
         <nav
-          className={`top-nav ${isWatchPage ? "watch-top-nav" : ""}`}
-          ref={searchRef}
+          className={`top-nav ${isWatchPage ? "watch-top-nav" : ""} ${isMobileShell ? "mobile-top-nav" : ""}`}
         >
-          {!isWatchPage
+          {!isWatchPage && !isMobileShell
             ? navItems.map((item) => (
                 <NavLink key={item.to} className="nav-link" to={item.to} end={item.end}>
                   {item.label}
                 </NavLink>
               ))
             : null}
-          {isWatchPage ? (
-            <>
-              <div className="search-shell watch-search-shell">
-                <input
-                  type="search"
-                  value={query}
-                  onFocus={() => setSearchOpen(true)}
-                  onChange={(event) => setQuery(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      openSearchPage(query);
-                    }
-                  }}
-                  placeholder="Search videos and channels"
-                />
-              </div>
-              <button
-                className={`icon-button search-toggle watch-search-toggle ${searchOpen ? "active-chip" : ""}`}
-                onClick={() => {
-                  setSearchOpen((current) => !current);
-                  setJobsOpen(false);
-                }}
-                aria-label="Search library"
-              >
-                <SearchIcon />
-              </button>
-            </>
-          ) : (
-            <button
-              className={`icon-button search-toggle ${searchOpen ? "active-chip" : ""}`}
-              onClick={() => {
-                setSearchOpen((current) => !current);
-                setJobsOpen(false);
-              }}
-              aria-label="Search library"
-            >
-              <SearchIcon />
-            </button>
-          )}
-          {searchOpen ? (
-            <div className="header-search-popover search-popover-enter">
-              {!isWatchPage ? (
-                <div className="search-shell header-search-shell">
-                  <input
-                    autoFocus
-                    type="search"
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        openSearchPage(query);
-                      }
-                    }}
-                    placeholder="Search videos and channels"
-                  />
-                </div>
-              ) : (
-                <div className="search-shell header-search-shell">
-                  <input
-                    autoFocus
-                    type="search"
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        openSearchPage(query);
-                      }
-                    }}
-                    placeholder="Search videos and channels"
-                  />
-                </div>
-              )}
-              {query.trim().length < 2 ? (
-                <div className="search-results-empty">
-                  Type at least 2 characters.
-                </div>
-              ) : (
-                <div className="search-results-panel">
-                  {results.channels.length ? (
-                    <div className="search-group">
-                      <div className="menu-section-label">Channels</div>
-                      {results.channels.slice(0, 4).map((channel) => (
-                        <button
-                          key={`channel-${channel.id}`}
-                          className="search-result-row"
-                          onClick={() => {
-                            setSearchOpen(false);
-                            setQuery("");
-                            navigate(`/channels/${channel.slug}`);
-                          }}
-                        >
-                          <span className="menu-account-avatar">
-                            {channel.avatar_url ? (
-                              <img
-                                src={channel.avatar_url}
-                                alt={channel.name}
-                              />
-                            ) : (
-                              channel.name.slice(0, 2).toUpperCase()
-                            )}
-                          </span>
-                          <span className="menu-account-copy">
-                            <strong>
-                              {normalizeImportedText(channel.name) ??
-                                channel.name}
-                            </strong>
-                            <small>{`${formatCount(channel.video_count)} videos`}</small>
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                  {results.videos.length ? (
-                    <div className="search-group">
-                      <div className="menu-section-label">Videos</div>
-                      {results.videos.slice(0, 8).map((video) => (
-                        <button
-                          key={`video-${video.id}`}
-                          className="search-result-row"
-                          onClick={() => {
-                            setSearchOpen(false);
-                            setQuery("");
-                            navigate(`/video/${video.watch_ref ?? video.id}`);
-                          }}
-                        >
-                          <span className="search-result-thumb">
-                            <img
-                              src={
-                                video.thumbnail_url ??
-                                `/api/videos/${video.id}/thumbnail`
-                              }
-                              alt={
-                                normalizeImportedText(video.title) ??
-                                video.title
-                              }
-                            />
-                          </span>
-                          <span className="menu-account-copy">
-                            <strong>
-                              {normalizeImportedText(video.title) ??
-                                video.title}
-                            </strong>
-                            <small>
-                              {normalizeImportedText(video.channel_name) ??
-                                video.channel_name ??
-                                "Unknown channel"}
-                            </small>
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                  {!results.channels.length && !results.videos.length ? (
-                    <div className="search-results-empty">
-                      No matches for "{query}".
-                    </div>
-                  ) : null}
-                </div>
-              )}
-            </div>
-          ) : null}
+          {!isMobileShell ? searchControl : null}
         </nav>
-        <div className="header-actions">
+        <div className={`header-actions ${isMobileShell ? "mobile-header-actions" : ""}`}>
+          {isMobileShell ? searchControl : null}
           {activeJobs.length ? (
             <div className="header-job-status" ref={jobsRef}>
               <button
@@ -520,8 +668,12 @@ export function AppShell({
                   ["--job-progress" as string]: `${jobProgress ?? 24}%`,
                 }}
                 onClick={() => setJobsOpen((current) => !current)}
-                onMouseEnter={() => setJobsOpen(true)}
-                onMouseLeave={() => setJobsOpen(false)}
+                onMouseEnter={() => {
+                  if (!isMobileShell) setJobsOpen(true);
+                }}
+                onMouseLeave={() => {
+                  if (!isMobileShell) setJobsOpen(false);
+                }}
                 aria-label={activeJobLabel ?? "Active jobs"}
               >
                 <span className="job-ring" />
@@ -532,8 +684,12 @@ export function AppShell({
               {jobsOpen ? (
                 <div
                   className="job-popover"
-                  onMouseEnter={() => setJobsOpen(true)}
-                  onMouseLeave={() => setJobsOpen(false)}
+                  onMouseEnter={() => {
+                    if (!isMobileShell) setJobsOpen(true);
+                  }}
+                  onMouseLeave={() => {
+                    if (!isMobileShell) setJobsOpen(false);
+                  }}
                 >
                   <div className="menu-section-label">Server activity</div>
                   {activeJobs.map((job) => (
@@ -550,7 +706,7 @@ export function AppShell({
             </div>
           ) : null}
           <button
-            className="icon-button theme-toggle"
+            className={`icon-button theme-toggle ${isMobileShell ? "mobile-theme-toggle" : ""}`}
             onClick={onToggleTheme}
             aria-label="Toggle theme"
           >
@@ -558,7 +714,7 @@ export function AppShell({
           </button>
           <div className="profile-chip">
             <button
-              className="user-menu-trigger"
+              className={`user-menu-trigger ${isMobileShell ? "mobile-user-menu-trigger" : ""}`}
               onClick={(event) =>
                 onOpenMenu(event.currentTarget.getBoundingClientRect())
               }
