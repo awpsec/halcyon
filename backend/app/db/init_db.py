@@ -84,6 +84,12 @@ def init_db() -> None:
         if "live_tab_enabled" not in sync_columns:
             connection.execute(text("ALTER TABLE sync_settings ADD COLUMN live_tab_enabled BOOLEAN DEFAULT TRUE"))
             connection.execute(text("UPDATE sync_settings SET live_tab_enabled = TRUE WHERE live_tab_enabled IS NULL"))
+        if "subtitle_generation_enabled" not in sync_columns:
+            connection.execute(text("ALTER TABLE sync_settings ADD COLUMN subtitle_generation_enabled BOOLEAN DEFAULT FALSE"))
+            connection.execute(text("UPDATE sync_settings SET subtitle_generation_enabled = FALSE WHERE subtitle_generation_enabled IS NULL"))
+        if "max_replies_per_comment" not in sync_columns:
+            connection.execute(text("ALTER TABLE sync_settings ADD COLUMN max_replies_per_comment INTEGER DEFAULT 3"))
+            connection.execute(text("UPDATE sync_settings SET max_replies_per_comment = 3 WHERE max_replies_per_comment IS NULL"))
         if "scan_interval_seconds" not in sync_columns:
             connection.execute(text("ALTER TABLE sync_settings ADD COLUMN scan_interval_seconds INTEGER DEFAULT 30"))
             connection.execute(text("UPDATE sync_settings SET scan_interval_seconds = 30 WHERE scan_interval_seconds IS NULL"))
@@ -104,6 +110,8 @@ def init_db() -> None:
             connection.execute(text(f"ALTER TABLE sync_settings ADD COLUMN last_live_sync_at {datetime_sql_type}"))
         if "last_live_search_sync_at" not in sync_columns:
             connection.execute(text(f"ALTER TABLE sync_settings ADD COLUMN last_live_search_sync_at {datetime_sql_type}"))
+        if "last_subtitle_sync_at" not in sync_columns:
+            connection.execute(text(f"ALTER TABLE sync_settings ADD COLUMN last_subtitle_sync_at {datetime_sql_type}"))
         if "prefer_high_res_banners" not in sync_columns:
             connection.execute(text("ALTER TABLE sync_settings ADD COLUMN prefer_high_res_banners BOOLEAN DEFAULT FALSE"))
             connection.execute(text("UPDATE sync_settings SET prefer_high_res_banners = FALSE WHERE prefer_high_res_banners IS NULL"))
@@ -125,6 +133,10 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE youtube_channel_snapshots ADD COLUMN joined_at DATETIME"))
         if "links" not in youtube_channel_columns:
             connection.execute(text("ALTER TABLE youtube_channel_snapshots ADD COLUMN links JSON"))
+        youtube_comment_columns = {column["name"] for column in inspector.get_columns("youtube_comment_snapshots")}
+        if "youtube_comment_id" not in youtube_comment_columns:
+            connection.execute(text("ALTER TABLE youtube_comment_snapshots ADD COLUMN youtube_comment_id VARCHAR(64)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_youtube_comment_snapshots_youtube_comment_id ON youtube_comment_snapshots (youtube_comment_id)"))
         if dialect_name == "postgresql":
             youtube_channel_bigint_columns = {
                 "subscriber_count": "youtube_channel_snapshots",
@@ -418,6 +430,8 @@ def seed_defaults(db: Session, mounted_roots: list[str], *, include_demo_users: 
                 automatic_detection_enabled=True,
                 scan_interval_seconds=max(5, min(settings.scan_interval_seconds, 3600)),
                 allow_fallback_art=False,
+                subtitle_generation_enabled=False,
+                max_replies_per_comment=3,
             )
         )
     if not db.query(RetentionSettings).count():

@@ -50,6 +50,7 @@ from app.models.entities import (
     WatchHistory,
     WatchProgress,
     YouTubeCommentSnapshot,
+    YouTubeCommentReplySnapshot,
     YouTubeChannelSnapshot,
     YouTubeMatch,
     YouTubeLiveStreamSnapshot,
@@ -137,6 +138,7 @@ from app.services.retention import (
     validate_retention_staging_folder_path,
 )
 from app.services.scanner import scan_selected_folders
+from app.services.subtitles import create_subtitle_backfill_job
 from app.services.sync import (
     REQUEST_HEADERS,
     allow_fallback_art_enabled,
@@ -2131,8 +2133,23 @@ def get_video(
             select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == video.youtube_match.youtube_video_id)
         )
         comments = db.scalars(
-            select(YouTubeCommentSnapshot).where(YouTubeCommentSnapshot.youtube_video_id == video.youtube_match.youtube_video_id)
+            select(YouTubeCommentSnapshot)
+            .where(YouTubeCommentSnapshot.youtube_video_id == video.youtube_match.youtube_video_id)
+            .order_by(YouTubeCommentSnapshot.id.asc())
         ).all()
+    comment_replies_by_parent: dict[int, list[YouTubeCommentReplySnapshot]] = {}
+    if comments:
+        reply_rows = db.scalars(
+            select(YouTubeCommentReplySnapshot)
+            .where(YouTubeCommentReplySnapshot.parent_comment_id.in_([item.id for item in comments]))
+            .order_by(
+                YouTubeCommentReplySnapshot.parent_comment_id.asc(),
+                YouTubeCommentReplySnapshot.position.asc(),
+                YouTubeCommentReplySnapshot.id.asc(),
+            )
+        ).all()
+        for reply in reply_rows:
+            comment_replies_by_parent.setdefault(reply.parent_comment_id, []).append(reply)
 
     return {
         "video": (
@@ -2206,11 +2223,24 @@ def get_video(
             else None,
             "comments": [
                 {
+                    "id": item.id,
+                    "youtube_comment_id": item.youtube_comment_id,
                     "author_name": item.author_name,
                     "body": item.body,
                     "like_count": item.like_count,
                     "reply_count": item.reply_count,
                     "published_at": item.published_at,
+                    "replies": [
+                        {
+                            "id": reply.id,
+                            "youtube_reply_id": reply.youtube_reply_id,
+                            "author_name": reply.author_name,
+                            "body": reply.body,
+                            "like_count": reply.like_count,
+                            "published_at": reply.published_at,
+                        }
+                        for reply in comment_replies_by_parent.get(item.id, [])
+                    ],
                 }
                 for item in comments
             ],
@@ -3008,8 +3038,16 @@ def get_sync_settings(
         settings_row.live_tab_enabled = True
         db.commit()
         db.refresh(settings_row)
+    if settings_row.subtitle_generation_enabled is None:
+        settings_row.subtitle_generation_enabled = False
+        db.commit()
+        db.refresh(settings_row)
     if not settings_row.scan_interval_seconds:
         settings_row.scan_interval_seconds = max(5, min(settings.scan_interval_seconds, 3600))
+        db.commit()
+        db.refresh(settings_row)
+    if settings_row.max_replies_per_comment is None:
+        settings_row.max_replies_per_comment = 3
         db.commit()
         db.refresh(settings_row)
     if not settings_row.requests_per_second:
@@ -3049,16 +3087,19 @@ async def update_sync_settings(
     )
     previous_monitored_ids = monitored_live_channel_ids(db)
     previous_api_key = _active_youtube_api_key(db)
+    previous_subtitle_generation_enabled = bool(settings_row.subtitle_generation_enabled) if settings_row else False
     if not settings_row:
         settings_row = SyncSettings()
         db.add(settings_row)
     settings_row.automatic_detection_enabled = payload.automatic_detection_enabled
     settings_row.automatic_sync_enabled = payload.automatic_sync_enabled
     settings_row.live_tab_enabled = payload.live_tab_enabled
+    settings_row.subtitle_generation_enabled = payload.subtitle_generation_enabled
     settings_row.scan_interval_seconds = max(5, min(payload.scan_interval_seconds, 3600))
     settings_row.allow_fallback_art = payload.allow_fallback_art
     settings_row.prefer_high_res_banners = payload.prefer_high_res_banners
     settings_row.comment_limit = payload.comment_limit
+    settings_row.max_replies_per_comment = max(0, min(payload.max_replies_per_comment, 5))
     settings_row.requests_per_second = max(1, min(payload.requests_per_second, 10))
     if payload.clear_youtube_api_key:
         settings_row.youtube_api_key = None
@@ -3085,6 +3126,11 @@ async def update_sync_settings(
     normalize_youtube_api_quota(settings_row)
     db.commit()
     db.refresh(settings_row)
+    if (
+        not previous_subtitle_generation_enabled
+        and settings_row.subtitle_generation_enabled
+    ):
+        create_subtitle_backfill_job(db)
     current_monitored_ids = monitored_live_channel_ids(db)
     current_api_key = _active_youtube_api_key(db)
     live_config_changed = (
@@ -3103,6 +3149,15 @@ async def update_sync_settings(
         except Exception as exc:
             logger.exception("Live refresh after sync settings save failed: %s", exc)
     return _sync_settings_payload(db, settings_row)
+
+
+@router.post("/sync/subtitles", response_model=JobOut)
+def sync_subtitles(
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_configured_admin_user),
+) -> SyncJob:
+    del current_user
+    return create_subtitle_backfill_job(db)
 
 
 @router.get("/retention/settings")
@@ -3368,6 +3423,7 @@ async def send_video_match_to_review(
 
     settings_row = db.scalar(select(SyncSettings))
     comment_limit = settings_row.comment_limit if settings_row and settings_row.comment_limit else 100
+    max_replies_per_comment = settings_row.max_replies_per_comment if settings_row and settings_row.max_replies_per_comment is not None else 3
     requests_per_second = settings_row.requests_per_second if settings_row and settings_row.requests_per_second else 3
     api_key = _active_youtube_api_key(db)
 
@@ -3383,6 +3439,7 @@ async def send_video_match_to_review(
             comment_limit,
             requests_per_second,
             client,
+            max_replies_per_comment=max_replies_per_comment,
             channel_cache={},
             playlist_cache={} if api_key else None,
             allow_fallback_art=allow_fallback_art_enabled(db),
@@ -3498,6 +3555,7 @@ async def manually_match_review_item(
 
     settings_row = db.scalar(select(SyncSettings))
     comment_limit = settings_row.comment_limit if settings_row and settings_row.comment_limit else 100
+    max_replies_per_comment = settings_row.max_replies_per_comment if settings_row and settings_row.max_replies_per_comment is not None else 3
     requests_per_second = settings_row.requests_per_second if settings_row and settings_row.requests_per_second else 3
     api_key = _active_youtube_api_key(db)
 
@@ -3519,6 +3577,7 @@ async def manually_match_review_item(
             video,
             candidate,
             comment_limit=comment_limit,
+            max_replies_per_comment=max_replies_per_comment,
             requests_per_second=requests_per_second,
             client=client,
             api_key=api_key,

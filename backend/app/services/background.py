@@ -9,6 +9,7 @@ from app.db.session import SessionLocal
 from app.models.entities import SyncJob, SyncSettings
 from app.services.retention import run_retention_cycle
 from app.services.scanner import scan_selected_folders_if_idle
+from app.services.subtitles import active_subtitle_job, process_subtitle_backfill_job, run_automatic_subtitle_pass, subtitle_service_configured
 from app.services.sync import normalize_channel_assignments, reconcile_sync_job, refresh_live_streams, sync_scope
 
 LIVE_SYNC_MIN_INTERVAL_SECONDS = 900
@@ -32,7 +33,14 @@ def background_scan_once(settings: Settings) -> None:
 
 
 def active_running_sync_jobs(db) -> list[SyncJob]:
-    running_jobs = db.scalars(select(SyncJob).where(SyncJob.status == "running").order_by(SyncJob.created_at.desc())).all()
+    running_jobs = db.scalars(
+        select(SyncJob)
+        .where(
+            SyncJob.status == "running",
+            SyncJob.scope != "subtitles",
+        )
+        .order_by(SyncJob.created_at.desc())
+    ).all()
     return [job for job in (reconcile_sync_job(db, job) for job in running_jobs) if job.status == "running"]
 
 
@@ -78,7 +86,33 @@ def background_retention_once() -> None:
         run_retention_cycle(db, trigger="auto")
 
 
+async def background_subtitles_once(settings: Settings) -> None:
+    if not subtitle_service_configured(settings):
+        return
+    with SessionLocal() as db:
+        sync_settings = db.scalar(select(SyncSettings))
+        if not sync_settings:
+            return
+        subtitle_job = active_subtitle_job(db)
+        if subtitle_job:
+            await process_subtitle_backfill_job(db, subtitle_job, app_settings=settings)
+            return
+        if not sync_settings.subtitle_generation_enabled:
+            return
+        configured_interval = max(
+            max(60, int(settings.subtitle_auto_min_interval_seconds or 300)),
+            min(sync_settings.scan_interval_seconds or settings.scan_interval_seconds, 3600),
+        )
+        if (
+            sync_settings.last_subtitle_sync_at
+            and datetime.utcnow() - sync_settings.last_subtitle_sync_at < timedelta(seconds=configured_interval)
+        ):
+            return
+        await run_automatic_subtitle_pass(db, sync_settings, app_settings=settings)
+
+
 async def run_background_cycle_once(settings: Settings) -> None:
     background_scan_once(settings)
     await background_auto_sync_once(settings)
+    await background_subtitles_once(settings)
     background_retention_once()

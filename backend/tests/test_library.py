@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import app.db.init_db as init_db_module
 import app.services.scanner as scanner_service
+import app.services.subtitles as subtitle_service
 import app.services.sync as sync_service
 from app.api import routes as routes_module
 from app.api.routes import _indexed_library_storage_bytes, _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage, list_roots, list_selected_folders, list_videos, manually_match_review_item, update_sync_settings
@@ -15,6 +16,7 @@ from app.db.init_db import seed_defaults
 from app.models.base import Base
 from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, SyncSettings, UserProfile, Video, VideoFile, YouTubeMatch, YouTubeVideoSnapshot
 from app.schemas.common import SyncReviewManualIn, SyncSettingsIn
+from app.services.media import find_caption_tracks
 from app.services.scanner import scan_selected_folders
 
 
@@ -202,6 +204,170 @@ def test_update_sync_settings_can_clear_api_key(tmp_path: Path):
 
         db.refresh(settings_row)
         assert settings_row.youtube_api_key is None
+
+
+def test_update_sync_settings_persists_subtitle_generation_flag(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        admin = UserProfile(name="admin", display_name="Admin", accent_color="#fff", is_admin=True)
+        db.add(admin)
+        settings_row = SyncSettings(
+            automatic_detection_enabled=True,
+            automatic_sync_enabled=False,
+            subtitle_generation_enabled=False,
+            scan_interval_seconds=30,
+            allow_fallback_art=False,
+            prefer_high_res_banners=False,
+            comment_limit=100,
+            requests_per_second=3,
+        )
+        db.add(settings_row)
+        db.commit()
+
+        result = asyncio.run(
+            update_sync_settings(
+                SyncSettingsIn(
+                    automatic_detection_enabled=True,
+                    automatic_sync_enabled=False,
+                    subtitle_generation_enabled=True,
+                    scan_interval_seconds=30,
+                    allow_fallback_art=False,
+                    prefer_high_res_banners=False,
+                    live_tab_enabled=True,
+                    comment_limit=100,
+                    requests_per_second=3,
+                ),
+                db=db,
+                current_user=admin,
+            )
+        )
+
+        db.refresh(settings_row)
+        assert settings_row.subtitle_generation_enabled is True
+        assert result.subtitle_generation_enabled is True
+
+
+def test_find_caption_tracks_labels_generated_ai_captions(tmp_path: Path):
+    video_path = tmp_path / "captions-demo.mp4"
+    video_path.write_bytes(b"video")
+    generated_caption = tmp_path / "captions-demo.halcyon.vtt"
+    generated_caption.write_text("WEBVTT\n\n", encoding="utf-8")
+
+    tracks = find_caption_tracks(video_path)
+
+    assert len(tracks) == 1
+    assert tracks[0]["label"] == "AI Captions"
+
+
+def test_subtitle_backfill_job_generates_vtt_for_existing_video(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="CoolCreator", slug="coolcreator")
+        db.add(channel)
+        db.flush()
+
+        video_path = tmp_path / "library" / "CoolCreator" / "Episode 1.mp4"
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"video")
+
+        video = Video(
+            title="Episode 1",
+            slug="episode-1",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(video_path),
+                relative_path="CoolCreator/Episode 1.mp4",
+                file_size=video_path.stat().st_size,
+                fingerprint="f" * 64,
+            )
+        )
+        db.commit()
+
+        async def fake_request(source_path: Path, output_path: Path, *, force: bool = False, app_settings=None):
+            del source_path, force, app_settings
+            output_path.write_text("WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\nhello\n", encoding="utf-8")
+            return {"ok": True, "output_path": str(output_path)}
+
+        monkeypatch.setattr(subtitle_service, "request_subtitle_generation", fake_request)
+
+        job = subtitle_service.create_subtitle_backfill_job(db)
+        result = asyncio.run(
+            subtitle_service.process_subtitle_backfill_job(
+                db,
+                job,
+                app_settings=routes_module.settings.model_copy(
+                    update={
+                        "subtitle_service_url": "http://whisper:9000",
+                        "subtitle_manual_batch_size": 5,
+                    }
+                ),
+            )
+        )
+
+        generated_path = subtitle_service.generated_subtitle_path(video_path)
+
+        assert result.status == "completed"
+        assert generated_path.exists()
+        assert any(track["label"] == "AI Captions" for track in find_caption_tracks(video_path))
+
+
+def test_subtitle_backfill_job_marks_failed_when_sidecar_batch_fails(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="CoolCreator", slug="coolcreator")
+        db.add(channel)
+        db.flush()
+
+        video_path = tmp_path / "library" / "CoolCreator" / "Episode 2.mp4"
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"video")
+
+        video = Video(
+            title="Episode 2",
+            slug="episode-2",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(video_path),
+                relative_path="CoolCreator/Episode 2.mp4",
+                file_size=video_path.stat().st_size,
+                fingerprint="e" * 64,
+            )
+        )
+        db.commit()
+
+        async def fake_request(source_path: Path, output_path: Path, *, force: bool = False, app_settings=None):
+            del source_path, output_path, force, app_settings
+            raise RuntimeError("whisper unavailable")
+
+        monkeypatch.setattr(subtitle_service, "request_subtitle_generation", fake_request)
+
+        job = subtitle_service.create_subtitle_backfill_job(db)
+        result = asyncio.run(
+            subtitle_service.process_subtitle_backfill_job(
+                db,
+                job,
+                app_settings=routes_module.settings.model_copy(
+                    update={
+                        "subtitle_service_url": "http://whisper:9000",
+                        "subtitle_manual_batch_size": 5,
+                    }
+                ),
+            )
+        )
+
+        assert result.status == "failed"
+        assert result.details["failed"] == 1
 
 
 def test_manual_sync_review_match_accepts_youtube_url(tmp_path: Path, monkeypatch):

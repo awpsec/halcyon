@@ -267,11 +267,13 @@ class SyncSettingsIn(BaseModel):
     automatic_detection_enabled: bool
     automatic_sync_enabled: bool
     live_tab_enabled: bool = True
+    subtitle_generation_enabled: bool = False
     live_monitored_channel_ids: list[int] = Field(default_factory=list)
     scan_interval_seconds: int = 30
     allow_fallback_art: bool = False
     prefer_high_res_banners: bool = False
     comment_limit: int
+    max_replies_per_comment: int = 3
     requests_per_second: int = 3
     youtube_api_key: str | None = None
     clear_youtube_api_key: bool = False
@@ -282,14 +284,17 @@ class SyncSettingsOut(OrmModel):
     automatic_detection_enabled: bool
     automatic_sync_enabled: bool
     live_tab_enabled: bool = True
+    subtitle_generation_enabled: bool = False
     live_monitored_channel_ids: list[int] = Field(default_factory=list)
     scan_interval_seconds: int
     allow_fallback_art: bool
     prefer_high_res_banners: bool
     comment_limit: int
+    max_replies_per_comment: int = 3
     requests_per_second: int
     last_library_sync_at: datetime | None
     last_live_sync_at: datetime | None = None
+    last_subtitle_sync_at: datetime | None = None
     youtube_api_key_configured: bool = False
     youtube_api_quota_daily_limit: int = 10_000
     youtube_api_quota_used_units: int = 0

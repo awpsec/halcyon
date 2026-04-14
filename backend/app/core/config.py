@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     update_manifest_url: str = "https://raw.githubusercontent.com/awpsec/halcyon/main/halcyon-release.json"
     repository_url: str = "https://github.com/awpsec/halcyon"
     server_timezone: str | None = None
+    subtitle_service_url: str = "http://whisper:9000"
+    subtitle_request_timeout_seconds: int = 1800
+    subtitle_auto_min_interval_seconds: int = 300
+    subtitle_auto_batch_size: int = 1
+    subtitle_manual_batch_size: int = 5
 
     model_config = SettingsConfigDict(
         env_prefix="HALCYON_",

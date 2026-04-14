@@ -31,6 +31,7 @@ from app.models.entities import (
 )
 from app.schemas.common import RetentionPendingItemOut
 from app.services.scanner import _delete_video_dependencies
+from app.services.subtitles import generated_subtitle_path
 
 settings = get_settings()
 logger = get_logger()
@@ -717,6 +718,7 @@ def _delete_retention_item(
 ) -> bool:
     video_file = db.get(VideoFile, item.video_file_id) if item.video_file_id is not None else None
     staged_path = Path(item.staged_absolute_path)
+    subtitle_source_path = generated_subtitle_path(Path(item.original_absolute_path))
 
     if not staged_path.exists() or not staged_path.is_file():
         item.status = "error"
@@ -735,6 +737,16 @@ def _delete_retention_item(
     if delete_finalize_paths is not None:
         delete_finalize_paths.append(delete_buffer_path)
     _cleanup_empty_retention_dirs(staged_path.parent, staging_root)
+
+    if subtitle_source_path.exists() and subtitle_source_path.is_file():
+        delete_buffer_subtitle_path = delete_buffer_path.with_name(subtitle_source_path.name)
+        if delete_buffer_subtitle_path.exists():
+            raise RuntimeError(f"Retention subtitle delete buffer already exists: {delete_buffer_subtitle_path}")
+        shutil.move(str(subtitle_source_path), str(delete_buffer_subtitle_path))
+        if undo_actions is not None:
+            undo_actions.append(("move", delete_buffer_subtitle_path, subtitle_source_path))
+        if delete_finalize_paths is not None:
+            delete_finalize_paths.append(delete_buffer_subtitle_path)
 
     if video_file:
         db.delete(video_file)

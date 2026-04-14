@@ -127,7 +127,11 @@ def find_caption_tracks(path: Path) -> list[dict]:
         if not candidate.stem.startswith(stem):
             continue
         suffix = candidate.stem[len(stem):].strip(".-_ ")
-        label = suffix if suffix else candidate.suffix.upper().replace(".", "")
+        normalized_suffix = suffix.casefold()
+        if normalized_suffix in {"halcyon", "halcyon-ai", "ai", "ai-captions"}:
+            label = "AI Captions"
+        else:
+            label = suffix if suffix else candidate.suffix.upper().replace(".", "")
         tracks.append(
             {
                 "path": str(candidate),
