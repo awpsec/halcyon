@@ -3221,6 +3221,23 @@ body,
   color: var(--muted);
   font-size: 0.82rem;
   font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel-strong) 84%, transparent);
+  border: 1px solid color-mix(in srgb, var(--line) 58%, transparent);
+  transition:
+    transform 140ms ease,
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.watch-comment-replies-header:hover .watch-comment-replies-toggle,
+.watch-comment-replies-header:focus-visible .watch-comment-replies-toggle {
+  transform: scale(1.06);
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: color-mix(in srgb, var(--panel-strong) 96%, transparent);
 }
 
 .watch-comment-replies-list {

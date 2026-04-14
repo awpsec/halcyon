@@ -124,9 +124,17 @@ def find_caption_tracks(path: Path) -> list[dict]:
             continue
         if candidate.suffix.lower() not in SUBTITLE_EXTENSIONS:
             continue
+        try:
+            if candidate.stat().st_size <= 0:
+                continue
+        except OSError:
+            continue
         if not candidate.stem.startswith(stem):
             continue
-        suffix = candidate.stem[len(stem):].strip(".-_ ")
+        raw_suffix = candidate.stem[len(stem):]
+        if raw_suffix and raw_suffix[0] not in {".", "-", "_", " "}:
+            continue
+        suffix = raw_suffix.strip(".-_ ")
         normalized_suffix = suffix.casefold()
         if normalized_suffix in {"halcyon", "halcyon-ai", "ai", "ai-captions"}:
             label = "AI Captions"

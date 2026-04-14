@@ -313,7 +313,76 @@ def test_subtitle_backfill_job_generates_vtt_for_existing_video(tmp_path: Path, 
 
         assert result.status == "completed"
         assert generated_path.exists()
-        assert any(track["label"] == "AI Captions" for track in find_caption_tracks(video_path))
+    assert any(track["label"] == "AI Captions" for track in find_caption_tracks(video_path))
+
+
+def test_subtitle_backfill_job_reuses_zero_byte_sidecar_slots(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="CoolCreator", slug="coolcreator")
+        db.add(channel)
+        db.flush()
+
+        video_path = tmp_path / "library" / "CoolCreator" / "Episode 3.mp4"
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"video")
+        stale_sidecar = subtitle_service.generated_subtitle_path(video_path)
+        stale_sidecar.write_bytes(b"")
+
+        video = Video(
+            title="Episode 3",
+            slug="episode-3",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(video_path),
+                relative_path="CoolCreator/Episode 3.mp4",
+                file_size=video_path.stat().st_size,
+                fingerprint="d" * 64,
+            )
+        )
+        db.commit()
+
+        async def fake_request(source_path: Path, output_path: Path, *, force: bool = False, app_settings=None):
+            del source_path, force, app_settings
+            output_path.write_text("WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\nhello\n", encoding="utf-8")
+            return {"ok": True, "output_path": str(output_path), "segments": 1}
+
+        monkeypatch.setattr(subtitle_service, "request_subtitle_generation", fake_request)
+
+        job = subtitle_service.create_subtitle_backfill_job(db)
+        result = asyncio.run(
+            subtitle_service.process_subtitle_backfill_job(
+                db,
+                job,
+                app_settings=routes_module.settings.model_copy(
+                    update={
+                        "subtitle_service_url": "http://whisper:9000",
+                        "subtitle_manual_batch_size": 5,
+                    }
+                ),
+            )
+        )
+
+        assert result.status == "completed"
+        assert stale_sidecar.exists()
+        assert stale_sidecar.stat().st_size > 0
+        assert result.details["generated"] == 1
+
+
+def test_find_caption_tracks_does_not_match_neighboring_numeric_stems(tmp_path: Path):
+    video_path = tmp_path / "Episode 1.mp4"
+    video_path.write_bytes(b"video-data")
+    (tmp_path / "Episode 10.halcyon.vtt").write_text("WEBVTT\n", encoding="utf-8")
+
+    tracks = find_caption_tracks(video_path)
+
+    assert tracks == []
 
 
 def test_subtitle_backfill_job_marks_failed_when_sidecar_batch_fails(tmp_path: Path, monkeypatch):
@@ -349,6 +418,60 @@ def test_subtitle_backfill_job_marks_failed_when_sidecar_batch_fails(tmp_path: P
         async def fake_request(source_path: Path, output_path: Path, *, force: bool = False, app_settings=None):
             del source_path, output_path, force, app_settings
             raise RuntimeError("whisper unavailable")
+
+        monkeypatch.setattr(subtitle_service, "request_subtitle_generation", fake_request)
+
+        job = subtitle_service.create_subtitle_backfill_job(db)
+        result = asyncio.run(
+            subtitle_service.process_subtitle_backfill_job(
+                db,
+                job,
+                app_settings=routes_module.settings.model_copy(
+                    update={
+                        "subtitle_service_url": "http://whisper:9000",
+                        "subtitle_manual_batch_size": 5,
+                    }
+                ),
+            )
+        )
+
+        assert result.status == "failed"
+        assert result.details["failed"] == 1
+
+
+def test_subtitle_backfill_job_counts_failed_result_without_exception(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="CoolCreator", slug="coolcreator")
+        db.add(channel)
+        db.flush()
+
+        video_path = tmp_path / "library" / "CoolCreator" / "Episode 4.mp4"
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"video")
+
+        video = Video(
+            title="Episode 4",
+            slug="episode-4",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(video_path),
+                relative_path="CoolCreator/Episode 4.mp4",
+                file_size=video_path.stat().st_size,
+                fingerprint="c" * 64,
+            )
+        )
+        db.commit()
+
+        async def fake_request(source_path: Path, output_path: Path, *, force: bool = False, app_settings=None):
+            del source_path, output_path, force, app_settings
+            return {"ok": True}
 
         monkeypatch.setattr(subtitle_service, "request_subtitle_generation", fake_request)
 

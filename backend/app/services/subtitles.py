@@ -128,7 +128,7 @@ def missing_subtitle_candidates(db: Session, *, limit: int | None = None) -> lis
         if find_caption_tracks(source_path):
             continue
         output_path = generated_subtitle_path(source_path)
-        if output_path.exists():
+        if output_path.exists() and output_path.stat().st_size > 0:
             continue
         candidates.append(
             SubtitleCandidate(
@@ -157,7 +157,7 @@ async def request_subtitle_generation(
     base_url = (resolved_settings.subtitle_service_url or "").strip().rstrip("/")
     if not base_url:
         raise RuntimeError("Subtitle service URL is not configured")
-    timeout_seconds = max(30, int(resolved_settings.subtitle_request_timeout_seconds or 1800))
+    timeout_seconds = max(30, int(resolved_settings.subtitle_request_timeout_seconds or 14400))
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(timeout_seconds, connect=5.0),
         follow_redirects=True,
@@ -176,14 +176,24 @@ async def request_subtitle_generation(
     return response.json()
 
 
-async def _process_candidate(candidate: SubtitleCandidate, *, force: bool = False, app_settings: Settings | None = None) -> str:
+async def _process_candidate(candidate: SubtitleCandidate, *, force: bool = False, app_settings: Settings | None = None) -> tuple[str, str | None]:
     if not candidate.source_path.exists():
-        return "skipped"
+        return "skipped", "Source media file no longer exists"
     if find_caption_tracks(candidate.source_path) and not force:
-        return "skipped"
+        return "skipped", "Caption track already exists"
+    if candidate.output_path.exists():
+        try:
+            if candidate.output_path.stat().st_size <= 0:
+                candidate.output_path.unlink(missing_ok=True)
+        except OSError:
+            return "failed", "Existing subtitle sidecar could not be replaced"
     candidate.output_path.parent.mkdir(parents=True, exist_ok=True)
-    await request_subtitle_generation(candidate.source_path, candidate.output_path, force=force, app_settings=app_settings)
-    return "generated" if candidate.output_path.exists() else "failed"
+    response = await request_subtitle_generation(candidate.source_path, candidate.output_path, force=force, app_settings=app_settings)
+    if candidate.output_path.exists():
+        if response.get("cached"):
+            return "generated", "Subtitle sidecar already existed"
+        return "generated", f"Generated {response.get('segments', 0)} segments"
+    return "failed", "Subtitle sidecar was not written"
 
 
 async def process_subtitle_backfill_job(
@@ -231,11 +241,43 @@ async def process_subtitle_backfill_job(
     batch_failed = 0
 
     for candidate in candidates:
+        total = max(int(details.get("total", 0)), processed + len(candidates))
+        details.update(
+            {
+                "mode": "backfill",
+                "generated": generated,
+                "skipped": skipped,
+                "failed": failed,
+                "processed": processed,
+                "remaining": max(0, total - processed),
+                "total": total,
+                "percent": 100 if total <= 0 else min(100, round((processed / total) * 100)),
+                "active_video_id": candidate.video.id,
+                "active_title": candidate.video.title,
+                "current_video_id": candidate.video.id,
+                "current_title": candidate.video.title,
+                "current_index": min(total, processed + 1),
+                "last_result": "running",
+                "last_detail": "Subtitle generation in progress",
+                "message": f"Generating subtitles for {candidate.video.title}",
+            }
+        )
+        job.details = details
+        db.commit()
+        db.refresh(job)
+        logger.info(
+            "Subtitle generation started video_id=%s title=%s path=%s",
+            candidate.video.id,
+            candidate.video.title,
+            candidate.source_path,
+        )
+        failure_already_counted = False
         try:
-            result = await _process_candidate(candidate, app_settings=resolved_settings)
+            result, detail = await _process_candidate(candidate, app_settings=resolved_settings)
         except Exception as exc:
             failed += 1
             batch_failed += 1
+            failure_already_counted = True
             logger.warning(
                 "Subtitle generation failed video_id=%s path=%s error=%s",
                 candidate.video.id,
@@ -244,15 +286,63 @@ async def process_subtitle_backfill_job(
             )
             details["last_error"] = str(exc)
             result = "failed"
+            detail = str(exc)
         if result == "generated":
             generated += 1
             batch_generated += 1
+            logger.info(
+                "Subtitle generation successful video_id=%s title=%s path=%s detail=%s",
+                candidate.video.id,
+                candidate.video.title,
+                candidate.source_path,
+                detail or "ok",
+            )
         elif result == "skipped":
             skipped += 1
             batch_skipped += 1
+            logger.info(
+                "Subtitle generation skipped video_id=%s title=%s path=%s reason=%s",
+                candidate.video.id,
+                candidate.video.title,
+                candidate.source_path,
+                detail or "Skipped",
+            )
         elif result == "failed":
-            batch_failed += 1
+            if not failure_already_counted:
+                failed += 1
+                batch_failed += 1
+            logger.warning(
+                "Subtitle generation failed video_id=%s title=%s path=%s reason=%s",
+                candidate.video.id,
+                candidate.video.title,
+                candidate.source_path,
+                detail or "Unknown failure",
+            )
         processed += 1
+
+        total = max(int(details.get("total", 0)), processed)
+        details.update(
+            {
+                "mode": "backfill",
+                "generated": generated,
+                "skipped": skipped,
+                "failed": failed,
+                "processed": processed,
+                "remaining": max(0, total - processed),
+                "total": total,
+                "percent": 100 if total <= 0 else min(100, round((processed / total) * 100)),
+                "active_video_id": None,
+                "active_title": None,
+                "current_video_id": candidate.video.id,
+                "current_title": candidate.video.title,
+                "current_index": min(total, processed),
+                "last_result": result,
+                "last_detail": detail,
+            }
+        )
+        job.details = details
+        db.commit()
+        db.refresh(job)
 
     remaining = count_missing_subtitle_candidates(db)
     total = max(int(details.get("total", 0)), processed + remaining)
@@ -266,6 +356,9 @@ async def process_subtitle_backfill_job(
             "remaining": remaining,
             "total": total,
             "percent": 100 if total <= 0 else min(100, round(((total - remaining) / total) * 100)),
+            "active_video_id": None,
+            "active_title": None,
+            "current_index": min(total, processed),
         }
     )
     if remaining == 0:
@@ -301,7 +394,7 @@ async def run_automatic_subtitle_pass(
     generated_any = False
     for candidate in candidates:
         try:
-            result = await _process_candidate(candidate, app_settings=resolved_settings)
+            result, detail = await _process_candidate(candidate, app_settings=resolved_settings)
         except Exception as exc:
             logger.warning(
                 "Automatic subtitle generation failed video_id=%s path=%s error=%s",
@@ -310,6 +403,30 @@ async def run_automatic_subtitle_pass(
                 exc,
             )
             break
+        if result == "generated":
+            logger.info(
+                "Automatic subtitle generation successful video_id=%s title=%s path=%s detail=%s",
+                candidate.video.id,
+                candidate.video.title,
+                candidate.source_path,
+                detail or "ok",
+            )
+        elif result == "skipped":
+            logger.info(
+                "Automatic subtitle generation skipped video_id=%s title=%s path=%s reason=%s",
+                candidate.video.id,
+                candidate.video.title,
+                candidate.source_path,
+                detail or "Skipped",
+            )
+        else:
+            logger.warning(
+                "Automatic subtitle generation failed video_id=%s title=%s path=%s reason=%s",
+                candidate.video.id,
+                candidate.video.title,
+                candidate.source_path,
+                detail or "Unknown failure",
+            )
         generated_any = generated_any or result == "generated"
     sync_settings.last_subtitle_sync_at = datetime.utcnow()
     db.commit()

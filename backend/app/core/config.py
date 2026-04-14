@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     repository_url: str = "https://github.com/awpsec/halcyon"
     server_timezone: str | None = None
     subtitle_service_url: str = "http://whisper:9000"
-    subtitle_request_timeout_seconds: int = 1800
+    subtitle_request_timeout_seconds: int = 14400
     subtitle_auto_min_interval_seconds: int = 300
     subtitle_auto_batch_size: int = 1
     subtitle_manual_batch_size: int = 5

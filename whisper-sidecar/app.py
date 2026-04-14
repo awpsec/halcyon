@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from pathlib import Path
 from threading import Lock
 
@@ -9,6 +10,9 @@ from faster_whisper import WhisperModel
 from pydantic import BaseModel
 
 app = FastAPI(title="halcyon-whisper", version="1.0.0")
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+logger = logging.getLogger("halcyon-whisper")
 
 _model_lock = Lock()
 _model: WhisperModel | None = None
@@ -77,6 +81,7 @@ def transcribe(payload: TranscriptionRequest) -> dict:
     if not source_path.exists() or not source_path.is_file():
         raise HTTPException(status_code=404, detail="Source media file was not found")
     if output_path.exists() and output_path.stat().st_size > 0 and not payload.force:
+        logger.info("Whisper transcription cached source=%s output=%s", source_path, output_path)
         return {
             "ok": True,
             "cached": True,
@@ -87,6 +92,7 @@ def transcribe(payload: TranscriptionRequest) -> dict:
 
     beam_size = max(1, int(os.getenv("WHISPER_BEAM_SIZE", "1")))
     model = _whisper_model()
+    logger.info("Whisper transcription started source=%s output=%s", source_path, output_path)
     try:
         segment_iter, info = model.transcribe(
             str(source_path),
@@ -98,9 +104,18 @@ def transcribe(payload: TranscriptionRequest) -> dict:
         )
         segments = [(segment.start, segment.end, segment.text) for segment in segment_iter]
     except Exception as exc:  # pragma: no cover - runtime dependency behavior
+        logger.exception("Whisper transcription failed source=%s error=%s", source_path, exc)
         raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}") from exc
 
     output_path.write_text(_render_vtt(segments), encoding="utf-8")
+    logger.info(
+        "Whisper transcription finished source=%s output=%s segments=%s language=%s duration_seconds=%s",
+        source_path,
+        output_path,
+        len(segments),
+        getattr(info, "language", None),
+        getattr(info, "duration", None),
+    )
     return {
         "ok": True,
         "cached": False,

@@ -517,6 +517,24 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
       ),
     [jobsState.data],
   );
+  const subtitleBackfillJob = useMemo(
+    () =>
+      (jobsState.data ?? []).find(
+        (item: { scope?: string; status?: string }) =>
+          item.scope === "subtitles" && (item.status === "pending" || item.status === "running"),
+      ) as { details?: Record<string, unknown> } | undefined,
+    [jobsState.data],
+  );
+  const subtitleBackfillLabel = useMemo(() => {
+    if (!subtitleBackfillJob?.details) return null;
+    const processed = Number(subtitleBackfillJob.details.processed ?? 0);
+    const total = Number(subtitleBackfillJob.details.total ?? 0);
+    const generated = Number(subtitleBackfillJob.details.generated ?? 0);
+    const skipped = Number(subtitleBackfillJob.details.skipped ?? 0);
+    const failed = Number(subtitleBackfillJob.details.failed ?? 0);
+    if (!total) return "Backfilling subtitles...";
+    return `Backfilling subtitles ${processed}/${total} • ${generated} generated • ${skipped} skipped • ${failed} failed`;
+  }, [subtitleBackfillJob]);
   const [savingAccount, setSavingAccount] = useState(false);
   const [scanPending, setScanPending] = useState(false);
   const [syncPending, setSyncPending] = useState(false);
@@ -847,7 +865,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
       (logsState.data?.lines ?? [])
         .filter((line) => {
           const lowered = line.toLowerCase();
-          return lowered.includes("sync") || lowered.includes("scan");
+          return lowered.includes("sync") || lowered.includes("scan") || lowered.includes("subtitle") || lowered.includes("whisper");
         })
         .slice(-320),
     [logsState.data?.lines],
@@ -2267,7 +2285,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                       {syncDirty
                         ? "Unsaved changes"
                         : subtitleBackfillActive
-                          ? "Backfilling subtitles for existing videos..."
+                          ? (subtitleBackfillLabel ?? "Backfilling subtitles for existing videos...")
                           : "Subtitle generation is enabled for both new and previously indexed videos."}
                     </small>
                   ) : null}
