@@ -55,10 +55,44 @@ type ChapterMarker = {
   label: string;
 };
 
+function subtitleTextTracks(node: HTMLVideoElement): TextTrack[] {
+  const tracks: TextTrack[] = [];
+  for (let index = 0; index < node.textTracks.length; index += 1) {
+    const track = node.textTracks[index];
+    if (track && (track.kind === "subtitles" || track.kind === "captions")) {
+      tracks.push(track);
+    }
+  }
+  return tracks;
+}
+
+function captionsAvailable(node: HTMLVideoElement) {
+  return subtitleTextTracks(node).length > 0;
+}
+
+function captionsCurrentlyEnabled(node: HTMLVideoElement) {
+  return subtitleTextTracks(node).some((track) => track.mode === "showing");
+}
+
+function applyCaptionsEnabled(node: HTMLVideoElement, enabled: boolean) {
+  const tracks = subtitleTextTracks(node);
+  if (!tracks.length) return;
+  let activated = false;
+  for (const track of tracks) {
+    if (enabled && !activated) {
+      track.mode = "showing";
+      activated = true;
+    } else {
+      track.mode = "disabled";
+    }
+  }
+}
+
 export function HalcyonPlayer({
   source,
   autoplay,
   captions,
+  captionsEnabled = false,
   chapters = [],
   mousewheelVolumeControl = true,
   aspectRatio = "16 / 9",
@@ -69,10 +103,12 @@ export function HalcyonPlayer({
   onEnded,
   onLoadingChange,
   onFatalError,
+  onCaptionsChange,
 }: {
   source: string;
   autoplay: boolean;
   captions: CaptionTrack[];
+  captionsEnabled?: boolean;
   chapters?: ChapterMarker[];
   mousewheelVolumeControl?: boolean;
   aspectRatio?: string;
@@ -83,6 +119,7 @@ export function HalcyonPlayer({
   onEnded?: (video: HTMLVideoElement) => void;
   onLoadingChange?: (loading: boolean) => void;
   onFatalError?: (message: string) => void;
+  onCaptionsChange?: (enabled: boolean) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const playerRef = useRef<Plyr | null>(null);
@@ -96,6 +133,7 @@ export function HalcyonPlayer({
   const onEndedRef = useRef(onEnded);
   const onLoadingRef = useRef(onLoadingChange);
   const onFatalErrorRef = useRef(onFatalError);
+  const onCaptionsChangeRef = useRef(onCaptionsChange);
   const waitingTimerRef = useRef<number | null>(null);
   const loadingStateRef = useRef(false);
   const hlsNetworkRecoveryAttemptsRef = useRef(0);
@@ -112,7 +150,8 @@ export function HalcyonPlayer({
     onEndedRef.current = onEnded;
     onLoadingRef.current = onLoadingChange;
     onFatalErrorRef.current = onFatalError;
-  }, [onEnded, onFatalError, onLoadingChange, onPause, onReady]);
+    onCaptionsChangeRef.current = onCaptionsChange;
+  }, [onCaptionsChange, onEnded, onFatalError, onLoadingChange, onPause, onReady]);
 
   function emitLoadingChange(nextLoading: boolean) {
     if (loadingStateRef.current === nextLoading) return;
@@ -221,7 +260,11 @@ export function HalcyonPlayer({
           seekTime: 5,
           ratio: plyrRatio,
           hideControls: true,
-          captions: { active: captions.length > 0, language: "auto", update: true },
+          captions: {
+            active: captionsEnabled && captions.length > 0,
+            language: "auto",
+            update: true,
+          },
           controls: [
             "play-large",
             "restart",
@@ -278,6 +321,7 @@ export function HalcyonPlayer({
       if (node.videoWidth > 0 && node.videoHeight > 0) {
         onDimensionsChange?.(`${node.videoWidth} / ${node.videoHeight}`);
       }
+      applyCaptionsEnabled(node, captionsEnabled);
       if (Number.isFinite(node.duration) && node.duration > 0) {
         setDurationSeconds(node.duration);
       }
@@ -319,6 +363,14 @@ export function HalcyonPlayer({
       emitLoadingChange(false);
       onFatalErrorRef.current?.("This stream was terminated. Refresh to resume.");
     };
+    const trackList = node.textTracks as TextTrackList & {
+      addEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
+      removeEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
+    };
+    const captionsChangeHandler = () => {
+      if (!captionsAvailable(node)) return;
+      onCaptionsChangeRef.current?.(captionsCurrentlyEnabled(node));
+    };
     node.addEventListener("pause", pauseHandler);
     node.addEventListener("ended", endedHandler);
     node.addEventListener("loadstart", loadStartHandler);
@@ -329,6 +381,10 @@ export function HalcyonPlayer({
     node.addEventListener("timeupdate", timeUpdateHandler);
     node.addEventListener("seeked", timeUpdateHandler);
     node.addEventListener("error", errorHandler);
+    trackList.addEventListener?.("change", captionsChangeHandler);
+    window.setTimeout(() => {
+      applyCaptionsEnabled(node, captionsEnabled);
+    }, 0);
 
     return () => {
       node.removeEventListener("pause", pauseHandler);
@@ -341,6 +397,7 @@ export function HalcyonPlayer({
       node.removeEventListener("timeupdate", timeUpdateHandler);
       node.removeEventListener("seeked", timeUpdateHandler);
       node.removeEventListener("error", errorHandler);
+      trackList.removeEventListener?.("change", captionsChangeHandler);
       clearWaitingTimer();
       loadingStateRef.current = false;
       player?.destroy();
@@ -353,6 +410,12 @@ export function HalcyonPlayer({
       node.load();
     };
   }, [aspectRatio, autoplay, captions.length, source]);
+
+  useEffect(() => {
+    const node = videoRef.current;
+    if (!node || !captionsAvailable(node)) return;
+    applyCaptionsEnabled(node, captionsEnabled);
+  }, [captionsEnabled, source, captions.length]);
 
   const shellStyle = useMemo(
     () =>
@@ -470,6 +533,19 @@ export function HalcyonPlayer({
         event.preventDefault();
         node.muted = false;
         node.volume = Number(Math.max(0, node.volume - 0.05).toFixed(2));
+        return;
+      }
+      if (
+        event.key.toLowerCase() === "c" &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey
+      ) {
+        if (!captionsAvailable(node)) return;
+        event.preventDefault();
+        const nextEnabled = !captionsCurrentlyEnabled(node);
+        applyCaptionsEnabled(node, nextEnabled);
+        onCaptionsChangeRef.current?.(nextEnabled);
       }
     }
 
@@ -486,7 +562,13 @@ export function HalcyonPlayer({
     >
       <video ref={videoRef} playsInline crossOrigin="anonymous" preload="auto">
         {captions.map((track, index) => (
-          <track key={track.id} src={track.url} label={track.label} kind="subtitles" default={index === 0} />
+          <track
+            key={track.id}
+            src={track.url}
+            label={track.label}
+            kind="subtitles"
+            default={captionsEnabled && index === 0}
+          />
         ))}
       </video>
       {currentChapterLabel ? (

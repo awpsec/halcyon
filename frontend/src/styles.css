@@ -3172,11 +3172,85 @@ body,
   min-width: 0;
 }
 
+.comment-avatar.is-reply-avatar {
+  width: 28px;
+  height: 28px;
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
 .comment-actions {
   display: flex;
   align-items: center;
   gap: 10px;
   padding-top: 4px;
+}
+
+.watch-comment-replies {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 54%, transparent);
+}
+
+.watch-comment-replies-header {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.watch-comment-replies-header strong {
+  font-size: 0.92rem;
+}
+
+.watch-comment-replies-header small {
+  color: var(--muted);
+}
+
+.watch-comment-replies-toggle {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.watch-comment-replies-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.watch-comment-reply {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.watch-comment-reply-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.watch-comment-reply-copy strong {
+  font-size: 0.9rem;
+}
+
+.watch-comment-reply-copy p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
 }
 
 .comment-reaction-button {
@@ -6302,6 +6376,20 @@ body,
   background: color-mix(in srgb, var(--panel-strong) 94%, transparent);
 }
 
+.watch-suggestion-empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.watch-suggestion-empty-state > .muted-copy {
+  margin: 0;
+}
+
+.suggestion-stack.is-empty-state .suggestion-row {
+  pointer-events: none;
+}
+
 :root[data-theme="light"] .comment-stack.is-preview::after {
   background: linear-gradient(
     180deg,
@@ -6645,6 +6733,16 @@ body,
 
 .settings-page .settings-inline-grid-fields .settings-field input {
   max-width: 180px;
+}
+
+.settings-page .settings-sync-inline-grid {
+  grid-template-columns: repeat(3, minmax(0, 180px));
+  align-items: end;
+}
+
+.settings-page .settings-sync-inline-grid .settings-field input {
+  width: 100%;
+  max-width: none;
 }
 
 .settings-page .settings-inline-grid .settings-field-inline {
@@ -7828,8 +7926,7 @@ body,
     transform 160ms ease;
 }
 
-.halcyon-player-shell:hover .halcyon-player-current-chapter,
-.halcyon-player-shell:focus-within .halcyon-player-current-chapter {
+.halcyon-player-shell .plyr:not(.plyr--hide-controls) ~ .halcyon-player-current-chapter {
   opacity: 1;
   transform: translateY(0);
 }
@@ -7861,8 +7958,7 @@ body,
   transition: opacity 160ms ease;
 }
 
-.halcyon-player-shell:hover .halcyon-player-chapters,
-.halcyon-player-shell:focus-within .halcyon-player-chapters {
+.halcyon-player-shell .plyr:not(.plyr--hide-controls) ~ .halcyon-player-chapters {
   opacity: 1;
 }
 

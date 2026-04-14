@@ -41,6 +41,7 @@ from app.models.entities import (
     WatchProgress,
     YouTubeChannelSnapshot,
     YouTubeCommentSnapshot,
+    YouTubeCommentReplySnapshot,
     YouTubeLiveStreamSnapshot,
     YouTubeMatch,
     YouTubeVideoSnapshot,
@@ -1809,7 +1810,13 @@ async def fetch_recent_channel_upload_candidates(
     return merged
 
 
-async def fetch_top_comments(client: httpx.AsyncClient, api_key: str, youtube_video_id: str, limit: int, requests_per_second: int) -> list[dict]:
+async def fetch_top_comments(
+    client: httpx.AsyncClient,
+    api_key: str,
+    youtube_video_id: str,
+    limit: int,
+    requests_per_second: int,
+) -> list[dict]:
     items: list[dict] = []
     next_page_token: str | None = None
     remaining = max(1, min(limit, 100))
@@ -1818,7 +1825,7 @@ async def fetch_top_comments(client: httpx.AsyncClient, api_key: str, youtube_vi
             client,
             f"{YOUTUBE_API_BASE}/commentThreads",
             params={
-                "part": "snippet",
+                "part": "snippet,replies",
                 "videoId": youtube_video_id,
                 "maxResults": min(remaining, 100),
                 "pageToken": next_page_token,
@@ -2474,6 +2481,7 @@ async def apply_sync_item(
     requests_per_second: int,
     client: httpx.AsyncClient,
     api_key: str | None,
+    max_replies_per_comment: int = 3,
     channel_cache: dict[str, dict | None] | None = None,
     playlist_cache: dict[str, list[dict]] | None = None,
     allow_fallback_art: bool = False,
@@ -2725,19 +2733,39 @@ async def apply_sync_item(
                     )
 
     if match.status == "matched" and api_key:
+        capped_reply_limit = max(0, min(max_replies_per_comment, 5))
+        db.query(YouTubeCommentReplySnapshot).filter(YouTubeCommentReplySnapshot.youtube_video_id == video_id).delete()
         db.query(YouTubeCommentSnapshot).filter(YouTubeCommentSnapshot.youtube_video_id == video_id).delete()
         for comment_item in await fetch_top_comments(client, api_key, video_id, max(1, min(comment_limit, 100)), requests_per_second):
-            top = comment_item.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
-            db.add(
-                YouTubeCommentSnapshot(
-                    youtube_video_id=video_id,
-                    author_name=top.get("authorDisplayName", "Unknown"),
-                    body=top.get("textDisplay", ""),
-                    like_count=parse_maybe_int(top.get("likeCount")) or 0,
-                    reply_count=comment_item.get("snippet", {}).get("totalReplyCount", 0),
-                    published_at=parse_published_datetime(top.get("publishedAt")),
-                )
+            top_level_comment = comment_item.get("snippet", {}).get("topLevelComment", {}) or {}
+            top = top_level_comment.get("snippet", {}) or {}
+            stored_comment = YouTubeCommentSnapshot(
+                youtube_video_id=video_id,
+                youtube_comment_id=top_level_comment.get("id"),
+                author_name=top.get("authorDisplayName", "Unknown"),
+                body=top.get("textDisplay", ""),
+                like_count=parse_maybe_int(top.get("likeCount")) or 0,
+                reply_count=comment_item.get("snippet", {}).get("totalReplyCount", 0),
+                published_at=parse_published_datetime(top.get("publishedAt")),
             )
+            db.add(stored_comment)
+            db.flush()
+            if capped_reply_limit > 0:
+                inline_replies = ((comment_item.get("replies", {}) or {}).get("comments", []) or [])[:capped_reply_limit]
+                for index, reply_item in enumerate(inline_replies):
+                    reply = reply_item.get("snippet", {}) or {}
+                    db.add(
+                        YouTubeCommentReplySnapshot(
+                            parent_comment_id=stored_comment.id,
+                            youtube_video_id=video_id,
+                            youtube_reply_id=reply_item.get("id"),
+                            author_name=reply.get("authorDisplayName", "Unknown"),
+                            body=reply.get("textDisplay", ""),
+                            like_count=parse_maybe_int(reply.get("likeCount")) or 0,
+                            published_at=parse_published_datetime(reply.get("publishedAt")),
+                            position=index,
+                        )
+                    )
         matched_fields.append("comments")
 
     if match.status == "matched":
@@ -2773,6 +2801,7 @@ async def sync_video(
     comment_limit: int,
     requests_per_second: int,
     client: httpx.AsyncClient,
+    max_replies_per_comment: int = 3,
     channel_cache: dict[str, dict | None] | None = None,
     playlist_cache: dict[str, list[dict]] | None = None,
     allow_fallback_art: bool = False,
@@ -2821,6 +2850,7 @@ async def sync_video(
                     video,
                     refresh_item,
                     comment_limit=comment_limit,
+                    max_replies_per_comment=max_replies_per_comment,
                     requests_per_second=requests_per_second,
                     client=client,
                     api_key=api_key,
@@ -2850,6 +2880,7 @@ async def sync_video(
                     video,
                     refresh_item,
                     comment_limit=comment_limit,
+                    max_replies_per_comment=max_replies_per_comment,
                     requests_per_second=requests_per_second,
                     client=client,
                     api_key=api_key,
@@ -3034,6 +3065,8 @@ async def send_video_to_review(
     comment_limit: int,
     requests_per_second: int,
     client: httpx.AsyncClient,
+    *,
+    max_replies_per_comment: int = 3,
     channel_cache: dict[str, dict | None] | None = None,
     playlist_cache: dict[str, list[dict]] | None = None,
     allow_fallback_art: bool = False,
@@ -3189,6 +3222,7 @@ async def send_video_to_review(
             video,
             best_item,
             comment_limit=comment_limit,
+            max_replies_per_comment=max_replies_per_comment,
             requests_per_second=requests_per_second,
             client=client,
             api_key=api_key,
@@ -3228,6 +3262,7 @@ async def sync_scope(
         normalize_channel_assignments(db)
         settings = db.scalar(select(SyncSettings))
         comment_limit = settings.comment_limit if settings else 100
+        max_replies_per_comment = settings.max_replies_per_comment if settings else 3
         requests_per_second = settings.requests_per_second if settings and settings.requests_per_second else 3
         allow_fallback_art = allow_fallback_art_enabled(db)
         prefer_high_res_banners = prefer_high_res_banners_override if prefer_high_res_banners_override is not None else prefer_high_res_banners_enabled(db)
@@ -3354,10 +3389,11 @@ async def sync_scope(
                         result = await sync_video(
                             db,
                             video,
-                            api_key,
-                            comment_limit,
-                            requests_per_second,
-                            client,
+                            api_key=api_key,
+                            comment_limit=comment_limit,
+                            requests_per_second=requests_per_second,
+                            client=client,
+                            max_replies_per_comment=max_replies_per_comment,
                             channel_cache=channel_cache,
                             playlist_cache=playlist_cache,
                             allow_fallback_art=allow_fallback_art,

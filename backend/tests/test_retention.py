@@ -15,6 +15,7 @@ from app.services.retention import (
     revert_last_retention_run,
     run_retention_cycle,
 )
+from app.services.subtitles import generated_subtitle_path
 
 
 def make_session(tmp_path: Path) -> Session:
@@ -235,6 +236,31 @@ def test_delete_pending_retention_items_removes_staged_files(tmp_path: Path):
         assert deleted_item.status == "deleted"
         assert deleted_item.video_id is None
         assert deleted_item.video_file_id is None
+
+
+def test_delete_pending_retention_items_removes_generated_subtitle_sidecars(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        video, video_file, source_path = create_video_with_file(db, tmp_path)
+        video.created_at = datetime.utcnow().replace(year=2024)
+        settings_row = get_or_create_retention_settings(db)
+        settings_row.enabled = True
+        settings_row.retention_days = 30
+        settings_row.staging_folder_path = str(tmp_path / "retention-staging")
+        db.commit()
+
+        subtitle_path = generated_subtitle_path(source_path)
+        subtitle_path.write_text(
+            "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n",
+            encoding="utf-8",
+        )
+
+        run_retention_cycle(db, trigger="manual", force=True)
+        assert subtitle_path.exists()
+
+        delete_result = delete_pending_retention_items(db)
+
+        assert delete_result["deleted"] == 1
+        assert not subtitle_path.exists()
 
 
 def test_retention_runs_persist_file_lists_for_mark_delete_and_revert(tmp_path: Path):

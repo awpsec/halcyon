@@ -3,6 +3,7 @@ name: halcyon
 services:
   postgres:
     container_name: halcyon-postgres
+    restart: unless-stopped
     image: postgres:17-bookworm
     command:
       - postgres
@@ -30,12 +31,15 @@ services:
 
   web:
     container_name: halcyon-web
+    restart: unless-stopped
     build:
       context: .
       dockerfile: Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
+      whisper:
+        condition: service_started
     ports:
       - "11111:8000"
     environment:
@@ -46,19 +50,46 @@ services:
       HALCYON_SCAN_INTERVAL_SECONDS: "60"
       HALCYON_BACKGROUND_TASKS_ENABLED: "false"
       HALCYON_YOUTUBE_API_KEY: "${HALCYON_YOUTUBE_API_KEY:-}"
+      HALCYON_SUBTITLE_SERVICE_URL: "http://whisper:9000"
     volumes:
       - ./data/config:/config
       - ./data/cache:/cache
       - ./library:/library
 
+  whisper:
+    container_name: halcyon-whisper
+    restart: unless-stopped
+    build:
+      context: ./whisper-sidecar
+      dockerfile: Dockerfile
+    environment:
+      WHISPER_MODEL: "base"
+      WHISPER_MODEL_DIR: /models
+      WHISPER_DEVICE: cpu
+      WHISPER_COMPUTE_TYPE: int8
+      WHISPER_BEAM_SIZE: "1"
+    expose:
+      - "9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=5).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ./library:/library
+      - ./data/cache/whisper-models:/models
+
   worker:
     container_name: halcyon-worker
+    restart: unless-stopped
     build:
       context: .
       dockerfile: Dockerfile
     command: ["python", "-m", "app.worker"]
     depends_on:
       postgres:
+        condition: service_healthy
+      whisper:
         condition: service_healthy
     environment:
       HALCYON_CONFIG_DIR: /config
@@ -67,6 +98,7 @@ services:
       HALCYON_DATABASE_URL: postgresql+psycopg://halcyon:halcyon@postgres:5432/halcyon
       HALCYON_SCAN_INTERVAL_SECONDS: "60"
       HALCYON_YOUTUBE_API_KEY: "${HALCYON_YOUTUBE_API_KEY:-}"
+      HALCYON_SUBTITLE_SERVICE_URL: "http://whisper:9000"
     volumes:
       - ./data/config:/config
       - ./data/cache:/cache

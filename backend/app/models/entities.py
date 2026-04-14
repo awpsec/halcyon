@@ -294,11 +294,25 @@ class YouTubeCommentSnapshot(TimestampMixin, Base):
     __tablename__ = "youtube_comment_snapshots"
 
     youtube_video_id: Mapped[str] = mapped_column(String(32), index=True)
+    youtube_comment_id: Mapped[str | None] = mapped_column(String(64), index=True, default=None)
     author_name: Mapped[str] = mapped_column(String(255))
     body: Mapped[str] = mapped_column(Text)
     like_count: Mapped[int] = mapped_column(Integer, default=0)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     reply_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class YouTubeCommentReplySnapshot(TimestampMixin, Base):
+    __tablename__ = "youtube_comment_reply_snapshots"
+
+    parent_comment_id: Mapped[int] = mapped_column(ForeignKey("youtube_comment_snapshots.id"), index=True)
+    youtube_video_id: Mapped[str] = mapped_column(String(32), index=True)
+    youtube_reply_id: Mapped[str | None] = mapped_column(String(64), index=True, default=None)
+    author_name: Mapped[str] = mapped_column(String(255))
+    body: Mapped[str] = mapped_column(Text)
+    like_count: Mapped[int] = mapped_column(Integer, default=0)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    position: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class YouTubeLiveStreamSnapshot(TimestampMixin, Base):
@@ -337,14 +351,17 @@ class SyncSettings(TimestampMixin, Base):
     automatic_detection_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     automatic_sync_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     live_tab_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    subtitle_generation_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     scan_interval_seconds: Mapped[int] = mapped_column(Integer, default=30)
     allow_fallback_art: Mapped[bool] = mapped_column(Boolean, default=False)
     prefer_high_res_banners: Mapped[bool] = mapped_column(Boolean, default=False)
     comment_limit: Mapped[int] = mapped_column(Integer, default=100)
+    max_replies_per_comment: Mapped[int] = mapped_column(Integer, default=3)
     requests_per_second: Mapped[int] = mapped_column(Integer, default=3)
     last_library_sync_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     last_live_sync_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     last_live_search_sync_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    last_subtitle_sync_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     youtube_api_key: Mapped[str | None] = mapped_column(String(255), default=None)
     youtube_api_quota_day: Mapped[str | None] = mapped_column(String(16), default=None)
     youtube_api_quota_used_units: Mapped[int] = mapped_column(Integer, default=0)

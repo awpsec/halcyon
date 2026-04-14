@@ -219,6 +219,26 @@ type WatchSuggestionItem = {
   completed?: boolean;
 };
 
+type WatchCommentReply = {
+  id: number;
+  youtube_reply_id?: string | null;
+  author_name: string;
+  body: string;
+  like_count: number;
+  published_at?: string | null;
+};
+
+type WatchComment = {
+  id: number;
+  youtube_comment_id?: string | null;
+  author_name: string;
+  body: string;
+  like_count: number;
+  reply_count: number;
+  published_at?: string | null;
+  replies: WatchCommentReply[];
+};
+
 type SuggestionFilter = "suggested" | "related";
 
 type SuggestionFeedState = {
@@ -826,12 +846,31 @@ function WatchSuggestionSkeletonRow() {
   );
 }
 
+function WatchSuggestionEmptyState({
+  message,
+}: {
+  message: string;
+}) {
+  return (
+    <div className="watch-suggestion-empty-state">
+      <p className="muted-copy">{message}</p>
+      <div className="suggestion-stack is-empty-state" aria-hidden="true">
+        {Array.from({ length: 3 }).map((_, index) => (
+          <WatchSuggestionSkeletonRow key={index} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function VideoPage({
   profile,
   preferences,
+  onCaptionsPreferenceChange,
 }: {
   profile: Profile | null;
   preferences: Preferences;
+  onCaptionsPreferenceChange: (enabled: boolean) => void;
 }) {
   const params = useParams();
   const navigate = useNavigate();
@@ -878,6 +917,9 @@ export function VideoPage({
     related: createSuggestionFeedState(),
   }));
   const [commentsExpanded, setCommentsExpanded] = useState(false);
+  const [expandedReplies, setExpandedReplies] = useState<Record<number, boolean>>(
+    {},
+  );
   const [playlistMenuOpen, setPlaylistMenuOpen] = useState(false);
   const [playlistLoading, setPlaylistLoading] = useState(false);
   const [playlists, setPlaylists] = useState<PlaylistSummary[]>([]);
@@ -936,6 +978,7 @@ export function VideoPage({
 
   useEffect(() => {
     setCommentsExpanded(false);
+    setExpandedReplies({});
   }, [videoId]);
 
   useEffect(() => {
@@ -1179,7 +1222,10 @@ export function VideoPage({
   }, [data, videoWatched]);
   const activeSuggestionFeed = suggestionFeeds[suggestionFilter];
   const visibleSuggestedItems = activeSuggestionFeed.items;
-  const totalComments = data?.youtube.comments ?? [];
+  const showSuggestionLoadingState =
+    activeSuggestionFeed.loadingInitial ||
+    (suggestionFilter === "related" && !activeSuggestionFeed.initialized);
+  const totalComments = (data?.youtube.comments ?? []) as WatchComment[];
   const usesCompactCommentPreview = preferences.density === "compact";
   const commentPreviewCount = usesCompactCommentPreview
     ? COMPACT_COMMENT_PREVIEW_COUNT
@@ -1201,6 +1247,13 @@ export function VideoPage({
   function toggleCommentsExpanded() {
     if (!canCollapseComments) return;
     setCommentsExpanded((current) => !current);
+  }
+
+  function toggleReplies(commentId: number) {
+    setExpandedReplies((current) => ({
+      ...current,
+      [commentId]: !current[commentId],
+    }));
   }
 
   useEffect(() => {
@@ -1972,10 +2025,12 @@ export function VideoPage({
                   source={data.playback.stream_url}
                   autoplay={preferences.autoplay}
                   captions={data.captions ?? []}
+                  captionsEnabled={preferences.captionsEnabled}
                   chapters={chapters}
                   mousewheelVolumeControl={preferences.mousewheelVolumeControl}
                   aspectRatio={playerAspectRatio}
                   mode={displayMode}
+                  onCaptionsChange={onCaptionsPreferenceChange}
                   onLoadingChange={(next) => {
                     setPlayerLoading(next);
                     if (next) setPlayerError(null);
@@ -2608,9 +2663,9 @@ export function VideoPage({
                 >
                   {previewedComments.length ? (
                     showCollapsedCommentPreview ? (
-                      previewedComments.map((comment: any, index: number) => (
+                      previewedComments.map((comment, index: number) => (
                         <article
-                          key={`${comment.author_name}-${index}`}
+                          key={comment.id}
                           className={`watch-comment-preview-row ${
                             index === previewOverflowCommentIndex
                               ? "is-faded-preview"
@@ -2621,7 +2676,7 @@ export function VideoPage({
                             <AvatarImage
                               src={null}
                               alt={comment.author_name}
-                              seed={`${comment.author_name}-${index}`}
+                              seed={`${comment.id}-${comment.author_name}`}
                               fallbackText={comment.author_name}
                             />
                           </span>
@@ -2632,72 +2687,120 @@ export function VideoPage({
                         </article>
                       ))
                     ) : (
-                      previewedComments.map((comment: any, index: number) => (
-                        <article
-                          key={`${comment.author_name}-${index}`}
-                          className={`comment-card watch-comment-card ${
-                            index === previewOverflowCommentIndex
-                              ? "is-faded-preview"
-                              : ""
-                          }`}
-                        >
-                          <span className="comment-avatar">
-                            <AvatarImage
-                              src={null}
-                              alt={comment.author_name}
-                              seed={`${comment.author_name}-${index}`}
-                              fallbackText={comment.author_name}
-                            />
-                          </span>
-                          <div className="comment-body">
-                            <strong>{comment.author_name}</strong>
-                            <p>{comment.body}</p>
-                            <div className="comment-actions">
-                              <button
-                                className={`comment-reaction-button is-like ${commentReactions[`${comment.author_name}-${index}`] === "like" ? "is-selected" : ""}`}
-                                onClick={() =>
-                                  setCommentReaction(
-                                    `${comment.author_name}-${index}`,
-                                    "like",
-                                  )
-                                }
-                                type="button"
-                              >
-                                <ThumbIcon
-                                  type="like"
-                                  active={
-                                    commentReactions[
-                                      `${comment.author_name}-${index}`
-                                    ] === "like"
+                      previewedComments.map((comment, index: number) => {
+                        const reactionKey = comment.youtube_comment_id ?? String(comment.id);
+                        const visibleReplies = comment.replies ?? [];
+                        const repliesExpanded = Boolean(expandedReplies[comment.id]);
+                        return (
+                          <article
+                            key={comment.id}
+                            className={`comment-card watch-comment-card ${
+                              index === previewOverflowCommentIndex
+                                ? "is-faded-preview"
+                                : ""
+                            }`}
+                          >
+                            <span className="comment-avatar">
+                              <AvatarImage
+                                src={null}
+                                alt={comment.author_name}
+                                seed={`${comment.id}-${comment.author_name}`}
+                                fallbackText={comment.author_name}
+                              />
+                            </span>
+                            <div className="comment-body">
+                              <strong>{comment.author_name}</strong>
+                              <p>{comment.body}</p>
+                              <div className="comment-actions">
+                                <button
+                                  className={`comment-reaction-button is-like ${commentReactions[reactionKey] === "like" ? "is-selected" : ""}`}
+                                  onClick={() =>
+                                    setCommentReaction(
+                                      reactionKey,
+                                      "like",
+                                    )
                                   }
-                                />
-                                <span>
-                                  {formatCount(comment.like_count) || "0"}
-                                </span>
-                              </button>
-                              <button
-                                className={`comment-reaction-button is-dislike ${commentReactions[`${comment.author_name}-${index}`] === "dislike" ? "is-selected" : ""}`}
-                                onClick={() =>
-                                  setCommentReaction(
-                                    `${comment.author_name}-${index}`,
-                                    "dislike",
-                                  )
-                                }
-                                type="button"
-                              >
-                                <ThumbIcon
-                                  type="dislike"
-                                  active={
-                                    commentReactions[
-                                      `${comment.author_name}-${index}`
-                                    ] === "dislike"
+                                  type="button"
+                                >
+                                  <ThumbIcon
+                                    type="like"
+                                    active={
+                                      commentReactions[
+                                        reactionKey
+                                      ] === "like"
+                                    }
+                                  />
+                                  <span>
+                                    {formatCount(comment.like_count) || "0"}
+                                  </span>
+                                </button>
+                                <button
+                                  className={`comment-reaction-button is-dislike ${commentReactions[reactionKey] === "dislike" ? "is-selected" : ""}`}
+                                  onClick={() =>
+                                    setCommentReaction(
+                                      reactionKey,
+                                      "dislike",
+                                    )
                                   }
-                                />
-                              </button>
+                                  type="button"
+                                >
+                                  <ThumbIcon
+                                    type="dislike"
+                                    active={
+                                      commentReactions[
+                                        reactionKey
+                                      ] === "dislike"
+                                    }
+                                  />
+                                </button>
+                              </div>
+                              {visibleReplies.length ? (
+                                <div className="watch-comment-replies">
+                                  <button
+                                    className={`watch-comment-replies-header ${
+                                      repliesExpanded ? "is-expanded" : ""
+                                    }`}
+                                    onClick={() => toggleReplies(comment.id)}
+                                    type="button"
+                                  >
+                                    <strong>
+                                      {comment.reply_count === 1 ? "1 reply" : `${comment.reply_count} replies`}
+                                    </strong>
+                                    {repliesExpanded && comment.reply_count > visibleReplies.length ? (
+                                      <small>
+                                        Showing {visibleReplies.length} of {comment.reply_count}
+                                      </small>
+                                    ) : null}
+                                    <span className="watch-comment-replies-toggle">
+                                      {repliesExpanded ? "Hide" : "Show"}
+                                    </span>
+                                  </button>
+                                  {repliesExpanded ? (
+                                    <div className="watch-comment-replies-list">
+                                      {visibleReplies.map((reply) => (
+                                        <article className="watch-comment-reply" key={reply.id}>
+                                          <span className="comment-avatar is-reply-avatar">
+                                            <AvatarImage
+                                              src={null}
+                                              alt={reply.author_name}
+                                              seed={`${reply.id}-${reply.author_name}`}
+                                              fallbackText={reply.author_name}
+                                            />
+                                          </span>
+                                          <div className="watch-comment-reply-copy">
+                                            <strong>{reply.author_name}</strong>
+                                            <p>{reply.body}</p>
+                                          </div>
+                                        </article>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : null}
                             </div>
-                          </div>
-                        </article>
-                      ))
+                          </article>
+                        );
+                      })
                     )
                   ) : totalComments.length === 0 ? (
                     <p className="muted-copy">No synced comments yet.</p>
@@ -2731,24 +2834,32 @@ export function VideoPage({
               </section>
             ) : null}
 
-            {(data.suggested_total ?? data.suggested?.length ?? 0) > 0 ? (
-              <section className="watch-sidebar-section">
-                <div className="watch-filter-row">
-                  <button
-                    className={`topic-chip ${suggestionFilter === "suggested" ? "active" : ""}`}
-                    onClick={() => setSuggestionFilter("suggested")}
-                    type="button"
-                  >
-                    Suggested
-                  </button>
-                  <button
-                    className={`topic-chip ${suggestionFilter === "related" ? "active" : ""}`}
-                    onClick={() => setSuggestionFilter("related")}
-                    type="button"
-                  >
-                    Related
-                  </button>
+            <section className="watch-sidebar-section">
+              <div className="watch-filter-row">
+                <button
+                  className={`topic-chip ${suggestionFilter === "suggested" ? "active" : ""}`}
+                  onClick={() => setSuggestionFilter("suggested")}
+                  type="button"
+                >
+                  Suggested
+                </button>
+                <button
+                  className={`topic-chip ${suggestionFilter === "related" ? "active" : ""}`}
+                  onClick={() => setSuggestionFilter("related")}
+                  type="button"
+                >
+                  Explore
+                </button>
+              </div>
+              {showSuggestionLoadingState ? (
+                <div className="suggestion-stack">
+                  {Array.from({ length: 5 }).map((_, index) => (
+                    <WatchSuggestionSkeletonRow
+                      key={`suggestion-skeleton-${suggestionFilter}-${index}`}
+                    />
+                  ))}
                 </div>
+              ) : visibleSuggestedItems.length ? (
                 <div className="suggestion-stack">
                   {visibleSuggestedItems.map((item: any) => (
                     <WatchSuggestionRow
@@ -2758,11 +2869,10 @@ export function VideoPage({
                       profile={profile}
                     />
                   ))}
-                  {activeSuggestionFeed.loadingInitial ||
-                  activeSuggestionFeed.loadingMore
-                    ? Array.from({ length: 5 }).map((_, index) => (
+                  {activeSuggestionFeed.loadingMore
+                    ? Array.from({ length: 2 }).map((_, index) => (
                         <WatchSuggestionSkeletonRow
-                          key={`suggestion-skeleton-${suggestionFilter}-${index}`}
+                          key={`suggestion-more-${suggestionFilter}-${index}`}
                         />
                       ))
                     : null}
@@ -2774,8 +2884,16 @@ export function VideoPage({
                     />
                   ) : null}
                 </div>
-              </section>
-            ) : null}
+              ) : (
+                <WatchSuggestionEmptyState
+                  message={
+                    suggestionFilter === "suggested"
+                      ? "Nothing to suggest! You've won!"
+                      : "Nothing to explore! You've seen it all!"
+                  }
+                />
+              )}
+            </section>
           </aside>
         </div>
       </section>

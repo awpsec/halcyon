@@ -65,6 +65,7 @@ export type LibraryStorage = {
 export type Preferences = {
   theme: "light" | "dark";
   autoplay: boolean;
+  captionsEnabled: boolean;
   preferMpv: boolean;
   mousewheelVolumeControl: boolean;
   density: "relaxed" | "comfortable" | "compact";
@@ -206,15 +207,18 @@ export type SyncSettings = {
   id: number;
   automatic_detection_enabled: boolean;
   automatic_sync_enabled: boolean;
+  subtitle_generation_enabled: boolean;
   scan_interval_seconds: number;
   allow_fallback_art: boolean;
   prefer_high_res_banners: boolean;
   live_tab_enabled: boolean;
   live_monitored_channel_ids: number[];
   comment_limit: number;
+  max_replies_per_comment: number;
   requests_per_second: number;
   last_library_sync_at: string | null;
   last_live_sync_at: string | null;
+  last_subtitle_sync_at: string | null;
   youtube_api_key_configured: boolean;
   youtube_api_quota_daily_limit: number;
   youtube_api_quota_used_units: number;
@@ -543,8 +547,9 @@ export const api = {
   updateMetadataOverride: (payload: { target_type: string; target_id: number; payload: Record<string, unknown> }) =>
     request("/api/admin/metadata-overrides", { method: "POST", body: JSON.stringify(payload) }),
   syncSettings: () => request<SyncSettings>("/api/sync/settings"),
-  updateSyncSettings: (payload: { automatic_detection_enabled: boolean; automatic_sync_enabled: boolean; scan_interval_seconds: number; allow_fallback_art: boolean; prefer_high_res_banners: boolean; live_tab_enabled: boolean; live_monitored_channel_ids: number[]; comment_limit: number; requests_per_second: number; youtube_api_key?: string | null; clear_youtube_api_key?: boolean }) =>
+  updateSyncSettings: (payload: { automatic_detection_enabled: boolean; automatic_sync_enabled: boolean; subtitle_generation_enabled: boolean; scan_interval_seconds: number; allow_fallback_art: boolean; prefer_high_res_banners: boolean; live_tab_enabled: boolean; live_monitored_channel_ids: number[]; comment_limit: number; max_replies_per_comment: number; requests_per_second: number; youtube_api_key?: string | null; clear_youtube_api_key?: boolean }) =>
     request<SyncSettings>("/api/sync/settings", { method: "PUT", body: JSON.stringify(payload) }),
+  syncSubtitles: () => request("/api/sync/subtitles", { method: "POST" }),
   retentionSettings: () => request<RetentionOverview>("/api/retention/settings"),
   updateRetentionSettings: (payload: {
     enabled: boolean;

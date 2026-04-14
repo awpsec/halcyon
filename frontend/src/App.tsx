@@ -111,6 +111,7 @@ function AppRoutes() {
     const defaults: Preferences = {
       theme: "dark",
       autoplay: true,
+      captionsEnabled: false,
       preferMpv: false,
       mousewheelVolumeControl: true,
       density: "comfortable",
@@ -357,7 +358,18 @@ function AppRoutes() {
             element={<SettingsPage profile={profile} preferences={preferences} onPreferencesChange={setPreferences} onProfileChange={handleProfileChange} />}
           />
           <Route path="/sync-review" element={profile?.is_admin ? <SyncReviewPage /> : <Navigate to="/" replace />} />
-          <Route path="/video/:videoId" element={<VideoPage profile={profile} preferences={preferences} />} />
+          <Route
+            path="/video/:videoId"
+            element={
+              <VideoPage
+                profile={profile}
+                preferences={preferences}
+                onCaptionsPreferenceChange={(enabled) =>
+                  setPreferences((current) => ({ ...current, captionsEnabled: enabled }))
+                }
+              />
+            }
+          />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

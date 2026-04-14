@@ -463,12 +463,14 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
   const [syncDraft, setSyncDraft] = useState({
     automatic_detection_enabled: true,
     automatic_sync_enabled: false,
+    subtitle_generation_enabled: false,
     scan_interval_seconds: 30,
     allow_fallback_art: false,
     prefer_high_res_banners: false,
     live_tab_enabled: true,
     live_monitored_channel_ids: [] as number[],
     comment_limit: 100,
+    max_replies_per_comment: 3,
     requests_per_second: 3,
     youtube_api_key: "",
   });
@@ -505,6 +507,16 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
       estimated: syncState.data?.youtube_api_quota_estimated ?? true,
     };
   }, [syncState.data]);
+  const subtitleBackfillActive = useMemo(
+    () =>
+      Boolean(
+        (jobsState.data ?? []).some(
+          (item: { scope?: string; status?: string }) =>
+            item.scope === "subtitles" && (item.status === "pending" || item.status === "running"),
+        ),
+      ),
+    [jobsState.data],
+  );
   const [savingAccount, setSavingAccount] = useState(false);
   const [scanPending, setScanPending] = useState(false);
   const [syncPending, setSyncPending] = useState(false);
@@ -644,12 +656,14 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
     setSyncDraft({
       automatic_detection_enabled: syncState.data.automatic_detection_enabled ?? true,
       automatic_sync_enabled: syncState.data.automatic_sync_enabled,
+      subtitle_generation_enabled: syncState.data.subtitle_generation_enabled ?? false,
       scan_interval_seconds: syncState.data.scan_interval_seconds ?? 30,
       allow_fallback_art: syncState.data.allow_fallback_art ?? false,
       prefer_high_res_banners: syncState.data.prefer_high_res_banners ?? false,
       live_tab_enabled: syncState.data.live_tab_enabled ?? true,
       live_monitored_channel_ids: syncState.data.live_monitored_channel_ids ?? [],
       comment_limit: syncState.data.comment_limit,
+      max_replies_per_comment: syncState.data.max_replies_per_comment ?? 3,
       requests_per_second: syncState.data.requests_per_second ?? 3,
       youtube_api_key: "",
     });
@@ -1222,12 +1236,14 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
       setSyncDraft({
         automatic_detection_enabled: next.automatic_detection_enabled ?? true,
         automatic_sync_enabled: next.automatic_sync_enabled,
+        subtitle_generation_enabled: next.subtitle_generation_enabled ?? false,
         scan_interval_seconds: next.scan_interval_seconds ?? 30,
         allow_fallback_art: next.allow_fallback_art ?? false,
         prefer_high_res_banners: next.prefer_high_res_banners ?? false,
         live_tab_enabled: next.live_tab_enabled ?? true,
         live_monitored_channel_ids: next.live_monitored_channel_ids ?? [],
         comment_limit: next.comment_limit,
+        max_replies_per_comment: next.max_replies_per_comment ?? 3,
         requests_per_second: next.requests_per_second ?? 3,
         youtube_api_key: "",
       });
@@ -1966,6 +1982,37 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                     <span className="switch-slider" />
                   </button>
                 </div>
+              <div className="switch-row">
+                <div className="settings-copy">
+                  <div className="settings-label-row">
+                    <strong
+                      className={settingLabelClass("Generate AI subtitles for newly onboarded videos in the background. Existing caption files are always preferred over generated ones.")}
+                      data-tooltip="Generate AI subtitles for newly onboarded videos in the background. Existing caption files are always preferred over generated ones."
+                      tabIndex={0}
+                    >
+                      Generate subtitles during onboarding
+                    </strong>
+                  </div>
+                  <small className="muted-copy">
+                    {syncState.data?.last_subtitle_sync_at
+                      ? `Last subtitle pass ${formatRelativeDate(syncState.data.last_subtitle_sync_at) ?? "recently"}`
+                      : "Uses the bundled Whisper sidecar and writes .vtt files next to videos that do not already have captions. Turning this on also backfills older videos automatically."}
+                  </small>
+                </div>
+                  <button
+                    type="button"
+                    className={`switch switch-button ${syncDraft.subtitle_generation_enabled ? "is-on" : ""}`}
+                    role="switch"
+                    aria-checked={syncDraft.subtitle_generation_enabled}
+                    aria-label="Toggle subtitle generation during onboarding"
+                    onClick={() => {
+                      setSyncDraft((current) => ({ ...current, subtitle_generation_enabled: !current.subtitle_generation_enabled }));
+                      setSyncDirty(true);
+                    }}
+                  >
+                    <span className="switch-slider" />
+                  </button>
+                </div>
                 <label className="settings-field settings-subfield-block">
                   <span className={settingLabelClass("How often halcyon polls selected folders for new, changed, or removed files. Lower values increase disk activity. Default is 30 seconds.")} data-tooltip="How often halcyon polls selected folders for new, changed, or removed files. Lower values increase disk activity. Default is 30 seconds." tabIndex={0}>
                     halcyon scan interval
@@ -2197,10 +2244,14 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                     </span>
                   </div>
                 </div>
-                <div className="settings-inline-grid settings-inline-grid-fields">
+                <div className="settings-inline-grid settings-inline-grid-fields settings-sync-inline-grid">
                   <label className="settings-field">
                     <span>Max Comments</span>
                     <input type="number" min={1} max={100} value={syncDraft.comment_limit} onChange={(event) => { setSyncDraft((current) => ({ ...current, comment_limit: Number(event.target.value) || 1 })); setSyncDirty(true); }} />
+                  </label>
+                  <label className="settings-field">
+                    <span className={settingLabelClass("Replies are pulled from the inline YouTube thread payload and capped at five per top-level comment.")} data-tooltip="Replies are pulled from the inline YouTube thread payload and capped at five per top-level comment." tabIndex={0}>Max Replies</span>
+                    <input type="number" min={0} max={5} value={syncDraft.max_replies_per_comment} onChange={(event) => { setSyncDraft((current) => ({ ...current, max_replies_per_comment: Math.max(0, Math.min(5, Number(event.target.value) || 0)) })); setSyncDirty(true); }} />
                   </label>
                   <label className="settings-field">
                     <span className={settingLabelClass("Going above the default can cause rate limits on your network.")} data-tooltip="Going above the default can cause rate limits on your network." tabIndex={0}>Requests/sec</span>
@@ -2211,9 +2262,15 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                   <button className="ghost-button settings-utility-button" disabled={!syncDirty || syncSaving} onClick={() => void saveSyncSettings()}>
                     {syncSaving ? "Saving..." : "Save sync settings"}
                   </button>
-                  <small className="muted-copy">
-                    {syncDirty ? "Unsaved changes" : `Last library sync ${formatRelativeDate(syncState.data?.last_library_sync_at) ?? "never"}`}
-                  </small>
+                  {syncDirty || subtitleBackfillActive || syncDraft.subtitle_generation_enabled ? (
+                    <small className="muted-copy">
+                      {syncDirty
+                        ? "Unsaved changes"
+                        : subtitleBackfillActive
+                          ? "Backfilling subtitles for existing videos..."
+                          : "Subtitle generation is enabled for both new and previously indexed videos."}
+                    </small>
+                  ) : null}
                 </div>
               </div>
           </section>
