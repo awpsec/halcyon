@@ -1517,8 +1517,8 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
     if (!drag || !node || drag.pointerId !== event.pointerId) return;
 
     const rect = node.getBoundingClientRect();
-    const movableWidth = Math.max(1, ((drag.startZoom - 1) * rect.width) / 2);
-    const movableHeight = Math.max(1, ((drag.startZoom - 1) * rect.height) / 2);
+    const movableWidth = Math.max(1, rect.width / 2);
+    const movableHeight = Math.max(1, rect.height / 2);
     const deltaX = event.clientX - drag.startX;
     const deltaY = event.clientY - drag.startY;
 
@@ -2280,13 +2280,13 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                   <button className="ghost-button settings-utility-button" disabled={!syncDirty || syncSaving} onClick={() => void saveSyncSettings()}>
                     {syncSaving ? "Saving..." : "Save sync settings"}
                   </button>
-                  {syncDirty || subtitleBackfillActive || syncDraft.subtitle_generation_enabled ? (
+                  {syncDirty || subtitleBackfillActive ? (
                     <small className="muted-copy">
                       {syncDirty
                         ? "Unsaved changes"
                         : subtitleBackfillActive
                           ? (subtitleBackfillLabel ?? "Backfilling subtitles for existing videos...")
-                          : "Subtitle generation is enabled for both new and previously indexed videos."}
+                          : null}
                     </small>
                   ) : null}
                 </div>
