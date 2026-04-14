@@ -80,6 +80,7 @@ YOUTUBE_API_QUOTA_COSTS = {
     "playlists": 1,
     "playlistItems": 1,
     "commentThreads": 1,
+    "comments": 1,
 }
 LIVE_RETENTION_STATUSES = ("staged", "error")
 TEMP_DOWNLOAD_MARKERS = (
@@ -1847,6 +1848,44 @@ async def fetch_top_comments(
     return items[: max(1, min(limit, 100))]
 
 
+async def fetch_comment_replies(
+    client: httpx.AsyncClient,
+    api_key: str,
+    youtube_parent_comment_id: str,
+    limit: int | None,
+    requests_per_second: int,
+) -> list[dict]:
+    items: list[dict] = []
+    next_page_token: str | None = None
+    remaining = None if limit is None else max(1, int(limit))
+    while remaining is None or remaining > 0:
+        page_size = 100 if remaining is None else min(remaining, 100)
+        response = await throttled_get(
+            client,
+            f"{YOUTUBE_API_BASE}/comments",
+            params={
+                "part": "snippet",
+                "parentId": youtube_parent_comment_id,
+                "maxResults": page_size,
+                "pageToken": next_page_token,
+                "textFormat": "plainText",
+                "key": api_key,
+            },
+            requests_per_second=requests_per_second,
+        )
+        if response.is_error:
+            return items
+        payload = response.json()
+        batch = payload.get("items", [])
+        items.extend(batch)
+        if remaining is not None:
+            remaining -= len(batch)
+        next_page_token = payload.get("nextPageToken")
+        if not next_page_token or not batch:
+            break
+    return items if limit is None else items[: max(1, int(limit))]
+
+
 async def fetch_channel_details(client: httpx.AsyncClient, api_key: str, youtube_channel_id: str, requests_per_second: int) -> dict | None:
     response = await throttled_get(
         client,
@@ -2733,7 +2772,7 @@ async def apply_sync_item(
                     )
 
     if match.status == "matched" and api_key:
-        capped_reply_limit = max(0, min(max_replies_per_comment, 5))
+        reply_limit = max(0, int(max_replies_per_comment))
         db.query(YouTubeCommentReplySnapshot).filter(YouTubeCommentReplySnapshot.youtube_video_id == video_id).delete()
         db.query(YouTubeCommentSnapshot).filter(YouTubeCommentSnapshot.youtube_video_id == video_id).delete()
         for comment_item in await fetch_top_comments(client, api_key, video_id, max(1, min(comment_limit, 100)), requests_per_second):
@@ -2750,9 +2789,47 @@ async def apply_sync_item(
             )
             db.add(stored_comment)
             db.flush()
-            if capped_reply_limit > 0:
-                inline_replies = ((comment_item.get("replies", {}) or {}).get("comments", []) or [])[:capped_reply_limit]
-                for index, reply_item in enumerate(inline_replies):
+            if reply_limit > 0:
+                inline_replies = ((comment_item.get("replies", {}) or {}).get("comments", []) or [])
+                all_reply_items: list[dict] = []
+                seen_reply_ids: set[str] = set()
+                desired_reply_count = min(reply_limit, int(stored_comment.reply_count or 0))
+
+                for reply_item in inline_replies:
+                    reply_id = str(reply_item.get("id") or "").strip()
+                    if reply_id and reply_id in seen_reply_ids:
+                        continue
+                    if reply_id:
+                        seen_reply_ids.add(reply_id)
+                    all_reply_items.append(reply_item)
+                    if desired_reply_count and len(all_reply_items) >= desired_reply_count:
+                        break
+
+                top_level_comment_id = str(top_level_comment.get("id") or "").strip()
+                if (
+                    top_level_comment_id
+                    and desired_reply_count > len(all_reply_items)
+                    and int(stored_comment.reply_count or 0) > len(all_reply_items)
+                ):
+                    extra_limit = desired_reply_count - len(all_reply_items)
+                    extra_replies = await fetch_comment_replies(
+                        client,
+                        api_key,
+                        top_level_comment_id,
+                        extra_limit,
+                        requests_per_second,
+                    )
+                    for reply_item in extra_replies:
+                        reply_id = str(reply_item.get("id") or "").strip()
+                        if reply_id and reply_id in seen_reply_ids:
+                            continue
+                        if reply_id:
+                            seen_reply_ids.add(reply_id)
+                        all_reply_items.append(reply_item)
+                        if len(all_reply_items) >= desired_reply_count:
+                            break
+
+                for index, reply_item in enumerate(all_reply_items[:desired_reply_count]):
                     reply = reply_item.get("snippet", {}) or {}
                     db.add(
                         YouTubeCommentReplySnapshot(

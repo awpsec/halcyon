@@ -3099,7 +3099,7 @@ async def update_sync_settings(
     settings_row.allow_fallback_art = payload.allow_fallback_art
     settings_row.prefer_high_res_banners = payload.prefer_high_res_banners
     settings_row.comment_limit = payload.comment_limit
-    settings_row.max_replies_per_comment = max(0, min(payload.max_replies_per_comment, 5))
+    settings_row.max_replies_per_comment = max(0, int(payload.max_replies_per_comment))
     settings_row.requests_per_second = max(1, min(payload.requests_per_second, 10))
     if payload.clear_youtube_api_key:
         settings_row.youtube_api_key = None

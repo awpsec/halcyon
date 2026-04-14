@@ -2250,8 +2250,8 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                     <input type="number" min={1} max={100} value={syncDraft.comment_limit} onChange={(event) => { setSyncDraft((current) => ({ ...current, comment_limit: Number(event.target.value) || 1 })); setSyncDirty(true); }} />
                   </label>
                   <label className="settings-field">
-                    <span className={settingLabelClass("Replies are pulled from the inline YouTube thread payload and capped at five per top-level comment.")} data-tooltip="Replies are pulled from the inline YouTube thread payload and capped at five per top-level comment." tabIndex={0}>Max Replies</span>
-                    <input type="number" min={0} max={5} value={syncDraft.max_replies_per_comment} onChange={(event) => { setSyncDraft((current) => ({ ...current, max_replies_per_comment: Math.max(0, Math.min(5, Number(event.target.value) || 0)) })); setSyncDirty(true); }} />
+                    <span className={settingLabelClass("How many replies to pull per top-level comment. Higher values may require extra YouTube API requests. Use 0 to skip replies.")} data-tooltip="How many replies to pull per top-level comment. Higher values may require extra YouTube API requests. Use 0 to skip replies." tabIndex={0}>Max Replies</span>
+                    <input type="number" min={0} value={syncDraft.max_replies_per_comment} onChange={(event) => { setSyncDraft((current) => ({ ...current, max_replies_per_comment: Math.max(0, Number(event.target.value) || 0) })); setSyncDirty(true); }} />
                   </label>
                   <label className="settings-field">
                     <span className={settingLabelClass("Going above the default can cause rate limits on your network.")} data-tooltip="Going above the default can cause rate limits on your network." tabIndex={0}>Requests/sec</span>

@@ -10,7 +10,7 @@ import app.services.background as background_service
 import app.services.sync as sync_service
 from app.core.config import Settings
 from app.models.base import Base
-from app.models.entities import Channel, LibraryRoot, RetentionItem, SelectedFolder, Series, SyncJob, SyncSettings, UserProfile, Video, VideoFile, WatchProgress, YouTubeChannelSnapshot, YouTubeMatch, YouTubeVideoSnapshot
+from app.models.entities import Channel, LibraryRoot, RetentionItem, SelectedFolder, Series, SyncJob, SyncSettings, UserProfile, Video, VideoFile, WatchProgress, YouTubeChannelSnapshot, YouTubeCommentReplySnapshot, YouTubeCommentSnapshot, YouTubeMatch, YouTubeVideoSnapshot
 from app.services.media import fingerprint_file
 from app.services.scanner import scan_selected_folders
 from app.services.sync import apply_sync_item, auto_organize_channel_files, choose_playlist_series_title, fetch_channel_about_details, sync_scope, sync_video
@@ -1669,3 +1669,147 @@ def test_apply_sync_item_clears_stale_duplicate_match_before_assigning(tmp_path:
 
         assert len(surviving_matches) == 1
         assert surviving_matches[0].video_id == target_video.id
+
+
+def test_apply_sync_item_fetches_replies_beyond_inline_batch(tmp_path: Path, monkeypatch):
+    def fake_settings() -> Settings:
+        return Settings(
+            mounted_roots=[],
+            config_dir=tmp_path / "config",
+            cache_dir=tmp_path / "cache",
+            background_tasks_enabled=False,
+        )
+
+    async def fake_ryd(*args, **kwargs):
+        return None
+
+    async def fake_channel_about(*args, **kwargs):
+        return None
+
+    async def fake_fetch_top_comments(*args, **kwargs):
+        return [
+            {
+                "snippet": {
+                    "totalReplyCount": 7,
+                    "topLevelComment": {
+                        "id": "top-comment-1",
+                        "snippet": {
+                            "authorDisplayName": "Top Commenter",
+                            "textDisplay": "Top level comment",
+                            "likeCount": 9,
+                            "publishedAt": "2026-04-14T12:00:00Z",
+                        },
+                    },
+                },
+                "replies": {
+                    "comments": [
+                        {
+                            "id": f"reply-{index}",
+                            "snippet": {
+                                "authorDisplayName": f"Reply {index}",
+                                "textDisplay": f"Reply body {index}",
+                                "likeCount": index,
+                                "publishedAt": "2026-04-14T12:00:00Z",
+                            },
+                        }
+                        for index in range(1, 6)
+                    ]
+                },
+            }
+        ]
+
+    async def fake_fetch_comment_replies(*args, **kwargs):
+        return [
+            {
+                "id": f"reply-{index}",
+                "snippet": {
+                    "authorDisplayName": f"Reply {index}",
+                    "textDisplay": f"Reply body {index}",
+                    "likeCount": index,
+                    "publishedAt": "2026-04-14T12:00:00Z",
+                },
+            }
+            for index in range(1, 8)
+        ]
+
+    monkeypatch.setattr(sync_service, "get_settings", fake_settings)
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_about)
+    monkeypatch.setattr(sync_service, "fetch_top_comments", fake_fetch_top_comments)
+    monkeypatch.setattr(sync_service, "fetch_comment_replies", fake_fetch_comment_replies)
+    monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
+
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="Reply test video",
+            slug="reply-test-video",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=900,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(tmp_path / "reply-test.mp4"),
+                relative_path="reply-test.mp4",
+                file_size=123,
+                fingerprint="c" * 64,
+            )
+        )
+        db.commit()
+        db.refresh(video)
+
+        item = {
+            "id": "reply-test-yt",
+            "snippet": {
+                "title": "Reply test video",
+                "channelTitle": "Reply Channel",
+                "channelId": "reply-channel-id",
+                "publishedAt": "2026-04-14T12:00:00Z",
+                "description": "Reply test",
+                "thumbnails": {},
+            },
+            "statistics": {
+                "viewCount": "1234",
+                "likeCount": "56",
+            },
+            "_waytube_duration_seconds": 900,
+            "_waytube_source": "watch-page",
+        }
+
+        async def run() -> None:
+            async with httpx.AsyncClient() as client:
+                await apply_sync_item(
+                    db,
+                    video,
+                    item,
+                    comment_limit=25,
+                    max_replies_per_comment=7,
+                    requests_per_second=3,
+                    client=client,
+                    api_key="test-api-key",
+                    confidence=0.93,
+                    reasons=["title"],
+                    status="matched",
+                )
+
+        asyncio.run(run())
+
+        stored_comment = db.scalar(select(YouTubeCommentSnapshot).where(YouTubeCommentSnapshot.youtube_video_id == "reply-test-yt"))
+        stored_replies = db.scalars(
+            select(YouTubeCommentReplySnapshot)
+            .where(YouTubeCommentReplySnapshot.youtube_video_id == "reply-test-yt")
+            .order_by(YouTubeCommentReplySnapshot.position.asc(), YouTubeCommentReplySnapshot.id.asc())
+        ).all()
+
+        assert stored_comment is not None
+        assert stored_comment.reply_count == 7
+        assert len(stored_replies) == 7
+        assert [reply.youtube_reply_id for reply in stored_replies] == [f"reply-{index}" for index in range(1, 8)]
