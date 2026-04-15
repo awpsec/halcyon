@@ -336,7 +336,51 @@ def test_fetch_watch_page_candidate_keeps_full_timestamp_publish_at(monkeypatch)
     assert result["snippet"]["publishedAt"] == "2026-04-09T04:34:45-07:00"
 
 
-def test_fetch_live_stream_candidates_web_preserves_weak_watch_page_candidates(monkeypatch):
+def test_fetch_live_stream_candidates_web_rejects_unverified_watch_page_candidates(monkeypatch):
+    class DummyResponse:
+        def __init__(self, url: str):
+            self.text = ""
+            self.is_error = False
+            self.url = url
+
+    async def fake_throttled_get(*args, **kwargs):
+        return DummyResponse("https://www.youtube.com/watch?v=abc123def45")
+
+    async def fake_fetch_watch_page_candidate(*args, **kwargs):
+        return {
+            "id": "abc123def45",
+            "snippet": {
+                "title": "Madagascar Best Moments",
+                "channelTitle": "Madagascar Cartoons",
+                "channelId": "channel-madagascar",
+                "description": None,
+                "publishedAt": None,
+                "thumbnails": {},
+            },
+            "statistics": {},
+            "_waytube_duration_seconds": None,
+            "_waytube_source": "watch-page",
+        }
+
+    monkeypatch.setattr(sync_service, "throttled_get", fake_throttled_get)
+    monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_live_stream_candidates_web(
+                client,
+                "channel-pgl",
+                3,
+                channel_name="PGL",
+            )
+
+    checked, items = asyncio.run(run())
+
+    assert checked is True
+    assert items == []
+
+
+def test_fetch_live_stream_candidates_web_accepts_matching_channel_title_when_id_is_sparse(monkeypatch):
     class DummyResponse:
         def __init__(self, url: str):
             self.text = ""
@@ -351,7 +395,7 @@ def test_fetch_live_stream_candidates_web_preserves_weak_watch_page_candidates(m
             "id": "abc123def45",
             "snippet": {
                 "title": "",
-                "channelTitle": None,
+                "channelTitle": "PGL",
                 "channelId": None,
                 "description": None,
                 "publishedAt": None,

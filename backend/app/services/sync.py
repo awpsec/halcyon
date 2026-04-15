@@ -2416,6 +2416,23 @@ def extract_live_video_ids_from_html(html: str) -> list[str]:
     return video_ids
 
 
+def _live_candidate_matches_monitored_channel(
+    candidate: dict[str, Any],
+    *,
+    youtube_channel_id: str,
+    channel_name: str | None,
+) -> bool:
+    snippet = candidate.get("snippet", {}) or {}
+    candidate_channel_id = str(snippet.get("channelId") or "").strip()
+    if candidate_channel_id and candidate_channel_id == str(youtube_channel_id):
+        return True
+
+    candidate_channel_title = clean_display_title(snippet.get("channelTitle") or "")
+    if candidate_channel_title and channel_name:
+        return resolve_display_name(channel_name, candidate_channel_title) == candidate_channel_title
+    return False
+
+
 async def fetch_live_stream_candidates_web(
     client: httpx.AsyncClient,
     youtube_channel_id: str,
@@ -2473,7 +2490,21 @@ async def fetch_live_stream_candidates_web(
             )
             continue
         snippet = candidate.setdefault("snippet", {})
-        snippet["channelId"] = snippet.get("channelId") or youtube_channel_id
+        if not _live_candidate_matches_monitored_channel(
+            candidate,
+            youtube_channel_id=youtube_channel_id,
+            channel_name=channel_name,
+        ):
+            logger.info(
+                "Live web lookup candidate rejected youtube_channel_id=%s video_id=%s reason=channel-mismatch candidate_channel_id=%s candidate_channel_title=%s",
+                youtube_channel_id,
+                youtube_video_id,
+                snippet.get("channelId"),
+                snippet.get("channelTitle"),
+            )
+            continue
+        if not snippet.get("channelId"):
+            snippet["channelId"] = youtube_channel_id
         if channel_name and not snippet.get("channelTitle"):
             snippet["channelTitle"] = channel_name
         if not snippet.get("title"):
