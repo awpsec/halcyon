@@ -1654,8 +1654,12 @@ def build_search_queries(
     title_tokens = tokenize_text(video.title)
     compact_title = " ".join(title_tokens[:12]) if title_tokens else normalized_title
     queries = []
-    hinted_channels = [hint.strip() for hint in (channel_hints or []) if hint and hint.strip()]
-    if include_channel and video.channel and video.channel.name:
+    hinted_channels = [
+        hint.strip()
+        for hint in (channel_hints or [])
+        if hint and hint.strip() and not is_generic_channel_name(hint)
+    ]
+    if include_channel and video.channel and video.channel.name and not is_generic_channel_name(video.channel.name):
         queries.append(f"{video.channel.name} {raw_title}".strip())
         queries.append(f"{video.channel.name} {compact_title}".strip())
         queries.append(f"\"{compact_title}\" {video.channel.name}".strip())
