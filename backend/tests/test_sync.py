@@ -250,6 +250,59 @@ def test_fetch_live_stream_candidates_web_skips_weak_watch_page_candidates(monke
     assert items == []
 
 
+def test_hydrate_candidate_from_watch_page_preserves_existing_channel_metadata_when_watch_page_is_sparse(monkeypatch):
+    async def fake_fetch_watch_page_candidate(*args, **kwargs):
+        return {
+            "id": "abc123def45",
+            "snippet": {
+                "title": "Can Jynxzi Find 60 Trash Talking Props? (1v60)",
+                "channelTitle": None,
+                "channelId": None,
+                "description": "Hydrated description",
+                "publishedAt": None,
+                "thumbnails": {},
+            },
+            "statistics": {
+                "viewCount": None,
+                "likeCount": None,
+            },
+            "_waytube_duration_seconds": None,
+            "_waytube_source": "watch-page",
+        }
+
+    monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+
+    item = {
+        "id": "abc123def45",
+        "snippet": {
+            "title": "Can Jynxzi Find 60 Trash Talking Props? (1v60)",
+            "channelTitle": "Jynxzi",
+            "channelId": "channel-jynxzi",
+            "description": None,
+            "publishedAt": "2026-04-14T12:00:00Z",
+            "thumbnails": {"high": {"url": "https://i.ytimg.com/vi/abc123def45/hqdefault.jpg"}},
+        },
+        "statistics": {
+            "viewCount": 14845,
+        },
+        "_waytube_duration_seconds": 36 * 60 + 39,
+        "_waytube_source": "youtube-web-search",
+    }
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.hydrate_candidate_from_watch_page(client, item, 3)
+
+    result = asyncio.run(run())
+
+    assert result["snippet"]["channelTitle"] == "Jynxzi"
+    assert result["snippet"]["channelId"] == "channel-jynxzi"
+    assert result["snippet"]["description"] == "Hydrated description"
+    assert result["snippet"]["publishedAt"] == "2026-04-14T12:00:00Z"
+    assert result["statistics"]["viewCount"] == 14845
+    assert result["_waytube_duration_seconds"] == 36 * 60 + 39
+
+
 def test_slugify_collapses_apostrophes_without_extra_dash() -> None:
     assert slugify("Moore's Law is Dead") == "moores-law-is-dead"
     assert slugify("Moore’s Law is Dead") == "moores-law-is-dead"
@@ -692,6 +745,151 @@ def test_sync_video_skips_generic_channel_name_in_fallback_queries_without_api(t
         assert captured_queries
         assert captured_queries[0] == "Can Jynxzi Find 60 Trash Talking Props? (1v60)"
         assert all("Offline library" not in query for query in captured_queries)
+
+
+def test_sync_video_ignores_generic_channel_bucket_matches_without_api(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        generic_channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(generic_channel)
+        db.flush()
+
+        matched_path = tmp_path / "library" / "matched.mp4"
+        matched_path.parent.mkdir(parents=True, exist_ok=True)
+        matched_path.write_bytes(b"matched")
+        matched_video = Video(
+            title="Existing matched upload",
+            slug="existing-matched-upload",
+            channel_id=generic_channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=900,
+            published_at=datetime(2026, 4, 14),
+            is_available=True,
+        )
+        db.add(matched_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=matched_video.id,
+                absolute_path=str(matched_path),
+                relative_path="matched.mp4",
+                file_size=matched_path.stat().st_size,
+                fingerprint="h" * 64,
+            )
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=matched_video.id,
+                youtube_video_id="knownasm123",
+                youtube_channel_id="channel-asmongold",
+                status="matched",
+                confidence=1.0,
+                reasons=["known-channel"],
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-asmongold",
+                title="Asmongold TV",
+            )
+        )
+
+        target_path = tmp_path / "library" / "target.mp4"
+        target_path.write_bytes(b"target")
+        target_video = Video(
+            title="Joe Rogan Experience #2483 - Spencer Pratt",
+            slug="joe-rogan-experience-2483-spencer-pratt",
+            channel_id=generic_channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=2 * 3600 + 34 * 60 + 23,
+            published_at=datetime(2026, 4, 14),
+            is_available=True,
+        )
+        db.add(target_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=target_video.id,
+                absolute_path=str(target_path),
+                relative_path="target.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="i" * 64,
+            )
+        )
+        db.commit()
+
+        captured_queries: list[str] = []
+        recent_channel_lookups: list[list[str]] = []
+
+        async def fake_fetch_recent_channel_upload_candidates_web(
+            client,
+            channel_ids,
+            requests_per_second,
+            status_callback=None,
+        ):
+            del client, requests_per_second, status_callback
+            recent_channel_lookups.append(list(channel_ids))
+            return []
+
+        async def fake_fetch_fallback_candidates(client, queries, requests_per_second, status_callback=None):
+            del client, requests_per_second, status_callback
+            captured_queries.extend(queries)
+            return [
+                {
+                    "id": "jre2483abc1",
+                    "snippet": {
+                        "title": "Joe Rogan Experience #2483 - Spencer Pratt",
+                        "channelTitle": "PowerfulJRE",
+                        "channelId": "channel-jre",
+                        "publishedAt": "2026-04-14T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 2 * 3600 + 34 * 60 + 23,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates_web", fake_fetch_recent_channel_upload_candidates_web)
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert result.youtube_channel_id == "channel-jre"
+        assert recent_channel_lookups == []
+        assert captured_queries
+        assert all("Asmongold TV" not in query for query in captured_queries)
 
 
 def test_sync_video_uses_series_neighbor_channel_hints_for_new_episode_without_api(tmp_path: Path, monkeypatch):

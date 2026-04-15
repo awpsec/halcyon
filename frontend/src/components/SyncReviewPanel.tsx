@@ -83,7 +83,10 @@ export function SyncReviewPanel({
                 <div className="sync-review-copy">
                   <div className="sync-review-title-row">
                     <strong>{item.video_title ?? "Unknown video"}</strong>
-                    <span className="sync-review-confidence">{formatConfidence(item.confidence)}</span>
+                    <span className="sync-review-confidence">
+                      {item.review_total > 0 ? `Candidate ${item.review_position} of ${item.review_total} · ` : ""}
+                      {formatConfidence(item.confidence)}
+                    </span>
                   </div>
                   <div className="sync-review-meta">
                     <span>Local channel: {item.channel_name ?? "Unknown channel"}</span>
@@ -125,7 +128,7 @@ export function SyncReviewPanel({
                     disabled={pendingAction !== null}
                     onClick={() => void runAction(rejectKey, () => api.unlinkMatch(item.id), "Match rejected")}
                   >
-                    {pendingAction === rejectKey ? "Rejecting..." : "Reject"}
+                    {pendingAction === rejectKey ? "Rejecting..." : "Reject candidate"}
                   </button>
                 </div>
                 <div className="sync-review-manual">

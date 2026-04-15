@@ -54,6 +54,7 @@ YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 GOOGLE_SEARCH_BASE = "https://www.google.com/search"
 YOUTUBE_WEB_SEARCH_BASE = "https://www.youtube.com/results"
 RETURN_YOUTUBE_DISLIKE_BASE = "https://returnyoutubedislikeapi.com/votes"
+REVIEW_CANDIDATE_LIMIT = 3
 logger = get_logger()
 _REQUEST_LOCK = asyncio.Lock()
 _SYNC_LOCK = asyncio.Lock()
@@ -2945,14 +2946,41 @@ async def hydrate_candidate_from_watch_page(
     )
     if not hydrated:
         return item
+    def merge_non_empty(base: dict | None, incoming: dict | None) -> dict:
+        merged = dict(base or {})
+        for key, value in (incoming or {}).items():
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, list) and not value:
+                continue
+            if isinstance(value, dict):
+                if not value:
+                    continue
+                existing = merged.get(key)
+                if isinstance(existing, dict):
+                    nested = dict(existing)
+                    for nested_key, nested_value in value.items():
+                        if nested_value is None:
+                            continue
+                        if isinstance(nested_value, str) and not nested_value.strip():
+                            continue
+                        if isinstance(nested_value, list) and not nested_value:
+                            continue
+                        if isinstance(nested_value, dict) and not nested_value:
+                            continue
+                        nested[nested_key] = nested_value
+                    merged[key] = nested
+                    continue
+            merged[key] = value
+        return merged
     merged = {
         **item,
         **hydrated,
     }
-    merged_snippet = dict(item.get("snippet", {}) or {})
-    merged_snippet.update(hydrated.get("snippet", {}) or {})
-    merged_statistics = dict(item.get("statistics", {}) or {})
-    merged_statistics.update(hydrated.get("statistics", {}) or {})
+    merged_snippet = merge_non_empty(item.get("snippet", {}) or {}, hydrated.get("snippet", {}) or {})
+    merged_statistics = merge_non_empty(item.get("statistics", {}) or {}, hydrated.get("statistics", {}) or {})
     merged["snippet"] = merged_snippet
     merged["statistics"] = merged_statistics
     merged["_waytube_duration_seconds"] = hydrated.get("_waytube_duration_seconds") or item.get("_waytube_duration_seconds")
@@ -2975,6 +3003,82 @@ def merge_candidate_items(existing: list[dict], incoming: list[dict]) -> list[di
     return existing
 
 
+def normalized_rejected_video_ids(match: YouTubeMatch | None) -> list[str]:
+    seen: list[str] = []
+    for youtube_video_id in (match.rejected_youtube_video_ids or []) if match else []:
+        normalized = str(youtube_video_id or "").strip()
+        if normalized and normalized not in seen:
+            seen.append(normalized)
+    return seen
+
+
+def serialize_review_candidate(item: dict, *, confidence: float, reasons: list[str]) -> dict:
+    snippet = item.get("snippet", {}) or {}
+    youtube_video_id = str(item.get("id") or "").strip()
+    youtube_channel_id = str(snippet.get("channelId") or "").strip() or None
+    youtube_title = clean_display_title(snippet.get("title") or "") or None
+    youtube_channel_title = clean_display_title(snippet.get("channelTitle") or "") or None
+    return {
+        "youtube_video_id": youtube_video_id,
+        "youtube_channel_id": youtube_channel_id,
+        "youtube_title": youtube_title,
+        "youtube_channel_title": youtube_channel_title,
+        "youtube_watch_url": f"https://www.youtube.com/watch?v={youtube_video_id}" if youtube_video_id else None,
+        "confidence": confidence,
+        "reasons": list(dict.fromkeys(reasons or [])),
+        "item": item,
+    }
+
+
+async def build_review_candidate_queue(
+    client: httpx.AsyncClient,
+    video: Video,
+    candidates: list[dict],
+    *,
+    requests_per_second: int,
+    channel_hints: list[str] | None = None,
+    rejected_video_ids: list[str] | None = None,
+    limit: int = REVIEW_CANDIDATE_LIMIT,
+    status_callback=None,
+) -> list[dict]:
+    scored: list[tuple[float, dict, list[str]]] = []
+    rejected = {candidate_id for candidate_id in (rejected_video_ids or []) if candidate_id}
+    for candidate in candidates:
+        youtube_video_id = str(candidate.get("id") or "").strip()
+        if not youtube_video_id or youtube_video_id in rejected:
+            continue
+        score, reasons = score_match(video, candidate, channel_hints=channel_hints)
+        scored.append((score, candidate, reasons))
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    queue: list[dict] = []
+    seen_ids: set[str] = set()
+    for score, candidate, reasons in scored:
+        youtube_video_id = str(candidate.get("id") or "").strip()
+        if not youtube_video_id or youtube_video_id in seen_ids:
+            continue
+        hydrated = candidate
+        if candidate.get("_waytube_source") != "watch-page":
+            hydrated = await hydrate_candidate_from_watch_page(
+                client,
+                candidate,
+                requests_per_second,
+                status_callback=status_callback,
+            )
+        hydrated_score, hydrated_reasons = score_match(video, hydrated, channel_hints=channel_hints)
+        queue.append(
+            serialize_review_candidate(
+                hydrated,
+                confidence=hydrated_score,
+                reasons=hydrated_reasons,
+            )
+        )
+        seen_ids.add(youtube_video_id)
+        if len(queue) >= max(1, limit):
+            break
+    return queue
+
+
 async def apply_sync_item(
     db: Session,
     video: Video,
@@ -2992,6 +3096,8 @@ async def apply_sync_item(
     confidence: float = 1.0,
     reasons: list[str] | None = None,
     status: str = "matched",
+    review_candidates: list[dict] | None = None,
+    rejected_youtube_video_ids: list[str] | None = None,
 ) -> YouTubeMatch:
     snippet = item.get("snippet", {})
     statistics = item.get("statistics", {})
@@ -3034,6 +3140,8 @@ async def apply_sync_item(
     match.confidence = confidence
     match.reasons = reasons or []
     match.status = status
+    match.review_candidates = review_candidates or ([] if status != "review" else match.review_candidates or [])
+    match.rejected_youtube_video_ids = list(dict.fromkeys(rejected_youtube_video_ids or []))
     match.last_synced_at = datetime.utcnow()
     match.stale = False
 
@@ -3402,6 +3510,7 @@ async def sync_video(
     if status_callback:
         status_callback(phase="prepare", title=video.title, source="sync")
     existing_match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+    rejected_video_ids = normalized_rejected_video_ids(existing_match)
     if existing_match and existing_match.status == "matched" and existing_match.youtube_video_id:
         refresh_snapshot = db.scalar(
             select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == existing_match.youtube_video_id)
@@ -3526,14 +3635,23 @@ async def sync_video(
             return existing_match
 
     channel_ids: list[str] = []
-    if video.channel_id and not force:
+    use_local_channel_bucket = bool(
+        video.channel_id
+        and video.channel
+        and not is_generic_channel_name(video.channel.name)
+    )
+    if use_local_channel_bucket and not force:
         channel_ids.extend(
             [
                 item
                 for item in db.scalars(
                     select(YouTubeMatch.youtube_channel_id)
                     .join(Video, Video.id == YouTubeMatch.video_id)
-                    .where(Video.channel_id == video.channel_id, YouTubeMatch.youtube_channel_id.is_not(None))
+                    .where(
+                        Video.channel_id == video.channel_id,
+                        YouTubeMatch.status == "matched",
+                        YouTubeMatch.youtube_channel_id.is_not(None),
+                    )
                     .distinct()
                 ).all()
                 if item
@@ -3657,6 +3775,9 @@ async def sync_video(
     best_item = None
     reasons: list[str] = []
     for candidate in candidates:
+        youtube_video_id = str(candidate.get("id") or "").strip()
+        if youtube_video_id and youtube_video_id in rejected_video_ids:
+            continue
         score, candidate_reasons = score_match(video, candidate, channel_hints=channel_hints)
         if score > best_score:
             best_score = score
@@ -3689,6 +3810,22 @@ async def sync_video(
         match_status = "matched" if best_score >= generic_threshold or (known_channel_match and best_score >= 0.58) else "review"
         if hard_channel_mismatch:
             match_status = "review"
+        review_candidates = None
+        if match_status == "review":
+            review_candidates = await build_review_candidate_queue(
+                client,
+                video,
+                candidates,
+                requests_per_second=requests_per_second,
+                channel_hints=channel_hints,
+                rejected_video_ids=rejected_video_ids,
+                status_callback=status_callback,
+            )
+            if review_candidates:
+                active_candidate = review_candidates[0]
+                best_item = active_candidate["item"]
+                best_score = active_candidate["confidence"]
+                reasons = active_candidate["reasons"]
         return await apply_sync_item(
             db,
             video,
@@ -3704,6 +3841,8 @@ async def sync_video(
             confidence=best_score,
             reasons=reasons,
             status=match_status,
+            review_candidates=review_candidates,
+            rejected_youtube_video_ids=rejected_video_ids if match_status == "review" else [],
         )
     else:
         match = existing_match or ensure_youtube_match_row(db, video.id)
@@ -3739,10 +3878,16 @@ async def send_video_to_review(
         status_callback(phase="prepare", title=video.title, source="admin-review")
 
     existing_match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+    rejected_video_ids = normalized_rejected_video_ids(existing_match)
     api_error: YouTubeSyncError | None = None
     channel_ids: list[str] = []
+    use_local_channel_bucket = bool(
+        video.channel_id
+        and video.channel
+        and not is_generic_channel_name(video.channel.name)
+    )
 
-    if video.channel_id:
+    if use_local_channel_bucket:
         channel_ids.extend(
             [
                 item
@@ -3893,6 +4038,9 @@ async def send_video_to_review(
     best_item = None
     reasons: list[str] = []
     for candidate in candidates:
+        youtube_video_id = str(candidate.get("id") or "").strip()
+        if youtube_video_id and youtube_video_id in rejected_video_ids:
+            continue
         score, candidate_reasons = score_match(video, candidate, channel_hints=channel_hints)
         if score > best_score:
             best_score = score
@@ -3904,14 +4052,20 @@ async def send_video_to_review(
         review_reasons.append("youtube-api-fallback")
 
     if best_item:
-        if best_item.get("_waytube_source") != "watch-page":
-            best_item = await hydrate_candidate_from_watch_page(
-                client,
-                best_item,
-                requests_per_second,
-                status_callback=status_callback,
-            )
-            best_score, reasons = score_match(video, best_item, channel_hints=channel_hints)
+        review_candidates = await build_review_candidate_queue(
+            client,
+            video,
+            candidates,
+            requests_per_second=requests_per_second,
+            channel_hints=channel_hints,
+            rejected_video_ids=rejected_video_ids,
+            status_callback=status_callback,
+        )
+        if review_candidates:
+            active_candidate = review_candidates[0]
+            best_item = active_candidate["item"]
+            best_score = active_candidate["confidence"]
+            reasons = active_candidate["reasons"]
         return await apply_sync_item(
             db,
             video,
@@ -3928,6 +4082,8 @@ async def send_video_to_review(
             confidence=best_score,
             reasons=list(dict.fromkeys([*review_reasons, *reasons])),
             status="review",
+            review_candidates=review_candidates,
+            rejected_youtube_video_ids=rejected_video_ids,
         )
 
     match = existing_match or ensure_youtube_match_row(db, video.id)
@@ -3936,6 +4092,8 @@ async def send_video_to_review(
     match.youtube_channel_id = None
     match.confidence = 0.0
     match.reasons = list(dict.fromkeys([*review_reasons, "no-candidate-found"]))
+    match.review_candidates = []
+    match.rejected_youtube_video_ids = rejected_video_ids
     match.stale = True
     match.last_synced_at = datetime.utcnow()
     db.commit()

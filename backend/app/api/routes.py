@@ -3462,6 +3462,38 @@ def sync_review(
         .where(YouTubeMatch.status == "review")
         .order_by(YouTubeMatch.confidence.desc())
     ).all()
+    def active_review_candidate(item: YouTubeMatch) -> dict:
+        if item.review_candidates:
+            return item.review_candidates[0]
+        return {
+            "youtube_video_id": item.youtube_video_id,
+            "youtube_channel_id": item.youtube_channel_id,
+            "youtube_title": (
+                db.scalar(
+                    select(YouTubeVideoSnapshot.title).where(
+                        YouTubeVideoSnapshot.youtube_video_id == item.youtube_video_id
+                    )
+                )
+                if item.youtube_video_id
+                else None
+            ),
+            "youtube_channel_title": (
+                db.scalar(
+                    select(YouTubeChannelSnapshot.title).where(
+                        YouTubeChannelSnapshot.youtube_channel_id == item.youtube_channel_id
+                    )
+                )
+                if item.youtube_channel_id
+                else None
+            ),
+            "youtube_watch_url": (
+                f"https://www.youtube.com/watch?v={item.youtube_video_id}"
+                if item.youtube_video_id
+                else None
+            ),
+            "confidence": item.confidence,
+            "reasons": item.reasons or [],
+        }
     return {
         "items": [
             {
@@ -3469,32 +3501,14 @@ def sync_review(
                 "video_id": item.video_id,
                 "video_title": item.video.title if item.video else None,
                 "channel_name": item.video.channel.name if item.video and item.video.channel else None,
-                "youtube_video_id": item.youtube_video_id,
-                "youtube_title": (
-                    db.scalar(
-                        select(YouTubeVideoSnapshot.title).where(
-                            YouTubeVideoSnapshot.youtube_video_id == item.youtube_video_id
-                        )
-                    )
-                    if item.youtube_video_id
-                    else None
-                ),
-                "youtube_channel_title": (
-                    db.scalar(
-                        select(YouTubeChannelSnapshot.title).where(
-                            YouTubeChannelSnapshot.youtube_channel_id == item.youtube_channel_id
-                        )
-                    )
-                    if item.youtube_channel_id
-                    else None
-                ),
-                "youtube_watch_url": (
-                    f"https://www.youtube.com/watch?v={item.youtube_video_id}"
-                    if item.youtube_video_id
-                    else None
-                ),
-                "confidence": item.confidence,
-                "reasons": item.reasons or [],
+                "youtube_video_id": active_review_candidate(item).get("youtube_video_id"),
+                "youtube_title": active_review_candidate(item).get("youtube_title"),
+                "youtube_channel_title": active_review_candidate(item).get("youtube_channel_title"),
+                "youtube_watch_url": active_review_candidate(item).get("youtube_watch_url"),
+                "confidence": active_review_candidate(item).get("confidence"),
+                "reasons": active_review_candidate(item).get("reasons") or [],
+                "review_position": 1 if item.review_candidates else 0,
+                "review_total": len(item.review_candidates or []),
             }
             for item in review_items
         ]
@@ -3541,6 +3555,8 @@ def approve_match(
                 )
     match.status = "matched"
     match.stale = False
+    match.review_candidates = []
+    match.rejected_youtube_video_ids = []
     match.last_synced_at = datetime.utcnow()
     try:
         db.commit()
@@ -3555,7 +3571,7 @@ def approve_match(
 
 
 @router.post("/sync/review/{match_id}/unlink")
-def unlink_match(
+async def unlink_match(
     match_id: int,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_configured_admin_user),
@@ -3564,12 +3580,78 @@ def unlink_match(
     match = db.get(YouTubeMatch, match_id)
     if not match:
         raise HTTPException(status_code=404, detail="Match not found")
-    match.status = "unmatched"
-    match.youtube_video_id = None
-    match.youtube_channel_id = None
-    match.confidence = 0.0
-    match.reasons = []
+    video = _video_by_id(db, match.video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    rejected_ids = list(dict.fromkeys([*(match.rejected_youtube_video_ids or []), *([match.youtube_video_id] if match.youtube_video_id else [])]))
+    remaining_candidates = [
+        candidate
+        for candidate in (match.review_candidates or [])[1:]
+        if candidate.get("youtube_video_id") and candidate.get("youtube_video_id") not in rejected_ids
+    ]
+
+    settings_row = db.scalar(select(SyncSettings))
+    comment_limit = settings_row.comment_limit if settings_row and settings_row.comment_limit else 100
+    max_replies_per_comment = settings_row.max_replies_per_comment if settings_row and settings_row.max_replies_per_comment is not None else 3
+    requests_per_second = settings_row.requests_per_second if settings_row and settings_row.requests_per_second else 3
+    api_key = _active_youtube_api_key(db)
+
+    if remaining_candidates:
+        next_candidate = remaining_candidates[0]
+        candidate_item = next_candidate.get("item")
+        if not candidate_item:
+            match.review_candidates = remaining_candidates
+            match.rejected_youtube_video_ids = rejected_ids
+            db.commit()
+            return {"ok": True}
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            headers=REQUEST_HEADERS,
+            timeout=20.0,
+        ) as client:
+            await apply_sync_item(
+                db,
+                video,
+                candidate_item,
+                comment_limit=comment_limit,
+                max_replies_per_comment=max_replies_per_comment,
+                requests_per_second=requests_per_second,
+                client=client,
+                api_key=api_key,
+                channel_cache={},
+                playlist_cache={} if api_key else None,
+                allow_fallback_art=allow_fallback_art_enabled(db),
+                prefer_high_res_banners=prefer_high_res_banners_enabled(db),
+                confidence=float(next_candidate.get("confidence") or 0.0),
+                reasons=next_candidate.get("reasons") or [],
+                status="review",
+                review_candidates=remaining_candidates,
+                rejected_youtube_video_ids=rejected_ids,
+            )
+        return {"ok": True}
+
+    match.rejected_youtube_video_ids = rejected_ids
     db.commit()
+
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        headers=REQUEST_HEADERS,
+        timeout=20.0,
+    ) as client:
+        await send_video_to_review(
+            db,
+            video,
+            api_key,
+            comment_limit,
+            requests_per_second,
+            client,
+            max_replies_per_comment=max_replies_per_comment,
+            channel_cache={},
+            playlist_cache={} if api_key else None,
+            allow_fallback_art=allow_fallback_art_enabled(db),
+            prefer_high_res_banners=prefer_high_res_banners_enabled(db),
+        )
     return {"ok": True}
 
 

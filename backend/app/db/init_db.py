@@ -115,6 +115,13 @@ def init_db() -> None:
         if "prefer_high_res_banners" not in sync_columns:
             connection.execute(text("ALTER TABLE sync_settings ADD COLUMN prefer_high_res_banners BOOLEAN DEFAULT FALSE"))
             connection.execute(text("UPDATE sync_settings SET prefer_high_res_banners = FALSE WHERE prefer_high_res_banners IS NULL"))
+        youtube_match_columns = {column["name"] for column in inspector.get_columns("youtube_matches")}
+        if "review_candidates" not in youtube_match_columns:
+            connection.execute(text("ALTER TABLE youtube_matches ADD COLUMN review_candidates JSON"))
+            connection.execute(text("UPDATE youtube_matches SET review_candidates = '[]' WHERE review_candidates IS NULL"))
+        if "rejected_youtube_video_ids" not in youtube_match_columns:
+            connection.execute(text("ALTER TABLE youtube_matches ADD COLUMN rejected_youtube_video_ids JSON"))
+            connection.execute(text("UPDATE youtube_matches SET rejected_youtube_video_ids = '[]' WHERE rejected_youtube_video_ids IS NULL"))
         youtube_snapshot_columns = {column["name"] for column in inspector.get_columns("youtube_video_snapshots")}
         if "published_at_source" not in youtube_snapshot_columns:
             connection.execute(text("ALTER TABLE youtube_video_snapshots ADD COLUMN published_at_source VARCHAR(32)"))

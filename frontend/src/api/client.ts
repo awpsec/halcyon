@@ -267,6 +267,8 @@ export type SyncReviewItem = {
   youtube_watch_url: string | null;
   confidence: number;
   reasons: string[];
+  review_position: number;
+  review_total: number;
 };
 
 export type SyncReviewQueue = {

@@ -246,6 +246,8 @@ class YouTubeMatch(TimestampMixin, Base):
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String(32), default="unmatched")
     reasons: Mapped[list[str]] = mapped_column(JSON, default=list)
+    review_candidates: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    rejected_youtube_video_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     stale: Mapped[bool] = mapped_column(Boolean, default=False)
 

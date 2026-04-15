@@ -11,7 +11,7 @@ import app.services.scanner as scanner_service
 import app.services.subtitles as subtitle_service
 import app.services.sync as sync_service
 from app.api import routes as routes_module
-from app.api.routes import _indexed_library_storage_bytes, _scan_library_storage_bytes, _selected_storage_roots, approve_match, get_sync_settings, library_storage, list_roots, list_selected_folders, list_videos, manually_match_review_item, update_sync_settings
+from app.api.routes import _indexed_library_storage_bytes, _scan_library_storage_bytes, _selected_storage_roots, approve_match, get_sync_settings, library_storage, list_roots, list_selected_folders, list_videos, manually_match_review_item, unlink_match, update_sync_settings
 from app.db.init_db import seed_defaults
 from app.models.base import Base
 from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, SyncSettings, UserProfile, Video, VideoFile, YouTubeChannelSnapshot, YouTubeMatch, YouTubeVideoSnapshot
@@ -627,6 +627,104 @@ def test_approve_review_match_reassigns_video_off_unknown_channel(tmp_path: Path
         assert assigned_channel.description == "A survivor-themed channel"
         assert assigned_channel.avatar_url == "https://example.com/avatar.jpg"
         assert assigned_channel.banner_url == "https://example.com/banner.jpg"
+
+
+def test_reject_review_match_rotates_to_next_candidate_and_remembers_rejected_id(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        admin = UserProfile(name="admin", display_name="Admin", accent_color="#fff", is_admin=True)
+        unknown = Channel(name="Unknown Channel", slug="unknown-channel", inferred_from_path=True)
+        db.add_all([admin, unknown])
+        db.flush()
+
+        video = Video(
+            title="Can Jynxzi Find 60 Trash Talking Props? (1v60)",
+            slug="can-jynxzi-find-60-trash-talking-props",
+            channel_id=unknown.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=2199,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+
+        candidate_one = {
+            "youtube_video_id": "cand1111111",
+            "youtube_channel_id": "channel-one",
+            "youtube_title": "Wrong candidate",
+            "youtube_channel_title": "Wrong channel",
+            "youtube_watch_url": "https://www.youtube.com/watch?v=cand1111111",
+            "confidence": 0.52,
+            "reasons": ["title-partial"],
+            "item": {
+                "id": "cand1111111",
+                "snippet": {
+                    "title": "Wrong candidate",
+                    "channelTitle": "Wrong channel",
+                    "channelId": "channel-one",
+                    "publishedAt": "2026-04-15T12:00:00Z",
+                },
+                "statistics": {},
+                "_waytube_duration_seconds": 2199,
+                "_waytube_source": "watch-page",
+            },
+        }
+        candidate_two = {
+            "youtube_video_id": "cand2222222",
+            "youtube_channel_id": "channel-jynxzi",
+            "youtube_title": "Can Jynxzi Find 60 Trash Talking Props? (1v60)",
+            "youtube_channel_title": "Jynxzi",
+            "youtube_watch_url": "https://www.youtube.com/watch?v=cand2222222",
+            "confidence": 0.88,
+            "reasons": ["exact-title", "duration-tight"],
+            "item": {
+                "id": "cand2222222",
+                "snippet": {
+                    "title": "Can Jynxzi Find 60 Trash Talking Props? (1v60)",
+                    "channelTitle": "Jynxzi",
+                    "channelId": "channel-jynxzi",
+                    "publishedAt": "2026-04-15T12:00:00Z",
+                },
+                "statistics": {},
+                "_waytube_duration_seconds": 2199,
+                "_waytube_source": "watch-page",
+            },
+        }
+        match = YouTubeMatch(
+            video_id=video.id,
+            youtube_video_id="cand1111111",
+            youtube_channel_id="channel-one",
+            status="review",
+            confidence=0.52,
+            reasons=["title-partial"],
+            review_candidates=[candidate_one, candidate_two],
+        )
+        db.add(match)
+        db.commit()
+
+        async def fake_apply_sync_item(db: Session, video: Video, item: dict, **kwargs):
+            review_match = db.get(YouTubeMatch, match.id)
+            review_match.youtube_video_id = item["id"]
+            review_match.youtube_channel_id = item["snippet"]["channelId"]
+            review_match.status = kwargs["status"]
+            review_match.confidence = kwargs["confidence"]
+            review_match.reasons = kwargs["reasons"]
+            review_match.review_candidates = kwargs["review_candidates"]
+            review_match.rejected_youtube_video_ids = kwargs["rejected_youtube_video_ids"]
+            db.commit()
+            return review_match
+
+        monkeypatch.setattr(routes_module, "apply_sync_item", fake_apply_sync_item)
+
+        result = asyncio.run(unlink_match(match.id, db=db, current_user=admin))
+
+        refreshed_match = db.get(YouTubeMatch, match.id)
+        assert result == {"ok": True}
+        assert refreshed_match is not None
+        assert refreshed_match.status == "review"
+        assert refreshed_match.youtube_video_id == "cand2222222"
+        assert refreshed_match.rejected_youtube_video_ids == ["cand1111111"]
+        assert len(refreshed_match.review_candidates or []) == 1
+        assert refreshed_match.review_candidates[0]["youtube_video_id"] == "cand2222222"
 
 
 def test_send_video_to_review_researches_and_queues_candidate(tmp_path: Path, monkeypatch):
