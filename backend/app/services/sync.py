@@ -2533,6 +2533,7 @@ async def apply_sync_item(
     statistics = item.get("statistics", {})
     video_id = item.get("id")
     channel_id = snippet.get("channelId")
+    effective_api_key = api_key
 
     if video_id:
         conflicting_matches = db.execute(
@@ -2647,7 +2648,19 @@ async def apply_sync_item(
         if channel_cache is not None and channel_id in channel_cache:
             channel_details = channel_cache[channel_id]
         else:
-            channel_details = await fetch_channel_details(client, api_key, channel_id, requests_per_second) if api_key else None
+            channel_details = None
+            if effective_api_key:
+                try:
+                    channel_details = await fetch_channel_details(client, effective_api_key, channel_id, requests_per_second)
+                except YouTubeSyncError as exc:
+                    logger.warning(
+                        "Sync channel detail enrichment skipped video_id=%s channel_id=%s error=%s",
+                        video.id,
+                        channel_id,
+                        exc,
+                    )
+                    if exc.fatal:
+                        effective_api_key = None
             if channel_cache is not None:
                 channel_cache[channel_id] = channel_details
         needs_fallback_art = allow_fallback_art and (
@@ -2708,7 +2721,7 @@ async def apply_sync_item(
 
         if (
             status == "matched"
-            and api_key
+            and effective_api_key
             and video_id
             and target_channel is not None
             and playlist_cache is not None
@@ -2716,7 +2729,7 @@ async def apply_sync_item(
             try:
                 playlist_memberships = await fetch_channel_playlist_memberships(
                     client,
-                    api_key,
+                    effective_api_key,
                     channel_id,
                     requests_per_second,
                     playlist_cache,
@@ -2728,6 +2741,8 @@ async def apply_sync_item(
                     channel_id,
                     exc,
                 )
+                if exc.fatal:
+                    effective_api_key = None
             else:
                 playlist_series_title, playlist_position = choose_playlist_series_title(
                     video,
@@ -2771,79 +2786,110 @@ async def apply_sync_item(
                         len(organization_moves),
                     )
 
-    if match.status == "matched" and api_key:
+    if match.status == "matched" and effective_api_key:
         reply_limit = max(0, int(max_replies_per_comment))
-        db.query(YouTubeCommentReplySnapshot).filter(YouTubeCommentReplySnapshot.youtube_video_id == video_id).delete()
-        db.query(YouTubeCommentSnapshot).filter(YouTubeCommentSnapshot.youtube_video_id == video_id).delete()
-        for comment_item in await fetch_top_comments(client, api_key, video_id, max(1, min(comment_limit, 100)), requests_per_second):
-            top_level_comment = comment_item.get("snippet", {}).get("topLevelComment", {}) or {}
-            top = top_level_comment.get("snippet", {}) or {}
-            stored_comment = YouTubeCommentSnapshot(
-                youtube_video_id=video_id,
-                youtube_comment_id=top_level_comment.get("id"),
-                author_name=top.get("authorDisplayName", "Unknown"),
-                body=top.get("textDisplay", ""),
-                like_count=parse_maybe_int(top.get("likeCount")) or 0,
-                reply_count=comment_item.get("snippet", {}).get("totalReplyCount", 0),
-                published_at=parse_published_datetime(top.get("publishedAt")),
+        try:
+            comment_items = await fetch_top_comments(
+                client,
+                effective_api_key,
+                video_id,
+                max(1, min(comment_limit, 100)),
+                requests_per_second,
             )
-            db.add(stored_comment)
-            db.flush()
-            if reply_limit > 0:
-                inline_replies = ((comment_item.get("replies", {}) or {}).get("comments", []) or [])
-                all_reply_items: list[dict] = []
-                seen_reply_ids: set[str] = set()
-                desired_reply_count = min(reply_limit, int(stored_comment.reply_count or 0))
+        except YouTubeSyncError as exc:
+            logger.warning(
+                "Sync comment enrichment skipped video_id=%s youtube_video_id=%s error=%s",
+                video.id,
+                video_id,
+                exc,
+            )
+            if exc.fatal:
+                effective_api_key = None
+        else:
+            db.query(YouTubeCommentReplySnapshot).filter(YouTubeCommentReplySnapshot.youtube_video_id == video_id).delete()
+            db.query(YouTubeCommentSnapshot).filter(YouTubeCommentSnapshot.youtube_video_id == video_id).delete()
+            for comment_item in comment_items:
+                top_level_comment = comment_item.get("snippet", {}).get("topLevelComment", {}) or {}
+                top = top_level_comment.get("snippet", {}) or {}
+                stored_comment = YouTubeCommentSnapshot(
+                    youtube_video_id=video_id,
+                    youtube_comment_id=top_level_comment.get("id"),
+                    author_name=top.get("authorDisplayName", "Unknown"),
+                    body=top.get("textDisplay", ""),
+                    like_count=parse_maybe_int(top.get("likeCount")) or 0,
+                    reply_count=comment_item.get("snippet", {}).get("totalReplyCount", 0),
+                    published_at=parse_published_datetime(top.get("publishedAt")),
+                )
+                db.add(stored_comment)
+                db.flush()
+                if reply_limit > 0:
+                    inline_replies = ((comment_item.get("replies", {}) or {}).get("comments", []) or [])
+                    all_reply_items: list[dict] = []
+                    seen_reply_ids: set[str] = set()
+                    desired_reply_count = min(reply_limit, int(stored_comment.reply_count or 0))
 
-                for reply_item in inline_replies:
-                    reply_id = str(reply_item.get("id") or "").strip()
-                    if reply_id and reply_id in seen_reply_ids:
-                        continue
-                    if reply_id:
-                        seen_reply_ids.add(reply_id)
-                    all_reply_items.append(reply_item)
-                    if desired_reply_count and len(all_reply_items) >= desired_reply_count:
-                        break
-
-                top_level_comment_id = str(top_level_comment.get("id") or "").strip()
-                if (
-                    top_level_comment_id
-                    and desired_reply_count > len(all_reply_items)
-                    and int(stored_comment.reply_count or 0) > len(all_reply_items)
-                ):
-                    extra_limit = desired_reply_count - len(all_reply_items)
-                    extra_replies = await fetch_comment_replies(
-                        client,
-                        api_key,
-                        top_level_comment_id,
-                        extra_limit,
-                        requests_per_second,
-                    )
-                    for reply_item in extra_replies:
+                    for reply_item in inline_replies:
                         reply_id = str(reply_item.get("id") or "").strip()
                         if reply_id and reply_id in seen_reply_ids:
                             continue
                         if reply_id:
                             seen_reply_ids.add(reply_id)
                         all_reply_items.append(reply_item)
-                        if len(all_reply_items) >= desired_reply_count:
+                        if desired_reply_count and len(all_reply_items) >= desired_reply_count:
                             break
 
-                for index, reply_item in enumerate(all_reply_items[:desired_reply_count]):
-                    reply = reply_item.get("snippet", {}) or {}
-                    db.add(
-                        YouTubeCommentReplySnapshot(
-                            parent_comment_id=stored_comment.id,
-                            youtube_video_id=video_id,
-                            youtube_reply_id=reply_item.get("id"),
-                            author_name=reply.get("authorDisplayName", "Unknown"),
-                            body=reply.get("textDisplay", ""),
-                            like_count=parse_maybe_int(reply.get("likeCount")) or 0,
-                            published_at=parse_published_datetime(reply.get("publishedAt")),
-                            position=index,
+                    top_level_comment_id = str(top_level_comment.get("id") or "").strip()
+                    if (
+                        effective_api_key
+                        and top_level_comment_id
+                        and desired_reply_count > len(all_reply_items)
+                        and int(stored_comment.reply_count or 0) > len(all_reply_items)
+                    ):
+                        extra_limit = desired_reply_count - len(all_reply_items)
+                        try:
+                            extra_replies = await fetch_comment_replies(
+                                client,
+                                effective_api_key,
+                                top_level_comment_id,
+                                extra_limit,
+                                requests_per_second,
+                            )
+                        except YouTubeSyncError as exc:
+                            logger.warning(
+                                "Sync reply enrichment skipped video_id=%s youtube_video_id=%s comment_id=%s error=%s",
+                                video.id,
+                                video_id,
+                                top_level_comment_id,
+                                exc,
+                            )
+                            if exc.fatal:
+                                effective_api_key = None
+                            extra_replies = []
+                        for reply_item in extra_replies:
+                            reply_id = str(reply_item.get("id") or "").strip()
+                            if reply_id and reply_id in seen_reply_ids:
+                                continue
+                            if reply_id:
+                                seen_reply_ids.add(reply_id)
+                            all_reply_items.append(reply_item)
+                            if len(all_reply_items) >= desired_reply_count:
+                                break
+
+                    for index, reply_item in enumerate(all_reply_items[:desired_reply_count]):
+                        reply = reply_item.get("snippet", {}) or {}
+                        db.add(
+                            YouTubeCommentReplySnapshot(
+                                parent_comment_id=stored_comment.id,
+                                youtube_video_id=video_id,
+                                youtube_reply_id=reply_item.get("id"),
+                                author_name=reply.get("authorDisplayName", "Unknown"),
+                                body=reply.get("textDisplay", ""),
+                                like_count=parse_maybe_int(reply.get("likeCount")) or 0,
+                                published_at=parse_published_datetime(reply.get("publishedAt")),
+                                position=index,
+                            )
                         )
-                    )
-        matched_fields.append("comments")
+            matched_fields.append("comments")
 
     if match.status == "matched":
         logger.info(
@@ -2887,6 +2933,8 @@ async def sync_video(
     status_callback=None,
 ) -> YouTubeMatch:
     logger.info("Sync video start video_id=%s title=%s", video.id, video.title)
+    effective_api_key = api_key
+    api_error: YouTubeSyncError | None = None
     if status_callback:
         status_callback(phase="prepare", title=video.title, source="sync")
     existing_match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
@@ -2947,7 +2995,24 @@ async def sync_video(
         else:
             if status_callback:
                 status_callback(phase="refresh", source="youtube-api", youtube_video_id=existing_match.youtube_video_id)
-            refresh_item = await fetch_video_details_by_id(client, api_key, existing_match.youtube_video_id, requests_per_second)
+            try:
+                refresh_item = await fetch_video_details_by_id(
+                    client,
+                    effective_api_key,
+                    existing_match.youtube_video_id,
+                    requests_per_second,
+                )
+            except YouTubeSyncError as exc:
+                logger.warning(
+                    "Sync refresh fallback video_id=%s youtube_video_id=%s error=%s",
+                    video.id,
+                    existing_match.youtube_video_id,
+                    exc,
+                )
+                api_error = exc
+                if exc.fatal:
+                    effective_api_key = None
+                refresh_item = None
             if refresh_item:
                 refresh_reasons = list(dict.fromkeys((existing_match.reasons or []) + ["refresh-by-id"]))
                 if force:
@@ -2960,7 +3025,7 @@ async def sync_video(
                     max_replies_per_comment=max_replies_per_comment,
                     requests_per_second=requests_per_second,
                     client=client,
-                    api_key=api_key,
+                    api_key=effective_api_key,
                     channel_cache=channel_cache,
                     playlist_cache=playlist_cache,
                     allow_fallback_art=allow_fallback_art,
@@ -2975,7 +3040,6 @@ async def sync_video(
                 db.refresh(existing_match)
                 return existing_match
 
-    api_error: YouTubeSyncError | None = None
     channel_ids: list[str] = []
     if video.channel_id and not force:
         channel_ids.extend(
@@ -2997,9 +3061,9 @@ async def sync_video(
         if channel_id not in deduped_channel_ids:
             deduped_channel_ids.append(channel_id)
     if not deduped_channel_ids and video.channel and not is_generic_channel_name(video.channel.name):
-        if api_key:
+        if effective_api_key:
             try:
-                for candidate in await fetch_channel_candidates(client, api_key, video.channel.name, requests_per_second):
+                for candidate in await fetch_channel_candidates(client, effective_api_key, video.channel.name, requests_per_second):
                     snippet = candidate.get("snippet", {})
                     resolved_name = resolve_display_name(video.channel.name, snippet.get("channelTitle"))
                     if resolved_name == snippet.get("channelTitle") and candidate.get("id", {}).get("channelId"):
@@ -3007,6 +3071,8 @@ async def sync_video(
             except YouTubeSyncError as exc:
                 logger.warning("Sync channel fallback video_id=%s channel=%s error=%s", video.id, video.channel.name, exc)
                 api_error = exc
+                if exc.fatal:
+                    effective_api_key = None
                 if status_callback:
                     status_callback(phase="fallback", title=video.title, source="google-dork", warning=str(exc))
             if channel_cache is not None:
@@ -3028,11 +3094,11 @@ async def sync_video(
         channel_hints=channel_hints,
     )
     candidates: list[dict] = []
-    if api_key:
+    if effective_api_key:
         try:
             candidates = await fetch_search_candidates(
                 client,
-                api_key,
+                effective_api_key,
                 scoped_queries,
                 requests_per_second,
                 channel_ids=deduped_channel_ids[:2] or None,
@@ -3041,7 +3107,7 @@ async def sync_video(
             if not candidates and deduped_channel_ids:
                 candidates = await fetch_search_candidates(
                     client,
-                    api_key,
+                    effective_api_key,
                     build_search_queries(video, include_channel=not force, channel_hints=channel_hints),
                     requests_per_second,
                     channel_ids=None,
@@ -3050,7 +3116,7 @@ async def sync_video(
             if deduped_channel_ids:
                 recent_candidates = await fetch_recent_channel_upload_candidates(
                     client,
-                    api_key,
+                    effective_api_key,
                     deduped_channel_ids,
                     requests_per_second,
                     status_callback=status_callback,
@@ -3068,6 +3134,8 @@ async def sync_video(
                     )
         except YouTubeSyncError as exc:
             api_error = exc
+            if exc.fatal:
+                effective_api_key = None
             logger.warning("Sync api fallback video_id=%s title=%s error=%s", video.id, video.title, exc)
             if status_callback:
                 status_callback(phase="fallback", title=video.title, source="google-dork", warning=str(exc))
@@ -3113,7 +3181,7 @@ async def sync_video(
             comment_limit=comment_limit,
             requests_per_second=requests_per_second,
             client=client,
-            api_key=api_key,
+            api_key=effective_api_key,
             channel_cache=channel_cache,
             playlist_cache=playlist_cache,
             allow_fallback_art=allow_fallback_art,
@@ -3151,6 +3219,7 @@ async def send_video_to_review(
     status_callback=None,
 ) -> YouTubeMatch:
     logger.info("Sync review resend start video_id=%s title=%s", video.id, video.title)
+    effective_api_key = api_key
     if status_callback:
         status_callback(phase="prepare", title=video.title, source="admin-review")
 
@@ -3185,9 +3254,9 @@ async def send_video_to_review(
             deduped_channel_ids.append(channel_id)
 
     if not deduped_channel_ids and video.channel and not is_generic_channel_name(video.channel.name):
-        if api_key:
+        if effective_api_key:
             try:
-                for candidate in await fetch_channel_candidates(client, api_key, video.channel.name, requests_per_second):
+                for candidate in await fetch_channel_candidates(client, effective_api_key, video.channel.name, requests_per_second):
                     snippet = candidate.get("snippet", {})
                     resolved_name = resolve_display_name(video.channel.name, snippet.get("channelTitle"))
                     if resolved_name == snippet.get("channelTitle") and candidate.get("id", {}).get("channelId"):
@@ -3195,6 +3264,8 @@ async def send_video_to_review(
             except YouTubeSyncError as exc:
                 logger.warning("Sync review channel fallback video_id=%s channel=%s error=%s", video.id, video.channel.name, exc)
                 api_error = exc
+                if exc.fatal:
+                    effective_api_key = None
                 if status_callback:
                     status_callback(phase="fallback", title=video.title, source="google-dork", warning=str(exc))
             if channel_cache is not None:
@@ -3217,11 +3288,11 @@ async def send_video_to_review(
         channel_hints=channel_hints,
     )
     candidates: list[dict] = []
-    if api_key:
+    if effective_api_key:
         try:
             candidates = await fetch_search_candidates(
                 client,
-                api_key,
+                effective_api_key,
                 scoped_queries,
                 requests_per_second,
                 channel_ids=deduped_channel_ids[:2] or None,
@@ -3230,7 +3301,7 @@ async def send_video_to_review(
             if deduped_channel_ids:
                 broader_candidates = await fetch_search_candidates(
                     client,
-                    api_key,
+                    effective_api_key,
                     build_search_queries(video, include_channel=True, channel_hints=channel_hints),
                     requests_per_second,
                     channel_ids=None,
@@ -3250,7 +3321,7 @@ async def send_video_to_review(
             if deduped_channel_ids:
                 recent_candidates = await fetch_recent_channel_upload_candidates(
                     client,
-                    api_key,
+                    effective_api_key,
                     deduped_channel_ids,
                     requests_per_second,
                     status_callback=status_callback,
@@ -3268,6 +3339,8 @@ async def send_video_to_review(
                     )
         except YouTubeSyncError as exc:
             api_error = exc
+            if exc.fatal:
+                effective_api_key = None
             logger.warning("Sync review api fallback video_id=%s title=%s error=%s", video.id, video.title, exc)
             if status_callback:
                 status_callback(phase="fallback", title=video.title, source="google-dork", warning=str(exc))
@@ -3302,7 +3375,7 @@ async def send_video_to_review(
             max_replies_per_comment=max_replies_per_comment,
             requests_per_second=requests_per_second,
             client=client,
-            api_key=api_key,
+            api_key=effective_api_key,
             channel_cache=channel_cache,
             playlist_cache=playlist_cache,
             allow_fallback_art=allow_fallback_art,

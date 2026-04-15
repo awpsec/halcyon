@@ -621,6 +621,103 @@ def test_sync_video_marks_known_channel_mismatch_as_review(tmp_path: Path, monke
         assert "channel-mismatch" in (result.reasons or [])
 
 
+def test_sync_video_disables_api_after_fatal_search_and_uses_fallback_match(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
+        db.add(channel)
+        db.flush()
+
+        video_path = tmp_path / "library" / "frankie-fallback.mp4"
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"target")
+        video = Video(
+            title="LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+            slug="lady-bandits-arma-2-dayz-mod-ep-30-fallback",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=1443,
+            published_at=datetime(2026, 4, 11),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(video_path),
+                relative_path="frankie-fallback.mp4",
+                file_size=video_path.stat().st_size,
+                fingerprint="1" * 64,
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_search_candidates(*args, **kwargs):
+            raise sync_service.YouTubeSyncError("YouTube search failed: quotaExceeded", fatal=True)
+
+        async def fake_fetch_channel_candidates(*args, **kwargs):
+            return []
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return [
+                {
+                    "id": "frankie123",
+                    "snippet": {
+                        "title": "LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+                        "channelTitle": "FRANKIEonPCin1080p",
+                        "channelId": "channel-frankie",
+                        "publishedAt": "2026-04-11T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 1443,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            assert kwargs["api_key"] is None
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_channel_candidates", fake_fetch_channel_candidates)
+        monkeypatch.setattr(sync_service, "fetch_search_candidates", fake_fetch_search_candidates)
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    video,
+                    api_key="test-api-key",
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert result.youtube_video_id == "frankie123"
+        assert result.youtube_channel_id == "channel-frankie"
+
+
 def test_apply_sync_item_review_keeps_existing_channel_assignment(tmp_path: Path, monkeypatch):
     async def fake_ryd(*args, **kwargs):
         return None
