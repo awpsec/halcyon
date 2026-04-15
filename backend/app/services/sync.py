@@ -1753,6 +1753,15 @@ def build_search_queries(
     return deduped[:8]
 
 
+def fallback_query_batches(queries: list[str], *, batch_size: int = 4) -> list[list[str]]:
+    cleaned = [str(query or "").strip() for query in queries if str(query or "").strip()]
+    return [
+        cleaned[index:index + batch_size]
+        for index in range(0, len(cleaned), batch_size)
+        if cleaned[index:index + batch_size]
+    ]
+
+
 async def fetch_channel_candidates(client: httpx.AsyncClient, api_key: str, channel_name: str, requests_per_second: int) -> list[dict]:
     response = await throttled_get(
         client,
@@ -2917,7 +2926,7 @@ async def fetch_google_dork_video_ids(
         for video_id in extract_video_ids_from_urls(urls):
             if video_id not in results:
                 results.append(video_id)
-        if len(results) >= 8:
+        if results:
             break
     return results[:8]
 
@@ -2947,7 +2956,7 @@ async def fetch_youtube_web_video_ids(
                 results.append(video_id)
             if len(results) >= 8:
                 break
-        if len(results) >= 8:
+        if results:
             break
     return results[:8]
 
@@ -3058,22 +3067,43 @@ async def fetch_watch_page_candidate(
 
 
 async def fetch_fallback_candidates(client: httpx.AsyncClient, queries: list[str], requests_per_second: int, status_callback=None) -> list[dict]:
-    candidates: list[dict] = []
-    candidate_ids = await fetch_google_dork_video_ids(client, queries, requests_per_second, status_callback=status_callback)
-    for youtube_video_id in candidate_ids[:6]:
-        candidate = await fetch_watch_page_candidate(client, youtube_video_id, requests_per_second, status_callback=status_callback)
-        if candidate:
-            candidates.append(candidate)
-    merge_candidate_items(
-        candidates,
-        await fetch_youtube_web_candidates(
+    for query_batch in fallback_query_batches(queries):
+        candidates: list[dict] = []
+        candidate_ids = await fetch_google_dork_video_ids(
             client,
-            queries,
+            query_batch,
             requests_per_second,
             status_callback=status_callback,
-        ),
-    )
-    return candidates
+        )
+        if not candidate_ids:
+            candidate_ids = await fetch_youtube_web_video_ids(
+                client,
+                query_batch,
+                requests_per_second,
+                status_callback=status_callback,
+            )
+        for youtube_video_id in candidate_ids[:6]:
+            candidate = await fetch_watch_page_candidate(
+                client,
+                youtube_video_id,
+                requests_per_second,
+                status_callback=status_callback,
+            )
+            if candidate:
+                candidates.append(candidate)
+        if not candidates:
+            merge_candidate_items(
+                candidates,
+                await fetch_youtube_web_candidates(
+                    client,
+                    query_batch,
+                    requests_per_second,
+                    status_callback=status_callback,
+                ),
+            )
+        if candidates:
+            return candidates
+    return []
 
 
 async def hydrate_candidate_from_watch_page(

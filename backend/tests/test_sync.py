@@ -154,7 +154,7 @@ def test_fetch_youtube_web_candidates_parses_video_renderers(monkeypatch):
     assert results[0]["_waytube_duration_seconds"] == 36 * 60 + 39
 
 
-def test_fetch_google_dork_video_ids_merges_across_queries(monkeypatch):
+def test_fetch_google_dork_video_ids_stops_after_first_successful_query(monkeypatch):
     html_by_query = {
         'site:youtube.com/watch "Asmongold TV British Navy is a joke now"': """
         <html><body>
@@ -188,7 +188,7 @@ def test_fetch_google_dork_video_ids_merges_across_queries(monkeypatch):
 
     results = asyncio.run(run())
 
-    assert results == ["wrong12345a", "right12345b"]
+    assert results == ["wrong12345a"]
 
 
 def test_fetch_youtube_web_candidates_merges_across_queries(monkeypatch):
@@ -429,6 +429,114 @@ def test_fetch_live_stream_candidates_web_accepts_matching_channel_title_when_id
         items[0]["snippet"]["thumbnails"]["high"]["url"]
         == "https://i.ytimg.com/vi/abc123def45/hqdefault.jpg"
     )
+
+
+def test_fetch_fallback_candidates_stops_after_first_non_empty_query_batch(monkeypatch):
+    seen_google_batches: list[list[str]] = []
+    seen_web_id_batches: list[list[str]] = []
+    seen_web_candidate_batches: list[list[str]] = []
+
+    async def fake_fetch_google_dork_video_ids(client, queries, requests_per_second, status_callback=None):
+        del client, requests_per_second, status_callback
+        seen_google_batches.append(list(queries))
+        return ["firstbatch01a"]
+
+    async def fake_fetch_youtube_web_video_ids(client, queries, requests_per_second, status_callback=None):
+        del client, requests_per_second, status_callback
+        seen_web_id_batches.append(list(queries))
+        return []
+
+    async def fake_fetch_youtube_web_candidates(client, queries, requests_per_second, status_callback=None):
+        del client, requests_per_second, status_callback
+        seen_web_candidate_batches.append(list(queries))
+        return []
+
+    async def fake_fetch_watch_page_candidate(client, youtube_video_id, requests_per_second, status_callback=None):
+        del client, requests_per_second, status_callback
+        return {
+            "id": youtube_video_id,
+            "snippet": {
+                "title": "Exact title match",
+                "channelTitle": "Known Channel",
+                "channelId": "channel-known",
+                "publishedAt": "2026-04-15T12:00:00Z",
+            },
+            "statistics": {},
+            "_waytube_duration_seconds": 600,
+            "_waytube_source": "watch-page",
+        }
+
+    monkeypatch.setattr(sync_service, "fetch_google_dork_video_ids", fake_fetch_google_dork_video_ids)
+    monkeypatch.setattr(sync_service, "fetch_youtube_web_video_ids", fake_fetch_youtube_web_video_ids)
+    monkeypatch.setattr(sync_service, "fetch_youtube_web_candidates", fake_fetch_youtube_web_candidates)
+    monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_fallback_candidates(
+                client,
+                ["q1", "q2", "q3", "q4", "q5", "q6"],
+                3,
+            )
+
+    result = asyncio.run(run())
+
+    assert [item["id"] for item in result] == ["firstbatch01a"]
+    assert seen_google_batches == [["q1", "q2", "q3", "q4"]]
+    assert seen_web_id_batches == []
+    assert seen_web_candidate_batches == []
+
+
+def test_fetch_fallback_candidates_advances_to_next_query_batch_when_first_batch_empty(monkeypatch):
+    seen_google_batches: list[list[str]] = []
+
+    async def fake_fetch_google_dork_video_ids(client, queries, requests_per_second, status_callback=None):
+        del client, requests_per_second, status_callback
+        seen_google_batches.append(list(queries))
+        if len(seen_google_batches) == 1:
+            return []
+        return ["secondbat01"]
+
+    async def fake_fetch_youtube_web_video_ids(client, queries, requests_per_second, status_callback=None):
+        del client, requests_per_second, status_callback
+        return []
+
+    async def fake_fetch_youtube_web_candidates(client, queries, requests_per_second, status_callback=None):
+        del client, queries, requests_per_second, status_callback
+        return []
+
+    async def fake_fetch_watch_page_candidate(client, youtube_video_id, requests_per_second, status_callback=None):
+        del client, requests_per_second, status_callback
+        return {
+            "id": youtube_video_id,
+            "snippet": {
+                "title": "Second batch title",
+                "channelTitle": "Known Channel",
+                "channelId": "channel-known",
+                "publishedAt": "2026-04-15T12:00:00Z",
+            },
+            "statistics": {},
+            "_waytube_duration_seconds": 600,
+            "_waytube_source": "watch-page",
+        }
+
+    monkeypatch.setattr(sync_service, "fetch_google_dork_video_ids", fake_fetch_google_dork_video_ids)
+    monkeypatch.setattr(sync_service, "fetch_youtube_web_video_ids", fake_fetch_youtube_web_video_ids)
+    monkeypatch.setattr(sync_service, "fetch_youtube_web_candidates", fake_fetch_youtube_web_candidates)
+    monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_fallback_candidates(
+                client,
+                ["q1", "q2", "q3", "q4", "q5", "q6"],
+                3,
+            )
+
+    result = asyncio.run(run())
+
+    assert [item["id"] for item in result] == ["secondbat01"]
+    assert seen_google_batches == [["q1", "q2", "q3", "q4"], ["q5", "q6"]]
 
 
 def test_resolve_synced_channel_target_ignores_review_rows_when_reusing_channels(tmp_path: Path):
