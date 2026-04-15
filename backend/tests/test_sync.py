@@ -70,6 +70,186 @@ def test_fetch_channel_about_details_parses_counts_without_api(monkeypatch):
     assert result["video_count"] == 6_945
 
 
+def test_fetch_youtube_web_candidates_parses_video_renderers(monkeypatch):
+    html = """
+    <html>
+      <body>
+        <script>
+          var ytInitialData = {
+            "contents": {
+              "twoColumnSearchResultsRenderer": {
+                "primaryContents": {
+                  "sectionListRenderer": {
+                    "contents": [
+                      {
+                        "itemSectionRenderer": {
+                          "contents": [
+                            {
+                              "videoRenderer": {
+                                "videoId": "abc123def45",
+                                "title": {"runs": [{"text": "Can Jynxzi Find 60 Trash Talking Props? (1v60)"}]},
+                                "ownerText": {
+                                  "runs": [
+                                    {
+                                      "text": "Jynxzi",
+                                      "navigationEndpoint": {
+                                        "browseEndpoint": {
+                                          "browseId": "channel-jynxzi"
+                                        }
+                                      }
+                                    }
+                                  ]
+                                },
+                                "lengthText": {"simpleText": "36:39"},
+                                "thumbnail": {
+                                  "thumbnails": [
+                                    {"url": "https://i.ytimg.com/vi/abc123def45/hqdefault.jpg"}
+                                  ]
+                                },
+                                "viewCountText": {"simpleText": "14,845 views"}
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          };
+        </script>
+      </body>
+    </html>
+    """
+
+    class DummyResponse:
+        def __init__(self, text: str):
+            self.text = text
+            self.is_error = False
+
+    async def fake_throttled_get(*args, **kwargs):
+        return DummyResponse(html)
+
+    monkeypatch.setattr(sync_service, "throttled_get", fake_throttled_get)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_youtube_web_candidates(
+                client,
+                ["Can Jynxzi Find 60 Trash Talking Props? (1v60)"],
+                3,
+            )
+
+    results = asyncio.run(run())
+
+    assert len(results) == 1
+    assert results[0]["id"] == "abc123def45"
+    assert results[0]["snippet"]["title"] == "Can Jynxzi Find 60 Trash Talking Props? (1v60)"
+    assert results[0]["snippet"]["channelTitle"] == "Jynxzi"
+    assert results[0]["snippet"]["channelId"] == "channel-jynxzi"
+    assert results[0]["statistics"]["viewCount"] == 14_845
+    assert results[0]["_waytube_duration_seconds"] == 36 * 60 + 39
+
+
+def test_fetch_watch_page_candidate_keeps_full_timestamp_publish_at(monkeypatch):
+    html = """
+    <html>
+      <head>
+        <meta property="og:image" content="https://i.ytimg.com/vi/abc123def45/maxresdefault.jpg" />
+        <meta property="og:title" content="Live event title" />
+      </head>
+      <body>
+        <script>
+          var ytInitialPlayerResponse = {
+            "videoDetails": {
+              "title": "Live event title",
+              "author": "ESL Counter-Strike",
+              "channelId": "channel-esl",
+              "shortDescription": "Live description",
+              "lengthSeconds": "0",
+              "viewCount": "276296",
+              "thumbnail": {
+                "thumbnails": [
+                  {"url": "https://i.ytimg.com/vi/abc123def45/maxresdefault.jpg"}
+                ]
+              }
+            },
+            "microformat": {
+              "playerMicroformatRenderer": {
+                "publishDate": "2026-04-09T04:34:45-07:00"
+              }
+            }
+          };
+        </script>
+      </body>
+    </html>
+    """
+
+    class DummyResponse:
+        def __init__(self, text: str):
+            self.text = text
+            self.is_error = False
+
+    async def fake_throttled_get(*args, **kwargs):
+        return DummyResponse(html)
+
+    monkeypatch.setattr(sync_service, "throttled_get", fake_throttled_get)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_watch_page_candidate(client, "abc123def45", 3)
+
+    result = asyncio.run(run())
+
+    assert result is not None
+    assert result["snippet"]["publishedAt"] == "2026-04-09T04:34:45-07:00"
+
+
+def test_fetch_live_stream_candidates_web_skips_weak_watch_page_candidates(monkeypatch):
+    class DummyResponse:
+        def __init__(self, url: str):
+            self.text = ""
+            self.is_error = False
+            self.url = url
+
+    async def fake_throttled_get(*args, **kwargs):
+        return DummyResponse("https://www.youtube.com/watch?v=abc123def45")
+
+    async def fake_fetch_watch_page_candidate(*args, **kwargs):
+        return {
+            "id": "abc123def45",
+            "snippet": {
+                "title": "",
+                "channelTitle": None,
+                "channelId": None,
+                "description": None,
+                "publishedAt": None,
+                "thumbnails": {},
+            },
+            "statistics": {},
+            "_waytube_duration_seconds": None,
+            "_waytube_source": "watch-page",
+        }
+
+    monkeypatch.setattr(sync_service, "throttled_get", fake_throttled_get)
+    monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_live_stream_candidates_web(
+                client,
+                "channel-pgl",
+                3,
+                channel_name="PGL",
+            )
+
+    checked, items = asyncio.run(run())
+
+    assert checked is True
+    assert items == []
+
+
 def test_slugify_collapses_apostrophes_without_extra_dash() -> None:
     assert slugify("Moore's Law is Dead") == "moores-law-is-dead"
     assert slugify("Moore’s Law is Dead") == "moores-law-is-dead"
@@ -234,6 +414,20 @@ def test_sync_video_uses_recent_channel_uploads_when_title_search_misses(tmp_pat
                 }
             ]
 
+        async def fake_fetch_watch_page_candidate(*args, **kwargs):
+            return {
+                "id": "renamed123",
+                "snippet": {
+                    "title": "Old launch title before rename",
+                    "channelTitle": "Asmongold TV",
+                    "channelId": "channel-asmongold",
+                    "publishedAt": "2026-04-06T12:00:00Z",
+                },
+                "statistics": {},
+                "_waytube_duration_seconds": 900,
+                "_waytube_source": "watch-page",
+            }
+
         async def fail_fetch_channel_candidates(*args, **kwargs):
             raise AssertionError("sync_video should not hit channel lookup when local channel ids already exist")
 
@@ -259,6 +453,7 @@ def test_sync_video_uses_recent_channel_uploads_when_title_search_misses(tmp_pat
 
         monkeypatch.setattr(sync_service, "fetch_search_candidates", fake_fetch_search_candidates)
         monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates", fake_fetch_recent_channel_upload_candidates)
+        monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
         monkeypatch.setattr(sync_service, "fetch_channel_candidates", fail_fetch_channel_candidates)
         monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
 

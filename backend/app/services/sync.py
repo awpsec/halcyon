@@ -1625,6 +1625,24 @@ def parse_iso8601_duration(value: str | None) -> int | None:
     return hours * 3600 + minutes * 60 + seconds
 
 
+def parse_duration_text(value: str | None) -> int | None:
+    if not value:
+        return None
+    parts = [segment.strip() for segment in value.split(":") if segment.strip()]
+    if not parts or any(not part.isdigit() for part in parts):
+        return None
+    values = [int(part) for part in parts]
+    if len(values) == 3:
+        hours, minutes, seconds = values
+        return hours * 3600 + minutes * 60 + seconds
+    if len(values) == 2:
+        minutes, seconds = values
+        return minutes * 60 + seconds
+    if len(values) == 1:
+        return values[0]
+    return None
+
+
 def build_search_queries(
     video: Video,
     *,
@@ -2241,6 +2259,94 @@ def _extract_youtube_watch_id(url: str | None) -> str | None:
     return str(video_id).strip() or None
 
 
+def _collect_video_renderers_from_value(value: Any, sink: list[dict[str, Any]]) -> None:
+    if isinstance(value, dict):
+        renderer = value.get("videoRenderer")
+        if isinstance(renderer, dict):
+            sink.append(renderer)
+        for nested in value.values():
+            _collect_video_renderers_from_value(nested, sink)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_video_renderers_from_value(item, sink)
+
+
+def render_video_candidate_from_renderer(renderer: dict[str, Any], *, source: str) -> dict[str, Any] | None:
+    video_id = str(renderer.get("videoId") or "").strip()
+    if not video_id:
+        return None
+    title = extract_text_content(renderer.get("title"))
+    channel_title = (
+        extract_text_content(renderer.get("ownerText"))
+        or extract_text_content(renderer.get("shortBylineText"))
+        or extract_text_content(renderer.get("longBylineText"))
+    )
+    channel_id = (
+        renderer.get("ownerText", {})
+        .get("runs", [{}])[0]
+        .get("navigationEndpoint", {})
+        .get("browseEndpoint", {})
+        .get("browseId")
+        or renderer.get("shortBylineText", {})
+        .get("runs", [{}])[0]
+        .get("navigationEndpoint", {})
+        .get("browseEndpoint", {})
+        .get("browseId")
+        or renderer.get("longBylineText", {})
+        .get("runs", [{}])[0]
+        .get("navigationEndpoint", {})
+        .get("browseEndpoint", {})
+        .get("browseId")
+    )
+    thumbnails = renderer.get("thumbnail", {}).get("thumbnails", []) or []
+    thumbnail_url = thumbnails[-1].get("url") if thumbnails else None
+    view_count = parse_channel_stat_text(renderer.get("viewCountText") or renderer.get("shortViewCountText"))
+    duration_seconds = parse_duration_text(
+        extract_text_content(renderer.get("lengthText"))
+        or extract_text_content(renderer.get("thumbnailOverlays"))
+    )
+    return {
+        "id": video_id,
+        "snippet": {
+            "title": clean_display_title(title or ""),
+            "channelTitle": channel_title,
+            "channelId": channel_id,
+            "description": None,
+            "publishedAt": None,
+            "thumbnails": {"high": {"url": thumbnail_url}} if thumbnail_url else {},
+        },
+        "statistics": {
+            "viewCount": view_count,
+            "likeCount": None,
+            "commentCount": None,
+        },
+        "_waytube_duration_seconds": duration_seconds,
+        "_waytube_source": source,
+    }
+
+
+def extract_video_candidates_from_html(html: str, *, source: str, limit: int = 12) -> list[dict]:
+    initial = extract_json_blob(html, ["var ytInitialData = ", "ytInitialData = "]) or {}
+    renderers: list[dict[str, Any]] = []
+    if initial:
+        _collect_video_renderers_from_value(initial, renderers)
+    candidates: list[dict] = []
+    seen_ids: set[str] = set()
+    for renderer in renderers:
+        candidate = render_video_candidate_from_renderer(renderer, source=source)
+        if not candidate:
+            continue
+        video_id = candidate.get("id")
+        if not video_id or video_id in seen_ids:
+            continue
+        seen_ids.add(video_id)
+        candidates.append(candidate)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
 def _is_live_renderer(value: dict[str, Any]) -> bool:
     for overlay in value.get("thumbnailOverlays", []) or []:
         renderer = overlay.get("thumbnailOverlayTimeStatusRenderer") or {}
@@ -2332,6 +2438,8 @@ async def fetch_live_stream_candidates_web(
         snippet["channelId"] = snippet.get("channelId") or youtube_channel_id
         if channel_name and not snippet.get("channelTitle"):
             snippet["channelTitle"] = channel_name
+        if not snippet.get("title") or not best_thumbnail_url(snippet.get("thumbnails")):
+            continue
         candidate["_waytube_live_web"] = True
         candidate["_waytube_local_channel_id"] = local_channel_id
         candidate["_waytube_checked_youtube_channel_id"] = youtube_channel_id
@@ -2694,6 +2802,39 @@ async def fetch_youtube_web_video_ids(
     return results[:8]
 
 
+async def fetch_youtube_web_candidates(
+    client: httpx.AsyncClient,
+    queries: list[str],
+    requests_per_second: int,
+    status_callback=None,
+) -> list[dict]:
+    results: list[dict] = []
+    seen_ids: set[str] = set()
+    for query in queries:
+        if status_callback:
+            status_callback(phase="search", source="youtube-web", query=query)
+        logger.info("Sync youtube web query=%s", query)
+        response = await throttled_get(
+            client,
+            YOUTUBE_WEB_SEARCH_BASE,
+            params={"search_query": query, "hl": "en"},
+            requests_per_second=requests_per_second,
+            headers=REQUEST_HEADERS,
+        )
+        if response.is_error:
+            continue
+        candidates = extract_video_candidates_from_html(response.text, source="youtube-web-search", limit=12)
+        for candidate in candidates:
+            video_id = candidate.get("id")
+            if not video_id or video_id in seen_ids:
+                continue
+            results.append(candidate)
+            seen_ids.add(video_id)
+        if results:
+            break
+    return results[:12]
+
+
 async def fetch_watch_page_candidate(
     client: httpx.AsyncClient,
     youtube_video_id: str,
@@ -2726,8 +2867,24 @@ async def fetch_watch_page_candidate(
     thumbnails = video_details.get("thumbnail", {}).get("thumbnails", [])
     thumbnail_url = thumbnails[-1]["url"] if thumbnails else None
     html_text = response.text
+    title = title or extract_meta_content(html_text, "title") or extract_meta_content(html_text, "og:title")
+    description = (
+        description
+        or extract_meta_content(html_text, "description")
+        or extract_meta_content(html_text, "og:description")
+    )
+    thumbnail_url = thumbnail_url or extract_meta_content(html_text, "og:image")
+    if not published_at:
+        published_at = microformat.get("publishDate") or microformat.get("uploadDate")
     like_match = re.search(r'"label":"([\d.,KMB]+)\s+likes"', html_text)
     comment_match = re.search(r'"countText":\{"simpleText":"([\d.,KMB]+)\s+Comments?"', html_text)
+    published_at_value = None
+    if published_at:
+        published_at_text = str(published_at).strip()
+        if "T" in published_at_text:
+            published_at_value = published_at_text.replace("Z", "+00:00")
+        else:
+            published_at_value = f"{published_at_text}T00:00:00+00:00"
     return {
         "id": youtube_video_id,
         "snippet": {
@@ -2735,7 +2892,7 @@ async def fetch_watch_page_candidate(
             "channelTitle": author,
             "channelId": channel_id,
             "description": description,
-            "publishedAt": f"{published_at}T00:00:00+00:00" if published_at else None,
+            "publishedAt": published_at_value,
             "thumbnails": {"high": {"url": thumbnail_url}} if thumbnail_url else {},
         },
         "statistics": {
@@ -2749,15 +2906,54 @@ async def fetch_watch_page_candidate(
 
 
 async def fetch_fallback_candidates(client: httpx.AsyncClient, queries: list[str], requests_per_second: int, status_callback=None) -> list[dict]:
-    candidate_ids = await fetch_google_dork_video_ids(client, queries, requests_per_second, status_callback=status_callback)
-    if not candidate_ids:
-        candidate_ids = await fetch_youtube_web_video_ids(client, queries, requests_per_second, status_callback=status_callback)
     candidates: list[dict] = []
+    candidate_ids = await fetch_google_dork_video_ids(client, queries, requests_per_second, status_callback=status_callback)
     for youtube_video_id in candidate_ids[:6]:
         candidate = await fetch_watch_page_candidate(client, youtube_video_id, requests_per_second, status_callback=status_callback)
         if candidate:
             candidates.append(candidate)
+    merge_candidate_items(
+        candidates,
+        await fetch_youtube_web_candidates(
+            client,
+            queries,
+            requests_per_second,
+            status_callback=status_callback,
+        ),
+    )
     return candidates
+
+
+async def hydrate_candidate_from_watch_page(
+    client: httpx.AsyncClient,
+    item: dict,
+    requests_per_second: int,
+    status_callback=None,
+) -> dict:
+    youtube_video_id = str(item.get("id") or "").strip()
+    if not youtube_video_id:
+        return item
+    hydrated = await fetch_watch_page_candidate(
+        client,
+        youtube_video_id,
+        requests_per_second,
+        status_callback=status_callback,
+    )
+    if not hydrated:
+        return item
+    merged = {
+        **item,
+        **hydrated,
+    }
+    merged_snippet = dict(item.get("snippet", {}) or {})
+    merged_snippet.update(hydrated.get("snippet", {}) or {})
+    merged_statistics = dict(item.get("statistics", {}) or {})
+    merged_statistics.update(hydrated.get("statistics", {}) or {})
+    merged["snippet"] = merged_snippet
+    merged["statistics"] = merged_statistics
+    merged["_waytube_duration_seconds"] = hydrated.get("_waytube_duration_seconds") or item.get("_waytube_duration_seconds")
+    merged["_waytube_source"] = hydrated.get("_waytube_source") or item.get("_waytube_source")
+    return merged
 
 
 def merge_candidate_items(existing: list[dict], incoming: list[dict]) -> list[dict]:
@@ -3464,6 +3660,14 @@ async def sync_video(
             reasons = candidate_reasons
 
     if best_item:
+        if best_item.get("_waytube_source") != "watch-page":
+            best_item = await hydrate_candidate_from_watch_page(
+                client,
+                best_item,
+                requests_per_second,
+                status_callback=status_callback,
+            )
+            best_score, reasons = score_match(video, best_item, channel_hints=channel_hints)
         channel_id = best_item.get("snippet", {}).get("channelId")
         known_channel_match = bool(channel_id and channel_id in deduped_channel_ids)
         local_channel_locked = bool(
@@ -3696,6 +3900,14 @@ async def send_video_to_review(
         review_reasons.append("youtube-api-fallback")
 
     if best_item:
+        if best_item.get("_waytube_source") != "watch-page":
+            best_item = await hydrate_candidate_from_watch_page(
+                client,
+                best_item,
+                requests_per_second,
+                status_callback=status_callback,
+            )
+            best_score, reasons = score_match(video, best_item, channel_hints=channel_hints)
         return await apply_sync_item(
             db,
             video,
