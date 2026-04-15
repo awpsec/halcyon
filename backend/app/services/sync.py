@@ -1410,6 +1410,62 @@ def score_match(video: Video, item: dict, *, channel_hints: list[str] | None = N
     return score, reasons
 
 
+def _candidate_meets_primary_match_threshold(score: float, reasons: list[str]) -> bool:
+    threshold = 0.72 if {"duration-tight", "duration", "exact-title"} & set(reasons) else 0.8
+    return score >= threshold
+
+
+def _snapshot_candidate_item(
+    snapshot: YouTubeVideoSnapshot,
+    *,
+    channel_title: str | None,
+) -> dict[str, Any]:
+    published_at = None
+    if snapshot.published_at:
+        published_at = snapshot.published_at.isoformat()
+    thumbnail_url = snapshot.thumbnail_url
+    return {
+        "id": snapshot.youtube_video_id,
+        "snippet": {
+            "title": snapshot.title,
+            "channelTitle": channel_title,
+            "channelId": snapshot.youtube_channel_id,
+            "description": snapshot.description,
+            "publishedAt": published_at,
+            "thumbnails": {"high": {"url": thumbnail_url}} if thumbnail_url else {},
+        },
+        "statistics": {
+            "viewCount": snapshot.view_count,
+            "likeCount": snapshot.like_count,
+            "commentCount": None,
+        },
+        "_waytube_duration_seconds": snapshot.duration_seconds,
+        "_waytube_source": "snapshot",
+    }
+
+
+def _existing_match_snapshot_is_plausible(
+    db: Session,
+    video: Video,
+    snapshot: YouTubeVideoSnapshot | None,
+) -> bool:
+    if not snapshot or not snapshot.title:
+        return True
+    channel_title = None
+    if snapshot.youtube_channel_id:
+        channel_snapshot = db.scalar(
+            select(YouTubeChannelSnapshot).where(
+                YouTubeChannelSnapshot.youtube_channel_id == snapshot.youtube_channel_id
+            )
+        )
+        channel_title = channel_snapshot.title if channel_snapshot and channel_snapshot.title else None
+    score, reasons = score_match(
+        video,
+        _snapshot_candidate_item(snapshot, channel_title=channel_title),
+    )
+    return _candidate_meets_primary_match_threshold(score, reasons)
+
+
 def infer_channel_ids_from_neighbor_titles(db: Session, video: Video, *, limit: int = 3) -> list[str]:
     video_tokens = set(tokenize_text(clean_display_title(video.title) or video.title))
     if len(video_tokens) < 2:
@@ -2737,6 +2793,16 @@ async def refresh_live_streams(
         else:
             meta = candidate_meta.get(youtube_video_id)
         snippet = item.get("snippet", {}) or {}
+        actual_youtube_channel_id = str(snippet.get("channelId") or "").strip()
+        expected_youtube_channel_id = str(meta.get("youtube_channel_id") or "").strip()
+        if actual_youtube_channel_id and expected_youtube_channel_id and actual_youtube_channel_id != expected_youtube_channel_id:
+            logger.info(
+                "Live detail rejected youtube_video_id=%s expected_channel_id=%s actual_channel_id=%s",
+                youtube_video_id,
+                expected_youtube_channel_id,
+                actual_youtube_channel_id,
+            )
+            continue
         live_details = item.get("liveStreamingDetails", {}) or {}
         is_currently_live = (
             bool(item.get("_waytube_live_web"))
@@ -3620,6 +3686,8 @@ async def sync_video(
         refresh_snapshot = db.scalar(
             select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == existing_match.youtube_video_id)
         )
+        existing_match_plausible = _existing_match_snapshot_is_plausible(db, video, refresh_snapshot)
+        refresh_rejected = False
         needs_refresh = force or video_requires_refresh(
             db,
             video,
@@ -3627,6 +3695,8 @@ async def sync_video(
             allow_fallback_art=allow_fallback_art,
             prefer_high_res_banners=prefer_high_res_banners,
         )
+        if not needs_refresh and not existing_match_plausible:
+            needs_refresh = True
         if not needs_refresh:
             organization_moves: list[tuple[Path, Path]] = []
             if video_requires_organization(db, video) and video.channel:
@@ -3653,24 +3723,36 @@ async def sync_video(
                 status_callback=status_callback,
             )
             if refresh_item:
-                refresh_reasons = list(dict.fromkeys((existing_match.reasons or []) + ["refresh-by-id"]))
-                return await apply_sync_item(
-                    db,
-                    video,
-                    refresh_item,
-                    comment_limit=comment_limit,
-                    max_replies_per_comment=max_replies_per_comment,
-                    requests_per_second=requests_per_second,
-                    client=client,
-                    api_key=None,
-                    channel_cache=channel_cache,
-                    playlist_cache=playlist_cache,
-                    allow_fallback_art=allow_fallback_art,
-                    prefer_high_res_banners=prefer_high_res_banners,
-                    confidence=existing_match.confidence or 1.0,
-                    reasons=refresh_reasons,
-                    status="matched",
+                refresh_score, refresh_candidate_reasons = score_match(video, refresh_item)
+                if _candidate_meets_primary_match_threshold(refresh_score, refresh_candidate_reasons):
+                    refresh_reasons = list(
+                        dict.fromkeys((existing_match.reasons or []) + refresh_candidate_reasons + ["refresh-by-id"])
+                    )
+                    return await apply_sync_item(
+                        db,
+                        video,
+                        refresh_item,
+                        comment_limit=comment_limit,
+                        max_replies_per_comment=max_replies_per_comment,
+                        requests_per_second=requests_per_second,
+                        client=client,
+                        api_key=None,
+                        channel_cache=channel_cache,
+                        playlist_cache=playlist_cache,
+                        allow_fallback_art=allow_fallback_art,
+                        prefer_high_res_banners=prefer_high_res_banners,
+                        confidence=max(existing_match.confidence or 0.0, refresh_score),
+                        reasons=refresh_reasons,
+                        status="matched",
+                    )
+                logger.info(
+                    "Sync refresh-by-id rejected video_id=%s youtube_video_id=%s reasons=%s score=%.2f",
+                    video.id,
+                    existing_match.youtube_video_id,
+                    ",".join(refresh_candidate_reasons),
+                    refresh_score,
                 )
+                refresh_rejected = True
             needs_api_gap_fill = bool(
                 refresh_snapshot
                 and (
@@ -3680,7 +3762,7 @@ async def sync_video(
                     or not refresh_snapshot.thumbnail_url
                 )
             )
-            if not (effective_api_key and needs_api_gap_fill):
+            if not refresh_rejected and existing_match_plausible and not (effective_api_key and needs_api_gap_fill):
                 existing_match.last_synced_at = datetime.utcnow()
                 db.commit()
                 db.refresh(existing_match)
@@ -3708,32 +3790,44 @@ async def sync_video(
                     effective_api_key = None
                 refresh_item = None
             if refresh_item:
-                refresh_reasons = list(dict.fromkeys((existing_match.reasons or []) + ["refresh-by-id"]))
-                if force:
-                    refresh_reasons.append("force-refresh")
-                return await apply_sync_item(
-                    db,
-                    video,
-                    refresh_item,
-                    comment_limit=comment_limit,
-                    max_replies_per_comment=max_replies_per_comment,
-                    requests_per_second=requests_per_second,
-                    client=client,
-                    api_key=effective_api_key,
-                    channel_cache=channel_cache,
-                    playlist_cache=playlist_cache,
-                    allow_fallback_art=allow_fallback_art,
-                    prefer_high_res_banners=prefer_high_res_banners,
-                    confidence=existing_match.confidence or 1.0,
-                    reasons=refresh_reasons,
-                    status="matched",
+                refresh_score, refresh_candidate_reasons = score_match(video, refresh_item)
+                if _candidate_meets_primary_match_threshold(refresh_score, refresh_candidate_reasons):
+                    refresh_reasons = list(
+                        dict.fromkeys((existing_match.reasons or []) + refresh_candidate_reasons + ["refresh-by-id"])
+                    )
+                    if force:
+                        refresh_reasons.append("force-refresh")
+                    return await apply_sync_item(
+                        db,
+                        video,
+                        refresh_item,
+                        comment_limit=comment_limit,
+                        max_replies_per_comment=max_replies_per_comment,
+                        requests_per_second=requests_per_second,
+                        client=client,
+                        api_key=effective_api_key,
+                        channel_cache=channel_cache,
+                        playlist_cache=playlist_cache,
+                        allow_fallback_art=allow_fallback_art,
+                        prefer_high_res_banners=prefer_high_res_banners,
+                        confidence=max(existing_match.confidence or 0.0, refresh_score),
+                        reasons=refresh_reasons,
+                        status="matched",
+                    )
+                logger.info(
+                    "Sync api refresh-by-id rejected video_id=%s youtube_video_id=%s reasons=%s score=%.2f",
+                    video.id,
+                    existing_match.youtube_video_id,
+                    ",".join(refresh_candidate_reasons),
+                    refresh_score,
                 )
-            if not force:
+                refresh_rejected = True
+            if not force and not refresh_rejected and existing_match_plausible:
                 existing_match.last_synced_at = datetime.utcnow()
                 db.commit()
                 db.refresh(existing_match)
                 return existing_match
-        if not force:
+        if not force and not refresh_rejected and existing_match_plausible:
             existing_match.last_synced_at = datetime.utcnow()
             db.commit()
             db.refresh(existing_match)
@@ -3922,8 +4016,12 @@ async def sync_video(
             and not known_channel_match
             and "channel-mismatch" in reasons
         )
-        generic_threshold = 0.72 if "duration-tight" in reasons or "duration" in reasons or "exact-title" in reasons else 0.8
-        match_status = "matched" if best_score >= generic_threshold or (known_channel_match and best_score >= 0.58) else "review"
+        local_known_channel_match = bool(
+            known_channel_match
+            and video.channel
+            and not is_generic_channel_name(video.channel.name)
+        )
+        match_status = "matched" if _candidate_meets_primary_match_threshold(best_score, reasons) or (local_known_channel_match and best_score >= 0.58) else "review"
         if hard_channel_mismatch:
             match_status = "review"
         review_candidates = None
