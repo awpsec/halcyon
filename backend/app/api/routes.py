@@ -143,6 +143,7 @@ from app.services.sync import (
     REQUEST_HEADERS,
     allow_fallback_art_enabled,
     apply_sync_item,
+    auto_organize_channel_files,
     build_youtube_api_quota_summary,
     fetch_watch_page_candidate,
     monitored_live_channel_ids,
@@ -150,6 +151,8 @@ from app.services.sync import (
     prefer_high_res_banners_enabled,
     reconcile_sync_job,
     refresh_live_streams,
+    refresh_channel_from_snapshot,
+    resolve_synced_channel_target,
     send_video_to_review,
     sync_scope,
 )
@@ -3508,8 +3511,46 @@ def approve_match(
     match = db.get(YouTubeMatch, match_id)
     if not match:
         raise HTTPException(status_code=404, detail="Match not found")
+    video = _video_by_id(db, match.video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    organization_moves: list[tuple[Path, Path]] = []
+    if match.youtube_channel_id:
+        channel_snapshot = db.scalar(
+            select(YouTubeChannelSnapshot).where(
+                YouTubeChannelSnapshot.youtube_channel_id == match.youtube_channel_id
+            )
+        )
+        target_channel = resolve_synced_channel_target(
+            db,
+            video,
+            match.youtube_channel_id,
+            channel_snapshot.title if channel_snapshot else None,
+        )
+        if target_channel:
+            refresh_channel_from_snapshot(target_channel, channel_snapshot)
+            try:
+                organization_moves = auto_organize_channel_files(db, video=video, channel=target_channel)
+            except Exception as exc:
+                logger.warning(
+                    "Review approve organize skipped video_id=%s channel=%s error=%s",
+                    video.id,
+                    target_channel.slug,
+                    exc,
+                )
     match.status = "matched"
-    db.commit()
+    match.stale = False
+    match.last_synced_at = datetime.utcnow()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        for moved_path, original_path in reversed(organization_moves):
+            if moved_path.exists():
+                original_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(moved_path), str(original_path))
+        raise
     return {"ok": True}
 
 

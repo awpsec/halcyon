@@ -11,10 +11,10 @@ import app.services.scanner as scanner_service
 import app.services.subtitles as subtitle_service
 import app.services.sync as sync_service
 from app.api import routes as routes_module
-from app.api.routes import _indexed_library_storage_bytes, _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage, list_roots, list_selected_folders, list_videos, manually_match_review_item, update_sync_settings
+from app.api.routes import _indexed_library_storage_bytes, _scan_library_storage_bytes, _selected_storage_roots, approve_match, get_sync_settings, library_storage, list_roots, list_selected_folders, list_videos, manually_match_review_item, update_sync_settings
 from app.db.init_db import seed_defaults
 from app.models.base import Base
-from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, SyncSettings, UserProfile, Video, VideoFile, YouTubeMatch, YouTubeVideoSnapshot
+from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, SyncSettings, UserProfile, Video, VideoFile, YouTubeChannelSnapshot, YouTubeMatch, YouTubeVideoSnapshot
 from app.schemas.common import SyncReviewManualIn, SyncSettingsIn
 from app.services.media import find_caption_tracks
 from app.services.scanner import scan_selected_folders
@@ -569,6 +569,66 @@ def test_manual_sync_review_match_accepts_youtube_url(tmp_path: Path, monkeypatc
         assert "manual-review" in (refreshed_match.reasons or [])
 
 
+def test_approve_review_match_reassigns_video_off_unknown_channel(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        admin = UserProfile(name="admin", display_name="Admin", accent_color="#fff", is_admin=True)
+        unknown = Channel(name="Unknown Channel", slug="unknown-channel", inferred_from_path=True)
+        db.add_all([admin, unknown])
+        db.flush()
+
+        video = Video(
+            title="LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+            slug="lady-bandits-ep-30",
+            channel_id=unknown.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=1443,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+
+        match = YouTubeMatch(
+            video_id=video.id,
+            youtube_video_id="abc123def45",
+            youtube_channel_id="channel-frankie",
+            status="review",
+            confidence=0.61,
+            reasons=["channel-mismatch"],
+            stale=True,
+        )
+        db.add(match)
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-frankie",
+                title="FRANKIEonPCin1080p",
+                description="A survivor-themed channel",
+                avatar_url="https://example.com/avatar.jpg",
+                banner_url="https://example.com/banner.jpg",
+            )
+        )
+        db.commit()
+
+        result = approve_match(match.id, db=db, current_user=admin)
+
+        refreshed_match = db.get(YouTubeMatch, match.id)
+        refreshed_video = db.get(Video, video.id)
+
+        assert result == {"ok": True}
+        assert refreshed_match is not None
+        assert refreshed_video is not None
+        assert refreshed_match.status == "matched"
+        assert refreshed_match.stale is False
+        assert refreshed_video.channel_id != unknown.id
+
+        assigned_channel = db.get(Channel, refreshed_video.channel_id)
+        assert assigned_channel is not None
+        assert assigned_channel.slug == "frankieonpcin1080p"
+        assert assigned_channel.name == "FRANKIEonPCin1080p"
+        assert assigned_channel.description == "A survivor-themed channel"
+        assert assigned_channel.avatar_url == "https://example.com/avatar.jpg"
+        assert assigned_channel.banner_url == "https://example.com/banner.jpg"
+
+
 def test_send_video_to_review_researches_and_queues_candidate(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
@@ -618,6 +678,10 @@ def test_send_video_to_review_researches_and_queues_candidate(tmp_path: Path, mo
         async def fake_fetch_fallback_candidates(*args, **kwargs):
             return []
 
+        async def fake_hydrate_candidate_from_watch_page(_client, item: dict, _requests_per_second, status_callback=None):
+            del status_callback
+            return item
+
         def fake_score_match(_video: Video, _item: dict, *, channel_hints=None):
             del channel_hints
             return 0.74, ["exact-title", "duration-tight"]
@@ -635,6 +699,7 @@ def test_send_video_to_review_researches_and_queues_candidate(tmp_path: Path, mo
         monkeypatch.setattr(sync_service, "fetch_channel_candidates", fake_fetch_channel_candidates)
         monkeypatch.setattr(sync_service, "fetch_search_candidates", fake_fetch_search_candidates)
         monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "hydrate_candidate_from_watch_page", fake_hydrate_candidate_from_watch_page)
         monkeypatch.setattr(sync_service, "score_match", fake_score_match)
         monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
 
@@ -746,6 +811,10 @@ def test_send_video_to_review_broadens_search_when_channel_hints_are_polluted(tm
         async def fake_fetch_fallback_candidates(*args, **kwargs):
             return []
 
+        async def fake_hydrate_candidate_from_watch_page(_client, item: dict, _requests_per_second, status_callback=None):
+            del status_callback
+            return item
+
         def fake_score_match(_video: Video, item: dict, *, channel_hints=None):
             del channel_hints
             if item["id"] == "abc123def45":
@@ -766,6 +835,7 @@ def test_send_video_to_review_broadens_search_when_channel_hints_are_polluted(tm
         monkeypatch.setattr(sync_service, "fetch_search_candidates", fake_fetch_search_candidates)
         monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates", fake_fetch_recent_channel_upload_candidates)
         monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "hydrate_candidate_from_watch_page", fake_hydrate_candidate_from_watch_page)
         monkeypatch.setattr(sync_service, "score_match", fake_score_match)
         monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
 

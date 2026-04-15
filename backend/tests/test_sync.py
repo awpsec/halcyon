@@ -1931,6 +1931,228 @@ def test_apply_sync_item_assigns_series_from_playlist_membership(tmp_path: Path,
         assert "playlist-membership" in (refreshed_match.reasons or [])
 
 
+def test_apply_sync_item_enriches_channel_from_about_without_api(tmp_path: Path, monkeypatch):
+    source_path = tmp_path / "library" / "asmongold.mp4"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"source")
+
+    def fake_settings() -> Settings:
+        return Settings(
+            mounted_roots=[],
+            config_dir=tmp_path / "config",
+            cache_dir=tmp_path / "cache",
+            background_tasks_enabled=False,
+        )
+
+    async def fake_ryd(*args, **kwargs):
+        return None
+
+    async def fake_channel_about(*args, **kwargs):
+        return {
+            "title": "Asmongold TV",
+            "description": "Channel description from about",
+            "joined_at": datetime(2019, 12, 9),
+            "canonical_url": "https://www.youtube.com/@AsmonTV",
+            "links": [{"title": "X", "url": "https://x.com/asmongold"}],
+            "avatar_url": "https://yt3.googleusercontent.com/avatar=s176-c-k-c0x00ffffff-no-rj",
+            "banner_url": "https://yt3.googleusercontent.com/banner=w2120",
+            "subscriber_count": 4_490_000,
+            "video_count": 6_945,
+            "view_count": 5_135_286_525,
+        }
+
+    monkeypatch.setattr(sync_service, "get_settings", fake_settings)
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_about)
+    monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
+
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="British Navy is a joke now",
+            slug="british-navy-is-a-joke-now-channel-fallback",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=900,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(source_path),
+                relative_path="asmongold.mp4",
+                file_size=source_path.stat().st_size,
+                fingerprint="q" * 64,
+            )
+        )
+        db.commit()
+        db.refresh(video)
+
+        item = {
+            "id": "asmongold123",
+            "snippet": {
+                "title": "British Navy is a joke now",
+                "channelTitle": "Asmongold TV",
+                "channelId": "channel-asmongold",
+                "publishedAt": "2026-04-06T12:00:00Z",
+                "description": "Matched metadata",
+                "thumbnails": {},
+            },
+            "statistics": {
+                "viewCount": "1234",
+                "likeCount": "56",
+            },
+            "_waytube_duration_seconds": 900,
+            "_waytube_source": "watch-page",
+        }
+
+        async def run() -> None:
+            async with httpx.AsyncClient() as client:
+                await apply_sync_item(
+                    db,
+                    video,
+                    item,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                    api_key=None,
+                    allow_fallback_art=True,
+                    confidence=0.93,
+                    reasons=["channel", "duration-tight"],
+                    status="matched",
+                )
+
+        asyncio.run(run())
+
+        refreshed_video = db.get(Video, video.id)
+        refreshed_channel = db.get(Channel, refreshed_video.channel_id) if refreshed_video else None
+        channel_snapshot = db.scalar(
+            select(YouTubeChannelSnapshot).where(YouTubeChannelSnapshot.youtube_channel_id == "channel-asmongold")
+        )
+
+        assert refreshed_channel is not None
+        assert refreshed_channel.name == "Asmongold TV"
+        assert refreshed_channel.description == "Channel description from about"
+        assert refreshed_channel.avatar_url == "https://yt3.googleusercontent.com/avatar=s176-c-k-c0x00ffffff-no-rj"
+        assert refreshed_channel.banner_url == "https://yt3.googleusercontent.com/banner=w2120"
+
+        assert channel_snapshot is not None
+        assert channel_snapshot.title == "Asmongold TV"
+        assert channel_snapshot.description == "Channel description from about"
+        assert channel_snapshot.avatar_url == "https://yt3.googleusercontent.com/avatar=s176-c-k-c0x00ffffff-no-rj"
+        assert channel_snapshot.banner_url == "https://yt3.googleusercontent.com/banner=w2120"
+        assert channel_snapshot.subscriber_count == 4_490_000
+        assert channel_snapshot.video_count == 6_945
+        assert channel_snapshot.view_count == 5_135_286_525
+        assert channel_snapshot.canonical_url == "https://www.youtube.com/@AsmonTV"
+        assert channel_snapshot.links == [{"title": "X", "url": "https://x.com/asmongold"}]
+
+
+def test_apply_sync_item_uses_ryd_without_api_for_like_dislike_counts(tmp_path: Path, monkeypatch):
+    source_path = tmp_path / "library" / "ryd.mp4"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"source")
+
+    def fake_settings() -> Settings:
+        return Settings(
+            mounted_roots=[],
+            config_dir=tmp_path / "config",
+            cache_dir=tmp_path / "cache",
+            background_tasks_enabled=False,
+        )
+
+    async def fake_ryd(*args, **kwargs):
+        return {
+            "likes": 678,
+            "rawLikes": 678,
+            "dislikes": 21,
+            "rating": 4.91,
+        }
+
+    async def fake_channel_about(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(sync_service, "get_settings", fake_settings)
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_about)
+    monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
+
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="RYD Test Video",
+            slug="ryd-test-video",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=900,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(source_path),
+                relative_path="ryd.mp4",
+                file_size=source_path.stat().st_size,
+                fingerprint="r" * 64,
+            )
+        )
+        db.commit()
+        db.refresh(video)
+
+        item = {
+            "id": "ryd12345678",
+            "snippet": {
+                "title": "RYD Test Video",
+                "channelTitle": "RYD Channel",
+                "channelId": "channel-ryd",
+                "publishedAt": "2026-04-06T12:00:00Z",
+                "description": "Matched metadata",
+                "thumbnails": {},
+            },
+            "statistics": {
+                "viewCount": "1234",
+                "likeCount": "56",
+            },
+            "_waytube_duration_seconds": 900,
+            "_waytube_source": "watch-page",
+        }
+
+        async def run() -> None:
+            async with httpx.AsyncClient() as client:
+                await apply_sync_item(
+                    db,
+                    video,
+                    item,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                    api_key=None,
+                    confidence=0.93,
+                    reasons=["title", "duration-tight"],
+                    status="matched",
+                )
+
+        asyncio.run(run())
+
+        snapshot = db.scalar(select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == "ryd12345678"))
+
+        assert snapshot is not None
+        assert snapshot.view_count == 1234
+        assert snapshot.like_count == 678
+        assert snapshot.dislike_count == 21
+        assert snapshot.rating == 4.91
+
+
 def test_sync_video_reorganizes_existing_matched_file_into_selected_library_folder(tmp_path: Path, monkeypatch):
     library_root = tmp_path / "library"
     library_folder = library_root / "youtube"
