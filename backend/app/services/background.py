@@ -50,9 +50,6 @@ async def background_auto_sync_once(settings: Settings) -> None:
         if not sync_settings:
             return
         api_key = (sync_settings.youtube_api_key or "").strip() or settings.youtube_api_key
-        if sync_settings.automatic_detection_enabled:
-            if not active_running_sync_jobs(db):
-                await sync_scope(db, scope="orphans", target_id=None, api_key=api_key, quiet_if_idle=True)
         if sync_settings.live_tab_enabled:
             configured_interval = max(
                 LIVE_SYNC_MIN_INTERVAL_SECONDS,
@@ -67,6 +64,9 @@ async def background_auto_sync_once(settings: Settings) -> None:
                     api_key=api_key,
                     requests_per_second=sync_settings.requests_per_second or 3,
                 )
+        if sync_settings.automatic_detection_enabled:
+            if not active_running_sync_jobs(db):
+                await sync_scope(db, scope="orphans", target_id=None, api_key=api_key, quiet_if_idle=True)
         if not sync_settings.automatic_sync_enabled:
             return
         if active_running_sync_jobs(db):

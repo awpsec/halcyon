@@ -182,6 +182,7 @@ AUTH_RESET_WINDOW_SECONDS = 15 * 60
 AUTH_ADMIN_RECOVERY_LIMIT = 5
 AUTH_ADMIN_RECOVERY_WINDOW_SECONDS = 15 * 60
 LIVE_REFRESH_INTERVAL_SECONDS = 1200
+LIVE_EMPTY_REFRESH_INTERVAL_SECONDS = 300
 LIVE_STALE_AFTER_SECONDS = 1800
 DEFAULT_LIBRARY_SENTINEL = ".halcyon-library-root"
 YOUTUBE_VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
@@ -1272,7 +1273,14 @@ async def _refresh_live_if_due(
         not last_live_sync_at
         or now - last_live_sync_at >= timedelta(seconds=LIVE_REFRESH_INTERVAL_SECONDS)
     )
-    if not standard_refresh_due:
+    empty_refresh_due = (
+        not _has_fresh_live_streams(db, youtube_video_id=youtube_video_id)
+        and (
+            not last_live_sync_at
+            or now - last_live_sync_at >= timedelta(seconds=LIVE_EMPTY_REFRESH_INTERVAL_SECONDS)
+        )
+    )
+    if not standard_refresh_due and not empty_refresh_due:
         return
     await refresh_live_streams(
         db,

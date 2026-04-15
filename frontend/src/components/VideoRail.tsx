@@ -41,6 +41,7 @@ export type CardItem = {
   youtube_view_count?: number | null;
   youtube_like_count?: number | null;
   youtube_comment_count?: number | null;
+  youtube_match_status?: string | null;
 };
 
 type Props = {
@@ -118,6 +119,7 @@ export function VideoCard({
     item.reason !== "recently-added" &&
     item.published_at != null &&
     Date.now() - new Date(item.published_at).getTime() <= 48 * 60 * 60 * 1000;
+  const isInReview = item.youtube_match_status === "review";
 
   const menuPlacement = useMemo(() => {
     if (!menuAnchor || typeof window === "undefined") return null;
@@ -468,13 +470,18 @@ export function VideoCard({
       }}
     >
       <div className="tile-thumb media-thumb">
+        {isInReview || isWatched || isNew ? (
+          <div className="tile-status-overlay-stack">
+            {isInReview ? <span className="review-badge-overlay">In review</span> : null}
+            {isWatched ? <span className="watched-badge-overlay">Watched</span> : null}
+            {isNew ? <span className="fresh-badge-overlay">New</span> : null}
+          </div>
+        ) : null}
         <img
           src={item.thumbnail_url ?? `/api/videos/${item.id}/thumbnail`}
           alt={displayTitle}
           loading="lazy"
         />
-        {isWatched ? <span className="watched-badge-overlay">Watched</span> : null}
-        {isNew ? <span className="fresh-badge-overlay">New</span> : null}
         {previewSource && !previewError ? (
           <video
             ref={videoRef}

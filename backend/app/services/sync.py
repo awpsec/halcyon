@@ -405,7 +405,11 @@ def distinct_youtube_channel_ids_for_channel(db: Session, channel_id: int | None
         for item in db.scalars(
             select(YouTubeMatch.youtube_channel_id)
             .join(Video, Video.id == YouTubeMatch.video_id)
-            .where(Video.channel_id == channel_id, YouTubeMatch.youtube_channel_id.is_not(None))
+            .where(
+                Video.channel_id == channel_id,
+                YouTubeMatch.status == "matched",
+                YouTubeMatch.youtube_channel_id.is_not(None),
+            )
             .distinct()
         ).all()
         if item
@@ -441,6 +445,7 @@ def resolve_synced_channel_target(
         .join(YouTubeMatch, YouTubeMatch.video_id == Video.id)
         .where(
             YouTubeMatch.youtube_channel_id == youtube_channel_id,
+            YouTubeMatch.status == "matched",
             Video.channel_id.is_not(None),
             Video.id != video.id,
         )
@@ -526,7 +531,10 @@ def normalize_channel_assignments(db: Session) -> None:
         select(Video)
         .options(joinedload(Video.channel), joinedload(Video.youtube_match))
         .join(YouTubeMatch, YouTubeMatch.video_id == Video.id)
-        .where(YouTubeMatch.youtube_channel_id.is_not(None))
+        .where(
+            YouTubeMatch.status == "matched",
+            YouTubeMatch.youtube_channel_id.is_not(None),
+        )
     ).unique().all()
     for video in matched_videos:
         youtube_channel_id = video.youtube_match.youtube_channel_id if video.youtube_match else None
@@ -2102,6 +2110,13 @@ def best_thumbnail_url(thumbnails: dict[str, Any] | None) -> str | None:
     return None
 
 
+def youtube_default_thumbnail_url(youtube_video_id: str | None) -> str | None:
+    video_id = str(youtube_video_id or "").strip()
+    if not video_id:
+        return None
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+
 def matched_youtube_channels_by_local_channel(db: Session) -> dict[int, str]:
     channel_id_map: dict[int, dict[str, int]] = {}
     rows = db.execute(
@@ -2410,6 +2425,11 @@ async def fetch_live_stream_candidates_web(
 ) -> tuple[bool, list[dict]]:
     checked = False
     video_ids: list[str] = []
+    logger.info(
+        "Live web lookup start channel_id=%s youtube_channel_id=%s",
+        local_channel_id,
+        youtube_channel_id,
+    )
 
     for url in (
         f"https://www.youtube.com/channel/{youtube_channel_id}/live",
@@ -2434,21 +2454,44 @@ async def fetch_live_stream_candidates_web(
         if video_ids:
             break
 
+    logger.info(
+        "Live web lookup channel_id=%s youtube_channel_id=%s candidate_ids=%s",
+        local_channel_id,
+        youtube_channel_id,
+        ",".join(video_ids) or "none",
+    )
+
     items: list[dict] = []
     for youtube_video_id in video_ids[:3]:
         candidate = await fetch_watch_page_candidate(client, youtube_video_id, requests_per_second)
         if not candidate:
+            logger.info(
+                "Live web lookup candidate skipped youtube_channel_id=%s video_id=%s reason=watch-page-missing",
+                youtube_channel_id,
+                youtube_video_id,
+            )
             continue
         snippet = candidate.setdefault("snippet", {})
         snippet["channelId"] = snippet.get("channelId") or youtube_channel_id
         if channel_name and not snippet.get("channelTitle"):
             snippet["channelTitle"] = channel_name
-        if not snippet.get("title") or not best_thumbnail_url(snippet.get("thumbnails")):
-            continue
+        if not snippet.get("title"):
+            snippet["title"] = "Live stream"
+        thumbnails = snippet.setdefault("thumbnails", {})
+        if not best_thumbnail_url(thumbnails):
+            fallback_thumbnail = youtube_default_thumbnail_url(youtube_video_id)
+            if fallback_thumbnail:
+                thumbnails["high"] = {"url": fallback_thumbnail}
         candidate["_waytube_live_web"] = True
         candidate["_waytube_local_channel_id"] = local_channel_id
         candidate["_waytube_checked_youtube_channel_id"] = youtube_channel_id
         items.append(candidate)
+        logger.info(
+            "Live web lookup accepted youtube_channel_id=%s video_id=%s title=%s",
+            youtube_channel_id,
+            youtube_video_id,
+            snippet.get("title"),
+        )
     return checked, items
 
 
@@ -2682,11 +2725,15 @@ async def refresh_live_streams(
         row.youtube_channel_id = meta["youtube_channel_id"]
         row.channel_id = meta["channel_id"]
         row.title = snippet.get("title") or row.title or "Live stream"
-        row.description = snippet.get("description")
-        row.thumbnail_url = best_thumbnail_url(snippet.get("thumbnails"))
+        row.description = snippet.get("description") or row.description
+        row.thumbnail_url = (
+            best_thumbnail_url(snippet.get("thumbnails"))
+            or row.thumbnail_url
+            or youtube_default_thumbnail_url(youtube_video_id)
+        )
         row.scheduled_start_at = _parse_iso8601_datetime(live_details.get("scheduledStartTime"))
-        row.actual_start_at = _parse_iso8601_datetime(live_details.get("actualStartTime"))
-        row.concurrent_viewers = parse_maybe_int(live_details.get("concurrentViewers"))
+        row.actual_start_at = _parse_iso8601_datetime(live_details.get("actualStartTime")) or row.actual_start_at
+        row.concurrent_viewers = parse_maybe_int(live_details.get("concurrentViewers")) or row.concurrent_viewers
         row.is_live = True
         row.last_seen_at = now
         row.fetched_at = now
@@ -3102,7 +3149,6 @@ async def apply_sync_item(
     snippet = item.get("snippet", {})
     statistics = item.get("statistics", {})
     video_id = item.get("id")
-    channel_id = snippet.get("channelId")
     effective_api_key = api_key
 
     if video_id:
@@ -3134,6 +3180,18 @@ async def apply_sync_item(
         db.flush()
 
     match = ensure_youtube_match_row(db, video.id)
+    existing_channel_id = match.youtube_channel_id
+    incoming_channel_id = str(snippet.get("channelId") or "").strip() or None
+    channel_id = incoming_channel_id or existing_channel_id
+    incoming_channel_title = str(snippet.get("channelTitle") or "").strip() or None
+    if not incoming_channel_id and existing_channel_id:
+        logger.info(
+            "Sync preserving existing channel link video_id=%s youtube_video_id=%s youtube_channel_id=%s source=%s",
+            video.id,
+            video_id,
+            existing_channel_id,
+            item.get("_waytube_source"),
+        )
 
     match.youtube_video_id = video_id
     match.youtube_channel_id = channel_id
@@ -3150,19 +3208,24 @@ async def apply_sync_item(
         snapshot = YouTubeVideoSnapshot(youtube_video_id=video_id, title=snippet.get("title", video.title))
         db.add(snapshot)
     snapshot.youtube_channel_id = channel_id
-    snapshot.title = clean_display_title(snippet.get("title", video.title) or video.title)
-    snapshot.description = snippet.get("description")
-    snapshot.duration_seconds = item.get("_waytube_duration_seconds")
-    thumbnail_url = (
-        snippet.get("thumbnails", {}).get("maxres", {}).get("url")
-        or snippet.get("thumbnails", {}).get("high", {}).get("url")
-        or snippet.get("thumbnails", {}).get("medium", {}).get("url")
-        or snippet.get("thumbnails", {}).get("default", {}).get("url")
-    )
+    snapshot.title = clean_display_title(snippet.get("title") or snapshot.title or video.title)
+    incoming_description = snippet.get("description")
+    if isinstance(incoming_description, str) and incoming_description.strip():
+        snapshot.description = incoming_description
+    incoming_duration_seconds = item.get("_waytube_duration_seconds")
+    if incoming_duration_seconds is not None:
+        snapshot.duration_seconds = incoming_duration_seconds
+    thumbnail_url = best_thumbnail_url(snippet.get("thumbnails")) or snapshot.thumbnail_url
     snapshot.thumbnail_url = thumbnail_url
-    snapshot.tags = snippet.get("tags", [])
-    snapshot.view_count = parse_maybe_int(statistics.get("viewCount"))
-    snapshot.like_count = parse_maybe_int(statistics.get("likeCount"))
+    incoming_tags = snippet.get("tags")
+    if isinstance(incoming_tags, list) and incoming_tags:
+        snapshot.tags = incoming_tags
+    incoming_view_count = parse_maybe_int(statistics.get("viewCount"))
+    if incoming_view_count is not None:
+        snapshot.view_count = incoming_view_count
+    incoming_like_count = parse_maybe_int(statistics.get("likeCount"))
+    if incoming_like_count is not None:
+        snapshot.like_count = incoming_like_count
     snapshot.dislike_count = None
     snapshot.rating = None
     ryd_snapshot = await fetch_return_youtube_dislike_details(client, video_id, requests_per_second)
@@ -3210,9 +3273,12 @@ async def apply_sync_item(
         matched_fields.append("channel")
         channel_snapshot = db.scalar(select(YouTubeChannelSnapshot).where(YouTubeChannelSnapshot.youtube_channel_id == channel_id))
         if not channel_snapshot:
-            channel_snapshot = YouTubeChannelSnapshot(youtube_channel_id=channel_id, title=snippet.get("channelTitle", "Unknown Channel"))
+            channel_snapshot = YouTubeChannelSnapshot(
+                youtube_channel_id=channel_id,
+                title=incoming_channel_title or (video.channel.name if video.channel else "Unknown Channel"),
+            )
             db.add(channel_snapshot)
-        channel_snapshot.title = snippet.get("channelTitle", channel_snapshot.title)
+        channel_snapshot.title = incoming_channel_title or channel_snapshot.title
         target_channel = video.channel
         if status == "matched":
             target_channel = resolve_synced_channel_target(db, video, channel_id, channel_snapshot.title)

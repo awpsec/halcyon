@@ -6,6 +6,7 @@ import httpx
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+import app.api.routes as routes_service
 import app.services.background as background_service
 import app.services.sync as sync_service
 from app.core.config import Settings
@@ -206,7 +207,7 @@ def test_fetch_watch_page_candidate_keeps_full_timestamp_publish_at(monkeypatch)
     assert result["snippet"]["publishedAt"] == "2026-04-09T04:34:45-07:00"
 
 
-def test_fetch_live_stream_candidates_web_skips_weak_watch_page_candidates(monkeypatch):
+def test_fetch_live_stream_candidates_web_preserves_weak_watch_page_candidates(monkeypatch):
     class DummyResponse:
         def __init__(self, url: str):
             self.text = ""
@@ -247,7 +248,187 @@ def test_fetch_live_stream_candidates_web_skips_weak_watch_page_candidates(monke
     checked, items = asyncio.run(run())
 
     assert checked is True
-    assert items == []
+    assert len(items) == 1
+    assert items[0]["snippet"]["title"] == "Live stream"
+    assert items[0]["snippet"]["channelTitle"] == "PGL"
+    assert items[0]["snippet"]["channelId"] == "channel-pgl"
+    assert (
+        items[0]["snippet"]["thumbnails"]["high"]["url"]
+        == "https://i.ytimg.com/vi/abc123def45/hqdefault.jpg"
+    )
+
+
+def test_resolve_synced_channel_target_ignores_review_rows_when_reusing_channels(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        review_channel = Channel(name="Shroud", slug="shroud")
+        unknown_channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add_all([review_channel, unknown_channel])
+        db.commit()
+
+        review_video = Video(
+            title="Wrong match",
+            slug="wrong-match",
+            channel_id=review_channel.id,
+            duration_seconds=600,
+        )
+        target_video = Video(
+            title="Needs proper channel",
+            slug="needs-proper-channel",
+            channel_id=unknown_channel.id,
+            duration_seconds=600,
+        )
+        db.add_all([review_video, target_video])
+        db.commit()
+        db.refresh(review_video)
+        db.refresh(target_video)
+
+        db.add(
+            YouTubeMatch(
+                video_id=review_video.id,
+                youtube_video_id="abc123def45",
+                youtube_channel_id="channel-asmongold",
+                status="review",
+                confidence=0.71,
+            )
+        )
+        db.commit()
+
+        resolved = sync_service.resolve_synced_channel_target(
+            db,
+            target_video,
+            "channel-asmongold",
+            "Asmongold TV",
+        )
+        db.flush()
+
+        assert resolved is not None
+        assert resolved.slug == "asmongold-tv"
+        assert target_video.channel_id == resolved.id
+
+
+def test_apply_sync_item_preserves_existing_snapshot_metadata_when_refresh_is_sparse(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(channel)
+        db.commit()
+        db.refresh(channel)
+
+        video = Video(
+            title="Original title",
+            slug="original-title",
+            channel_id=channel.id,
+            duration_seconds=600,
+        )
+        db.add(video)
+        db.commit()
+        db.refresh(video)
+
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="abc123def45",
+                youtube_channel_id="channel-jre",
+                status="matched",
+                confidence=0.92,
+            )
+        )
+        db.add(
+            YouTubeVideoSnapshot(
+                youtube_video_id="abc123def45",
+                youtube_channel_id="channel-jre",
+                title="Original title",
+                description="Original description",
+                duration_seconds=600,
+                thumbnail_url="https://i.ytimg.com/vi/abc123def45/hqdefault.jpg",
+                tags=["podcast"],
+                view_count=35000,
+                like_count=1200,
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-jre",
+                title="PowerfulJRE",
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_return_youtube_dislike_details(*args, **kwargs):
+            return None
+
+        async def fake_fetch_channel_about_details(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_fetch_return_youtube_dislike_details)
+        monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_fetch_channel_about_details)
+        monkeypatch.setattr(sync_service, "download_thumbnail", lambda *args, **kwargs: None)
+
+        item = {
+            "id": "abc123def45",
+            "snippet": {
+                "title": "Original title",
+                "channelId": None,
+                "channelTitle": None,
+                "description": None,
+                "publishedAt": None,
+                "thumbnails": {},
+            },
+            "statistics": {
+                "viewCount": None,
+                "likeCount": None,
+            },
+            "_waytube_duration_seconds": None,
+            "_waytube_source": "watch-page",
+        }
+
+        async def run():
+            async with httpx.AsyncClient() as client:
+                return await apply_sync_item(
+                    db,
+                    video,
+                    item,
+                    comment_limit=0,
+                    requests_per_second=3,
+                    client=client,
+                    api_key=None,
+                )
+
+        result = asyncio.run(run())
+        db.refresh(result)
+        snapshot = db.scalar(select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == "abc123def45"))
+
+        assert result.youtube_channel_id == "channel-jre"
+        assert snapshot is not None
+        assert snapshot.youtube_channel_id == "channel-jre"
+        assert snapshot.description == "Original description"
+        assert snapshot.thumbnail_url == "https://i.ytimg.com/vi/abc123def45/hqdefault.jpg"
+        assert snapshot.tags == ["podcast"]
+        assert snapshot.view_count == 35000
+        assert snapshot.like_count == 1200
+
+
+def test_refresh_live_if_due_rechecks_empty_state_quickly(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        settings_row = SyncSettings(
+            live_tab_enabled=True,
+            last_live_sync_at=datetime.utcnow() - timedelta(seconds=routes_service.LIVE_EMPTY_REFRESH_INTERVAL_SECONDS + 5),
+            requests_per_second=3,
+        )
+        db.add(settings_row)
+        db.commit()
+
+        calls: list[bool] = []
+
+        async def fake_refresh_live_streams(*args, **kwargs):
+            calls.append(True)
+            return []
+
+        monkeypatch.setattr(routes_service, "refresh_live_streams", fake_refresh_live_streams)
+        monkeypatch.setattr(routes_service, "_active_youtube_api_key", lambda _db: None)
+
+        asyncio.run(routes_service._refresh_live_if_due(db))
+
+        assert calls == [True]
 
 
 def test_hydrate_candidate_from_watch_page_preserves_existing_channel_metadata_when_watch_page_is_sparse(monkeypatch):

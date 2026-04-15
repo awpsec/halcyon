@@ -2812,9 +2812,6 @@ body,
 }
 
 .watched-badge-overlay {
-  position: absolute;
-  top: 10px;
-  left: 10px;
   z-index: 3;
   display: inline-flex;
   align-items: center;
@@ -2836,10 +2833,41 @@ body,
   border-color: rgba(255, 255, 255, 0.18);
 }
 
-.fresh-badge-overlay {
+.tile-status-overlay-stack {
   position: absolute;
   top: 10px;
   left: 10px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.review-badge-overlay {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(245, 193, 75, 0.28);
+  background: rgba(31, 24, 14, 0.88);
+  color: #f5d27a;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  box-shadow: 0 10px 18px rgba(0, 0, 0, 0.2);
+}
+
+:root[data-theme="light"] .review-badge-overlay {
+  border-color: rgba(184, 137, 13, 0.3);
+  background: rgba(255, 246, 222, 0.95);
+  color: #7a5400;
+}
+
+.fresh-badge-overlay {
   z-index: 3;
   display: inline-flex;
   align-items: center;
