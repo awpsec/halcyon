@@ -69,6 +69,7 @@ REQUEST_HEADERS = {
 }
 SYNC_STALE_AFTER = timedelta(minutes=5)
 MATCH_REFRESH_AFTER = timedelta(hours=6)
+MATCH_PERIODIC_STATS_REFRESH_LIMIT = 5
 CHANNEL_ART_RETRY_AFTER = timedelta(minutes=15)
 RYD_RATE_LIMIT_PER_MINUTE = 100
 RYD_RATE_LIMIT_PER_DAY = 10_000
@@ -1546,6 +1547,24 @@ def channel_art_requires_refresh(
     return not is_snapshot_fresh(channel_snapshot.fetched_at, max_age=CHANNEL_ART_RETRY_AFTER)
 
 
+def _snapshot_refresh_anchor(video: Video, snapshot: YouTubeVideoSnapshot) -> datetime:
+    for candidate in (
+        snapshot.published_at,
+        video.published_at,
+        snapshot.created_at,
+        video.created_at,
+    ):
+        if candidate:
+            return candidate.replace(tzinfo=None) if getattr(candidate, "tzinfo", None) else candidate
+    return datetime.utcnow()
+
+
+def periodic_stats_refresh_allowed(video: Video, snapshot: YouTubeVideoSnapshot) -> bool:
+    anchor = _snapshot_refresh_anchor(video, snapshot)
+    max_window = MATCH_REFRESH_AFTER * MATCH_PERIODIC_STATS_REFRESH_LIMIT
+    return datetime.utcnow() - anchor <= max_window
+
+
 def video_requires_refresh(
     db: Session,
     video: Video,
@@ -1560,10 +1579,6 @@ def video_requires_refresh(
     snapshot = db.scalar(select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == match.youtube_video_id))
     if not snapshot:
         return True
-    if not is_snapshot_fresh(snapshot.fetched_at):
-        return True
-    if snapshot.view_count is None or snapshot.like_count is None or snapshot.dislike_count is None:
-        return True
     if (
         snapshot.published_at is None
         or snapshot.published_at_source not in TRUSTED_PUBLISHED_AT_SOURCES
@@ -1577,6 +1592,13 @@ def video_requires_refresh(
         api_key_available=api_key_available,
         allow_fallback_art=allow_fallback_art,
         prefer_high_res_banners=prefer_high_res_banners,
+    ):
+        return True
+    if not is_snapshot_fresh(snapshot.fetched_at) and periodic_stats_refresh_allowed(video, snapshot):
+        return True
+    if (
+        periodic_stats_refresh_allowed(video, snapshot)
+        and (snapshot.view_count is None or snapshot.like_count is None)
     ):
         return True
     return False
@@ -3118,6 +3140,9 @@ async def sync_video(
         status_callback(phase="prepare", title=video.title, source="sync")
     existing_match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
     if existing_match and existing_match.status == "matched" and existing_match.youtube_video_id:
+        refresh_snapshot = db.scalar(
+            select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == existing_match.youtube_video_id)
+        )
         needs_refresh = force or video_requires_refresh(
             db,
             video,
@@ -3141,14 +3166,17 @@ async def sync_video(
                 raise
             db.refresh(existing_match)
             return existing_match
-        if not api_key:
+        if not force:
             if status_callback:
                 status_callback(phase="refresh", source="watch-page", youtube_video_id=existing_match.youtube_video_id)
-            refresh_item = await fetch_watch_page_candidate(client, existing_match.youtube_video_id, requests_per_second, status_callback=status_callback)
+            refresh_item = await fetch_watch_page_candidate(
+                client,
+                existing_match.youtube_video_id,
+                requests_per_second,
+                status_callback=status_callback,
+            )
             if refresh_item:
                 refresh_reasons = list(dict.fromkeys((existing_match.reasons or []) + ["refresh-by-id"]))
-                if force:
-                    refresh_reasons.append("force-refresh")
                 return await apply_sync_item(
                     db,
                     video,
@@ -3157,7 +3185,7 @@ async def sync_video(
                     max_replies_per_comment=max_replies_per_comment,
                     requests_per_second=requests_per_second,
                     client=client,
-                    api_key=api_key,
+                    api_key=None,
                     channel_cache=channel_cache,
                     playlist_cache=playlist_cache,
                     allow_fallback_art=allow_fallback_art,
@@ -3166,12 +3194,22 @@ async def sync_video(
                     reasons=refresh_reasons,
                     status="matched",
                 )
-            if not force:
+            needs_api_gap_fill = bool(
+                refresh_snapshot
+                and (
+                    refresh_snapshot.published_at is None
+                    or refresh_snapshot.published_at_source not in TRUSTED_PUBLISHED_AT_SOURCES
+                    or refresh_snapshot.duration_seconds is None
+                    or not refresh_snapshot.thumbnail_url
+                )
+            )
+            if not (effective_api_key and needs_api_gap_fill):
                 existing_match.last_synced_at = datetime.utcnow()
                 db.commit()
                 db.refresh(existing_match)
                 return existing_match
-        else:
+
+        if effective_api_key:
             if status_callback:
                 status_callback(phase="refresh", source="youtube-api", youtube_video_id=existing_match.youtube_video_id)
             try:
@@ -3218,6 +3256,11 @@ async def sync_video(
                 db.commit()
                 db.refresh(existing_match)
                 return existing_match
+        if not force:
+            existing_match.last_synced_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing_match)
+            return existing_match
 
     channel_ids: list[str] = []
     if video.channel_id and not force:
@@ -3601,75 +3644,76 @@ async def sync_scope(
         db.refresh(job)
 
         all_videos = db.scalars(select(Video).options(joinedload(Video.channel), joinedload(Video.series), joinedload(Video.youtube_match))).unique().all()
+
+        def build_sync_candidates(source_videos: list[Video]) -> list[tuple[int, float, Video]]:
+            candidates: list[tuple[int, float, Video]] = []
+            for candidate_video in source_videos:
+                needs_discovery = video_requires_discovery(candidate_video)
+                needs_organization = video_requires_organization(db, candidate_video)
+                needs_refresh = video_requires_refresh(
+                    db,
+                    candidate_video,
+                    api_key_available=bool(api_key),
+                    allow_fallback_art=allow_fallback_art,
+                    prefer_high_res_banners=prefer_high_res_banners,
+                )
+                if not (needs_discovery or needs_organization or needs_refresh):
+                    continue
+                if needs_discovery:
+                    priority = 0
+                elif needs_organization:
+                    priority = 1
+                else:
+                    priority = 2
+                created_at = candidate_video.created_at.timestamp() if candidate_video.created_at else 0.0
+                candidates.append((priority, -created_at, candidate_video))
+            candidates.sort(key=lambda item: (item[0], item[1], item[2].id))
+            return candidates
+
         if scope == "library":
-            videos = [
-                video
-                for video in all_videos
-                if video_requires_discovery(video)
-                or video_requires_organization(db, video)
-                or video_requires_refresh(
-                    db,
-                    video,
-                    api_key_available=bool(api_key),
-                    allow_fallback_art=allow_fallback_art,
-                    prefer_high_res_banners=prefer_high_res_banners,
-                )
-            ]
+            videos = [video for _, _, video in build_sync_candidates(all_videos)]
         elif scope == "orphans":
-            videos = [
-                video
-                for video in all_videos
-                if video_requires_discovery(video)
-                or video_requires_organization(db, video)
-                or (video.channel and (video.channel.slug == "unknown-channel" or is_generic_channel_name(video.channel.name)))
-                or channel_art_requires_refresh(
+            orphan_candidates: list[tuple[int, float, Video]] = []
+            for video in all_videos:
+                needs_generic_channel = bool(
+                    video.channel and (video.channel.slug == "unknown-channel" or is_generic_channel_name(video.channel.name))
+                )
+                needs_discovery = video_requires_discovery(video) or needs_generic_channel
+                needs_organization = video_requires_organization(db, video)
+                needs_channel_art = channel_art_requires_refresh(
                     db,
                     video,
                     api_key_available=bool(api_key),
                     allow_fallback_art=allow_fallback_art,
                     prefer_high_res_banners=prefer_high_res_banners,
                 )
-            ]
+                if not (needs_discovery or needs_organization or needs_channel_art):
+                    continue
+                if needs_discovery:
+                    priority = 0
+                elif needs_organization:
+                    priority = 1
+                else:
+                    priority = 2
+                created_at = video.created_at.timestamp() if video.created_at else 0.0
+                orphan_candidates.append((priority, -created_at, video))
+            orphan_candidates.sort(key=lambda item: (item[0], item[1], item[2].id))
+            videos = [video for _, _, video in orphan_candidates]
         elif scope == "video" and target_id:
             video = db.get(Video, target_id)
             videos = [video] if video else []
         elif scope == "channel" and target_id:
-            videos = [
-                video
-                for video in all_videos
-                if video.channel_id == target_id
-                and (
-                    force
-                    or prefer_high_res_banners_override is not None
-                    or video_requires_discovery(video)
-                    or video_requires_organization(db, video)
-                    or video_requires_refresh(
-                        db,
-                        video,
-                        api_key_available=bool(api_key),
-                        allow_fallback_art=allow_fallback_art,
-                        prefer_high_res_banners=prefer_high_res_banners,
-                    )
-                )
-            ]
+            scoped_videos = [video for video in all_videos if video.channel_id == target_id]
+            if force or prefer_high_res_banners_override is not None:
+                videos = scoped_videos
+            else:
+                videos = [video for _, _, video in build_sync_candidates(scoped_videos)]
         elif scope == "series" and target_id:
-            videos = [
-                video
-                for video in all_videos
-                if video.series_id == target_id
-                and (
-                    force
-                    or video_requires_discovery(video)
-                    or video_requires_organization(db, video)
-                    or video_requires_refresh(
-                        db,
-                        video,
-                        api_key_available=bool(api_key),
-                        allow_fallback_art=allow_fallback_art,
-                        prefer_high_res_banners=prefer_high_res_banners,
-                    )
-                )
-            ]
+            scoped_videos = [video for video in all_videos if video.series_id == target_id]
+            if force:
+                videos = scoped_videos
+            else:
+                videos = [video for _, _, video in build_sync_candidates(scoped_videos)]
         else:
             videos = []
 

@@ -1026,6 +1026,282 @@ def test_force_sync_refreshes_existing_match_by_id_before_researching(tmp_path: 
         assert search_called is False
 
 
+def test_non_force_refresh_prefers_watch_page_for_existing_match(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Asmongold TV", slug="asmongold-tv")
+        db.add(channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "matched-watch-page.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target")
+        video = Video(
+            title="British Navy is a joke now",
+            slug="british-navy-is-a-joke-now-watch-page",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=900,
+            published_at=datetime.utcnow(),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(target_path),
+                relative_path="matched-watch-page.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="7" * 64,
+            )
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="knownmatch2",
+                youtube_channel_id="channel-asmongold",
+                status="matched",
+                confidence=0.94,
+                reasons=["channel", "duration-tight"],
+            )
+        )
+        db.add(
+            YouTubeVideoSnapshot(
+                youtube_video_id="knownmatch2",
+                youtube_channel_id="channel-asmongold",
+                title="British Navy is a joke now",
+                published_at=datetime.utcnow(),
+                published_at_source="youtube-api",
+                duration_seconds=900,
+                thumbnail_url="https://example.com/thumb.jpg",
+                view_count=100,
+                like_count=50,
+                dislike_count=2,
+                fetched_at=datetime.utcnow() - timedelta(hours=7),
+            )
+        )
+        db.commit()
+
+        api_refresh_called = False
+
+        async def fake_fetch_watch_page_candidate(*args, **kwargs):
+            return {
+                "id": "knownmatch2",
+                "snippet": {
+                    "title": "The state of British Navy is embarrassing",
+                    "channelTitle": "Asmongold TV",
+                    "channelId": "channel-asmongold",
+                    "publishedAt": "2026-04-15T12:00:00Z",
+                    "description": "Watch page refresh",
+                    "thumbnails": {},
+                },
+                "statistics": {"viewCount": 12345, "likeCount": 678},
+                "_waytube_duration_seconds": 900,
+                "_waytube_source": "watch-page",
+            }
+
+        async def fake_fetch_video_details_by_id(*args, **kwargs):
+            nonlocal api_refresh_called
+            api_refresh_called = True
+            return None
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            assert kwargs["api_key"] is None
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            assert match is not None
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+        monkeypatch.setattr(sync_service, "fetch_video_details_by_id", fake_fetch_video_details_by_id)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    video,
+                    api_key="test-api-key",
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert api_refresh_called is False
+        assert "refresh-by-id" in (result.reasons or [])
+
+
+def test_video_requires_refresh_stops_periodic_refresh_for_old_matched_video(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="PGL", slug="pgl")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="Older upload",
+            slug="older-upload",
+            channel_id=channel.id,
+            created_at=datetime.utcnow() - timedelta(days=30),
+            published_at=datetime.utcnow() - timedelta(days=30),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="oldmatch1",
+                youtube_channel_id="channel-pgl",
+                status="matched",
+            )
+        )
+        db.add(
+            YouTubeVideoSnapshot(
+                youtube_video_id="oldmatch1",
+                youtube_channel_id="channel-pgl",
+                title="Older upload",
+                published_at=datetime.utcnow() - timedelta(days=30),
+                published_at_source="youtube-api",
+                duration_seconds=600,
+                thumbnail_url="https://example.com/thumb.jpg",
+                view_count=1000,
+                like_count=200,
+                dislike_count=None,
+                fetched_at=datetime.utcnow() - timedelta(hours=7),
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-pgl",
+                title="PGL",
+                avatar_url="https://example.com/avatar.jpg",
+                banner_url="https://example.com/banner.jpg",
+            )
+        )
+        db.commit()
+
+        assert (
+            sync_service.video_requires_refresh(
+                db,
+                video,
+                api_key_available=True,
+                allow_fallback_art=False,
+                prefer_high_res_banners=False,
+            )
+            is False
+        )
+
+
+def test_sync_scope_prioritizes_discovery_before_background_refresh(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        db.add(
+            SyncSettings(
+                automatic_detection_enabled=True,
+                automatic_sync_enabled=True,
+                scan_interval_seconds=900,
+            )
+        )
+        db.flush()
+
+        refresh_video = Video(
+            title="Older matched",
+            slug="older-matched",
+            created_at=datetime.utcnow() - timedelta(days=1),
+            published_at=datetime.utcnow(),
+            is_available=True,
+        )
+        discovery_video = Video(
+            title="Brand new discovery",
+            slug="brand-new-discovery",
+            created_at=datetime.utcnow(),
+            is_available=True,
+        )
+        db.add_all([refresh_video, discovery_video])
+        db.flush()
+
+        old_path = tmp_path / "library" / "older.mp4"
+        new_path = tmp_path / "library" / "new.mp4"
+        old_path.parent.mkdir(parents=True, exist_ok=True)
+        old_path.write_bytes(b"old")
+        new_path.write_bytes(b"new")
+        db.add_all(
+            [
+                VideoFile(
+                    video_id=refresh_video.id,
+                    absolute_path=str(old_path),
+                    relative_path="older.mp4",
+                    file_size=old_path.stat().st_size,
+                    fingerprint="8" * 64,
+                ),
+                VideoFile(
+                    video_id=discovery_video.id,
+                    absolute_path=str(new_path),
+                    relative_path="new.mp4",
+                    file_size=new_path.stat().st_size,
+                    fingerprint="9" * 64,
+                ),
+            ]
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=refresh_video.id,
+                youtube_video_id="known-refresh",
+                youtube_channel_id="channel-refresh",
+                status="matched",
+            )
+        )
+        db.add(
+            YouTubeVideoSnapshot(
+                youtube_video_id="known-refresh",
+                youtube_channel_id="channel-refresh",
+                title="Older matched",
+                published_at=datetime.utcnow(),
+                published_at_source="youtube-api",
+                duration_seconds=600,
+                thumbnail_url="https://example.com/thumb.jpg",
+                view_count=200,
+                like_count=50,
+                dislike_count=1,
+                fetched_at=datetime.utcnow() - timedelta(hours=7),
+            )
+        )
+        db.commit()
+
+        seen_titles: list[str] = []
+
+        async def fake_sync_video(db, video, **kwargs):
+            seen_titles.append(video.title)
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id, status="matched", youtube_video_id=f"auto-{video.id}")
+                db.add(match)
+                db.flush()
+            match.status = "matched"
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "sync_video", fake_sync_video)
+
+        asyncio.run(sync_scope(db, scope="library", target_id=None, api_key=None, quiet_if_idle=False))
+
+        assert seen_titles[:2] == ["Brand new discovery", "Older matched"]
+
+
 def test_background_auto_sync_clears_stale_running_jobs_before_library_sync(tmp_path: Path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'background.db'}", future=True)
     Base.metadata.create_all(engine)
