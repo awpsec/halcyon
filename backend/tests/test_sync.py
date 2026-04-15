@@ -718,6 +718,134 @@ def test_sync_video_disables_api_after_fatal_search_and_uses_fallback_match(tmp_
         assert result.youtube_channel_id == "channel-frankie"
 
 
+def test_sync_video_uses_web_recent_channel_uploads_without_api_for_known_channel(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
+        db.add(channel)
+        db.flush()
+
+        existing_path = tmp_path / "library" / "frankie-existing.mp4"
+        target_path = tmp_path / "library" / "frankie-new.mp4"
+        existing_path.parent.mkdir(parents=True, exist_ok=True)
+        existing_path.write_bytes(b"existing")
+        target_path.write_bytes(b"target")
+
+        existing_video = Video(
+            title="CHERNO JOURNEY! - Arma 2: DayZ Mod - Ep.29",
+            slug="cherno-journey-ep-29",
+            channel_id=channel.id,
+            created_at=datetime.utcnow() - timedelta(days=1),
+            duration_seconds=1400,
+            published_at=datetime(2026, 4, 10),
+            is_available=True,
+        )
+        target_video = Video(
+            title="LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+            slug="lady-bandits-ep-30",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=1443,
+            published_at=datetime(2026, 4, 11),
+            is_available=True,
+        )
+        db.add_all([existing_video, target_video])
+        db.flush()
+        db.add_all(
+            [
+                VideoFile(
+                    video_id=existing_video.id,
+                    absolute_path=str(existing_path),
+                    relative_path="frankie-existing.mp4",
+                    file_size=existing_path.stat().st_size,
+                    fingerprint="a" * 64,
+                ),
+                VideoFile(
+                    video_id=target_video.id,
+                    absolute_path=str(target_path),
+                    relative_path="frankie-new.mp4",
+                    file_size=target_path.stat().st_size,
+                    fingerprint="b" * 64,
+                ),
+            ]
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=existing_video.id,
+                youtube_video_id="frankie-old-1",
+                youtube_channel_id="channel-frankie",
+                status="matched",
+                confidence=0.95,
+            )
+        )
+        db.commit()
+
+        web_recent_called = False
+
+        async def fake_fetch_recent_channel_upload_candidates_web(*args, **kwargs):
+            nonlocal web_recent_called
+            web_recent_called = True
+            return [
+                {
+                    "id": "frankie-new-1",
+                    "snippet": {
+                        "title": "LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+                        "channelTitle": "FRANKIEonPCin1080p",
+                        "channelId": "channel-frankie",
+                        "publishedAt": "2026-04-11T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 1443,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return []
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            assert kwargs["api_key"] is None
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates_web", fake_fetch_recent_channel_upload_candidates_web)
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert web_recent_called is True
+        assert result.status == "matched"
+        assert result.youtube_video_id == "frankie-new-1"
+        assert result.youtube_channel_id == "channel-frankie"
+
+
 def test_refresh_live_streams_reuses_existing_live_channel_without_playlist_lookup(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="PGL", slug="pgl")

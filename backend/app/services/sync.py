@@ -1833,6 +1833,54 @@ async def fetch_recent_channel_upload_candidates(
     return merged
 
 
+async def fetch_recent_channel_upload_candidates_web(
+    client: httpx.AsyncClient,
+    channel_ids: list[str],
+    requests_per_second: int,
+    status_callback=None,
+) -> list[dict]:
+    merged: list[dict] = []
+    seen_ids: set[str] = set()
+    for channel_id in channel_ids[:2]:
+        if status_callback:
+            status_callback(phase="search", source="youtube-web-channel-recent", channel_id=channel_id)
+        logger.info("Sync youtube web recent channel uploads channel_id=%s", channel_id)
+        response = await throttled_get(
+            client,
+            f"https://www.youtube.com/channel/{channel_id}/videos",
+            params={
+                "view": "0",
+                "sort": "dd",
+                "flow": "grid",
+                "hl": "en",
+            },
+            requests_per_second=requests_per_second,
+            headers=REQUEST_HEADERS,
+        )
+        if response.is_error:
+            continue
+        candidate_ids: list[str] = []
+        for video_id in re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', response.text):
+            if video_id not in candidate_ids:
+                candidate_ids.append(video_id)
+            if len(candidate_ids) >= 12:
+                break
+        for youtube_video_id in candidate_ids:
+            if youtube_video_id in seen_ids:
+                continue
+            candidate = await fetch_watch_page_candidate(
+                client,
+                youtube_video_id,
+                requests_per_second,
+                status_callback=status_callback,
+            )
+            if not candidate:
+                continue
+            merged.append(candidate)
+            seen_ids.add(youtube_video_id)
+    return merged
+
+
 async def fetch_top_comments(
     client: httpx.AsyncClient,
     api_key: str,
@@ -2712,6 +2760,21 @@ async def fetch_fallback_candidates(client: httpx.AsyncClient, queries: list[str
     return candidates
 
 
+def merge_candidate_items(existing: list[dict], incoming: list[dict]) -> list[dict]:
+    seen_ids = {
+        item.get("id")
+        for item in existing
+        if item.get("id")
+    }
+    for item in incoming:
+        youtube_video_id = item.get("id")
+        if not youtube_video_id or youtube_video_id in seen_ids:
+            continue
+        existing.append(item)
+        seen_ids.add(youtube_video_id)
+    return existing
+
+
 async def apply_sync_item(
     db: Session,
     video: Video,
@@ -3361,7 +3424,29 @@ async def sync_video(
             logger.warning("Sync api fallback video_id=%s title=%s error=%s", video.id, video.title, exc)
             if status_callback:
                 status_callback(phase="fallback", title=video.title, source="google-dork", warning=str(exc))
+    if deduped_channel_ids and not effective_api_key:
+        merge_candidate_items(
+            candidates,
+            await fetch_recent_channel_upload_candidates_web(
+                client,
+                deduped_channel_ids,
+                requests_per_second,
+                status_callback=status_callback,
+            ),
+        )
     if not candidates:
+        candidates = []
+    if not effective_api_key:
+        merge_candidate_items(
+            candidates,
+            await fetch_fallback_candidates(
+                client,
+                build_search_queries(video, include_channel=not force, channel_hints=channel_hints),
+                requests_per_second,
+                status_callback=status_callback,
+            ),
+        )
+    elif not candidates:
         candidates = await fetch_fallback_candidates(
             client,
             build_search_queries(video, include_channel=not force, channel_hints=channel_hints),
@@ -3566,7 +3651,29 @@ async def send_video_to_review(
             logger.warning("Sync review api fallback video_id=%s title=%s error=%s", video.id, video.title, exc)
             if status_callback:
                 status_callback(phase="fallback", title=video.title, source="google-dork", warning=str(exc))
+    if deduped_channel_ids and not effective_api_key:
+        merge_candidate_items(
+            candidates,
+            await fetch_recent_channel_upload_candidates_web(
+                client,
+                deduped_channel_ids,
+                requests_per_second,
+                status_callback=status_callback,
+            ),
+        )
     if not candidates:
+        candidates = []
+    if not effective_api_key:
+        merge_candidate_items(
+            candidates,
+            await fetch_fallback_candidates(
+                client,
+                build_search_queries(video, include_channel=True, channel_hints=channel_hints),
+                requests_per_second,
+                status_callback=status_callback,
+            ),
+        )
+    elif not candidates:
         candidates = await fetch_fallback_candidates(
             client,
             build_search_queries(video, include_channel=True, channel_hints=channel_hints),
