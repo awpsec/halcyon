@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import app.api.routes as routes_service
 import app.services.background as background_service
+import app.services.feed as feed_service
 import app.services.sync as sync_service
 from app.core.config import Settings
 from app.models.base import Base
@@ -151,6 +152,134 @@ def test_fetch_youtube_web_candidates_parses_video_renderers(monkeypatch):
     assert results[0]["snippet"]["channelId"] == "channel-jynxzi"
     assert results[0]["statistics"]["viewCount"] == 14_845
     assert results[0]["_waytube_duration_seconds"] == 36 * 60 + 39
+
+
+def test_fetch_google_dork_video_ids_merges_across_queries(monkeypatch):
+    html_by_query = {
+        'site:youtube.com/watch "Asmongold TV British Navy is a joke now"': """
+        <html><body>
+          <a href="/url?q=https://www.youtube.com/watch?v=wrong12345a&sa=U"></a>
+        </body></html>
+        """,
+        'site:youtube.com/watch "British Navy is a joke now"': """
+        <html><body>
+          <a href="/url?q=https://www.youtube.com/watch?v=right12345b&sa=U"></a>
+        </body></html>
+        """,
+    }
+
+    class DummyResponse:
+        def __init__(self, text: str):
+            self.text = text
+            self.is_error = False
+
+    async def fake_throttled_get(*args, **kwargs):
+        return DummyResponse(html_by_query[kwargs["params"]["q"]])
+
+    monkeypatch.setattr(sync_service, "throttled_get", fake_throttled_get)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_google_dork_video_ids(
+                client,
+                ["Asmongold TV British Navy is a joke now", "British Navy is a joke now"],
+                3,
+            )
+
+    results = asyncio.run(run())
+
+    assert results == ["wrong12345a", "right12345b"]
+
+
+def test_fetch_youtube_web_candidates_merges_across_queries(monkeypatch):
+    html_by_query = {
+        "Asmongold TV British Navy is a joke now": """
+        <html><body><script>
+        var ytInitialData = {
+          "contents": {
+            "twoColumnSearchResultsRenderer": {
+              "primaryContents": {
+                "sectionListRenderer": {
+                  "contents": [
+                    {
+                      "itemSectionRenderer": {
+                        "contents": [
+                          {
+                            "videoRenderer": {
+                              "videoId": "wrong12345a",
+                              "title": {"runs": [{"text": "This is absolutely embarrassing.."}]},
+                              "ownerText": {"runs": [{"text": "Asmongold TV", "navigationEndpoint": {"browseEndpoint": {"browseId": "channel-asmongold"}}}]},
+                              "lengthText": {"simpleText": "15:00"},
+                              "thumbnail": {"thumbnails": [{"url": "https://i.ytimg.com/vi/wrong12345a/hqdefault.jpg"}]},
+                              "viewCountText": {"simpleText": "12,345 views"}
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        };
+        </script></body></html>
+        """,
+        "British Navy is a joke now": """
+        <html><body><script>
+        var ytInitialData = {
+          "contents": {
+            "twoColumnSearchResultsRenderer": {
+              "primaryContents": {
+                "sectionListRenderer": {
+                  "contents": [
+                    {
+                      "itemSectionRenderer": {
+                        "contents": [
+                          {
+                            "videoRenderer": {
+                              "videoId": "right12345b",
+                              "title": {"runs": [{"text": "British Navy is a joke now"}]},
+                              "ownerText": {"runs": [{"text": "Asmongold TV", "navigationEndpoint": {"browseEndpoint": {"browseId": "channel-asmongold"}}}]},
+                              "lengthText": {"simpleText": "15:03"},
+                              "thumbnail": {"thumbnails": [{"url": "https://i.ytimg.com/vi/right12345b/hqdefault.jpg"}]},
+                              "viewCountText": {"simpleText": "67,890 views"}
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        };
+        </script></body></html>
+        """,
+    }
+
+    class DummyResponse:
+        def __init__(self, text: str):
+            self.text = text
+            self.is_error = False
+
+    async def fake_throttled_get(*args, **kwargs):
+        return DummyResponse(html_by_query[kwargs["params"]["search_query"]])
+
+    monkeypatch.setattr(sync_service, "throttled_get", fake_throttled_get)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_youtube_web_candidates(
+                client,
+                ["Asmongold TV British Navy is a joke now", "British Navy is a joke now"],
+                3,
+            )
+
+    results = asyncio.run(run())
+
+    assert [item["id"] for item in results] == ["wrong12345a", "right12345b"]
 
 
 def test_fetch_watch_page_candidate_keeps_full_timestamp_publish_at(monkeypatch):
@@ -831,6 +960,7 @@ def test_sync_video_uses_neighbor_title_channel_hints_for_orphans_without_api(tm
 
         assert result.status == "matched"
         assert result.youtube_channel_id == "channel-asmongold"
+        assert captured_queries[0] == "Britain Navy is a joke now"
         assert any("Asmongold TV" in query for query in captured_queries)
 
 
@@ -1386,6 +1516,135 @@ def test_sync_video_disables_api_after_fatal_search_and_uses_fallback_match(tmp_
         assert result.youtube_channel_id == "channel-frankie"
 
 
+def test_sync_video_uses_channel_lookup_ids_and_broadens_api_search(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="PowerfulJRE", slug="powerfuljre")
+        db.add(channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "jre.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target")
+        video = Video(
+            title="Joe Rogan Experience #2483 - Spencer Pratt",
+            slug="joe-rogan-experience-2483-spencer-pratt",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=2 * 3600 + 34 * 60 + 23,
+            published_at=datetime(2026, 4, 14),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(target_path),
+                relative_path="jre.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="lookup" * 10 + "12",
+            )
+        )
+        db.commit()
+
+        seen_channel_ids: list[list[str] | None] = []
+
+        async def fake_fetch_channel_candidates(*args, **kwargs):
+            return [
+                {
+                    "id": {"channelId": "channel-jre"},
+                    "snippet": {"channelTitle": "PowerfulJRE"},
+                }
+            ]
+
+        async def fake_fetch_search_candidates(
+            client,
+            api_key,
+            queries,
+            requests_per_second,
+            channel_ids=None,
+            status_callback=None,
+        ):
+            del client, api_key, queries, requests_per_second, status_callback
+            seen_channel_ids.append(list(channel_ids) if channel_ids else None)
+            if channel_ids:
+                return [
+                    {
+                        "id": "clips2483ab",
+                        "snippet": {
+                            "title": "Spencer Pratt on Joe Rogan clips",
+                            "channelTitle": "PowerfulJRE",
+                            "channelId": "channel-jre",
+                            "publishedAt": "2026-04-14T12:00:00Z",
+                        },
+                        "statistics": {},
+                        "_waytube_duration_seconds": 9 * 60,
+                        "_waytube_source": "youtube-api-search",
+                    }
+                ]
+            return [
+                {
+                    "id": "jre2483abc1",
+                    "snippet": {
+                        "title": "Joe Rogan Experience #2483 - Spencer Pratt",
+                        "channelTitle": "PowerfulJRE",
+                        "channelId": "channel-jre",
+                        "publishedAt": "2026-04-14T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 2 * 3600 + 34 * 60 + 23,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_fetch_recent_channel_upload_candidates(*args, **kwargs):
+            return []
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_channel_candidates", fake_fetch_channel_candidates)
+        monkeypatch.setattr(sync_service, "fetch_search_candidates", fake_fetch_search_candidates)
+        monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates", fake_fetch_recent_channel_upload_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    video,
+                    api_key="test-api-key",
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert seen_channel_ids[0] == ["channel-jre"]
+        assert seen_channel_ids[1] is None
+        assert result.status == "matched"
+        assert result.youtube_video_id == "jre2483abc1"
+        assert result.youtube_channel_id == "channel-jre"
+
+
 def test_sync_video_uses_web_recent_channel_uploads_without_api_for_known_channel(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
@@ -1709,11 +1968,153 @@ def test_apply_sync_item_review_keeps_existing_channel_assignment(tmp_path: Path
         result = asyncio.run(run())
         refreshed_video = db.get(Video, video.id)
         created_channel = db.scalar(select(Channel).where(Channel.slug == "bizim-kanal"))
+        created_snapshot = db.scalar(select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == "bizim123"))
+        created_channel_snapshot = db.scalar(
+            select(YouTubeChannelSnapshot).where(YouTubeChannelSnapshot.youtube_channel_id == "channel-bizim")
+        )
 
         assert result.status == "review"
         assert refreshed_video is not None
         assert refreshed_video.channel_id == channel.id
         assert created_channel is None
+        assert created_snapshot is None
+        assert created_channel_snapshot is None
+        assert db.get(Channel, channel.id).name == "FRANKIEonPCin1080p"
+
+
+def test_channel_snapshot_for_channel_ignores_review_matches(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Correct Channel", slug="correct-channel")
+        video = Video(
+            title="Review target",
+            slug="review-target",
+            channel=channel,
+            duration_seconds=600,
+            is_available=True,
+        )
+        db.add_all([channel, video])
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="review12345a",
+                youtube_channel_id="wrong-channel",
+                status="review",
+                confidence=0.71,
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="wrong-channel",
+                title="Wrong Channel",
+            )
+        )
+        db.commit()
+
+        assert routes_service._channel_snapshot_for_channel(db, channel.id) is None
+
+
+def test_build_home_feed_ignores_review_channel_snapshot(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        user = UserProfile(name="viewer", display_name="Viewer")
+        channel = Channel(name="Correct Channel", slug="correct-channel")
+        video = Video(
+            title="Review target",
+            slug="review-target",
+            channel=channel,
+            duration_seconds=600,
+            is_available=True,
+        )
+        db.add_all([user, channel, video])
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="review12345b",
+                youtube_channel_id="wrong-channel",
+                status="review",
+                confidence=0.74,
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="wrong-channel",
+                title="Wrong Channel",
+                avatar_url="https://example.com/wrong.jpg",
+            )
+        )
+        db.commit()
+
+        sections = feed_service.build_home_feed(db, user.id)
+        cards = [card for section in sections for card in section.items]
+        target_card = next(card for card in cards if card.id == video.id)
+
+        assert target_card.channel == "Correct Channel"
+
+
+def test_video_thumbnail_ignores_review_snapshot_remote_art(tmp_path: Path, monkeypatch):
+    generated_thumb = tmp_path / "cache" / "thumbnails" / "local.jpg"
+    generated_thumb.parent.mkdir(parents=True, exist_ok=True)
+    generated_thumb.write_bytes(b"thumb")
+    source_path = tmp_path / "library" / "video.mp4"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"video")
+
+    def fail_download(*args, **kwargs):
+        raise AssertionError("review snapshot thumbnail should not be downloaded")
+
+    monkeypatch.setattr(routes_service, "download_thumbnail", fail_download)
+    monkeypatch.setattr(routes_service, "generate_thumbnail", lambda *args, **kwargs: str(generated_thumb))
+
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Correct Channel", slug="correct-channel")
+        video = Video(
+            title="Review target",
+            slug="review-target",
+            channel=channel,
+            duration_seconds=600,
+            is_available=True,
+        )
+        db.add_all([channel, video])
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(source_path),
+                relative_path="video.mp4",
+                file_size=source_path.stat().st_size,
+                fingerprint="t" * 64,
+            )
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="review12345c",
+                youtube_channel_id="wrong-channel",
+                status="review",
+                confidence=0.74,
+            )
+        )
+        db.add(
+            YouTubeVideoSnapshot(
+                youtube_video_id="review12345c",
+                youtube_channel_id="wrong-channel",
+                title="Wrong review target",
+                thumbnail_url="https://example.com/wrong.jpg",
+            )
+        )
+        db.commit()
+
+        response = routes_service.video_thumbnail(
+            video.id,
+            db=db,
+            current_user=UserProfile(name="viewer", display_name="Viewer"),
+        )
+        refreshed_video = db.get(Video, video.id)
+
+        assert refreshed_video is not None
+        assert refreshed_video.thumbnail_path == str(generated_thumb)
+        assert response.path == str(generated_thumb)
 
 
 def test_force_sync_refreshes_existing_match_by_id_before_researching(tmp_path: Path, monkeypatch):

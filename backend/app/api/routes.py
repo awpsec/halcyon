@@ -409,6 +409,13 @@ def _video_query():
     return select(Video).options(joinedload(Video.channel), joinedload(Video.series), joinedload(Video.files), joinedload(Video.youtube_match))
 
 
+def _authoritative_youtube_match(video: Video) -> YouTubeMatch | None:
+    match = video.youtube_match
+    if match and match.status == "matched":
+        return match
+    return None
+
+
 def _trusted_snapshot_published_at(snapshot: YouTubeVideoSnapshot | None) -> datetime | None:
     if not snapshot or not snapshot.published_at:
         return None
@@ -421,6 +428,7 @@ def _video_recency_order_clause():
     trusted_snapshot_published_at = case(
         (
             and_(
+                YouTubeMatch.status == "matched",
                 YouTubeVideoSnapshot.published_at.is_not(None),
                 YouTubeVideoSnapshot.published_at_source.in_(TRUSTED_PUBLISHED_AT_SOURCES),
             ),
@@ -575,7 +583,11 @@ def _channel_snapshot_for_channel(db: Session, channel_id: int) -> YouTubeChanne
         for item in db.scalars(
             select(YouTubeMatch.youtube_channel_id)
             .join(Video, Video.id == YouTubeMatch.video_id)
-            .where(Video.channel_id == channel_id, YouTubeMatch.youtube_channel_id.is_not(None))
+            .where(
+                Video.channel_id == channel_id,
+                YouTubeMatch.status == "matched",
+                YouTubeMatch.youtube_channel_id.is_not(None),
+            )
             .distinct()
             .limit(2)
         ).all()
@@ -2137,13 +2149,14 @@ def get_video(
         if video.channel_id
         else False
     )
-    if video.youtube_match and video.youtube_match.youtube_video_id:
+    authoritative_match = _authoritative_youtube_match(video)
+    if authoritative_match and authoritative_match.youtube_video_id:
         youtube_snapshot = db.scalar(
-            select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == video.youtube_match.youtube_video_id)
+            select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == authoritative_match.youtube_video_id)
         )
         comments = db.scalars(
             select(YouTubeCommentSnapshot)
-            .where(YouTubeCommentSnapshot.youtube_video_id == video.youtube_match.youtube_video_id)
+            .where(YouTubeCommentSnapshot.youtube_video_id == authoritative_match.youtube_video_id)
             .order_by(YouTubeCommentSnapshot.id.asc())
         ).all()
     comment_replies_by_parent: dict[int, list[YouTubeCommentReplySnapshot]] = {}
@@ -2524,11 +2537,12 @@ def video_thumbnail(
     video = db.get(Video, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    if (not video.thumbnail_path or not Path(video.thumbnail_path).exists()) and video.youtube_match and video.youtube_match.youtube_video_id:
-        snapshot = db.scalar(select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == video.youtube_match.youtube_video_id))
+    authoritative_match = _authoritative_youtube_match(video)
+    if (not video.thumbnail_path or not Path(video.thumbnail_path).exists()) and authoritative_match and authoritative_match.youtube_video_id:
+        snapshot = db.scalar(select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == authoritative_match.youtube_video_id))
         thumbnail_url = snapshot.thumbnail_url if snapshot else None
         if thumbnail_url:
-            fingerprint = video.files[0].fingerprint if video.files else f"yt-{video.youtube_match.youtube_video_id}"
+            fingerprint = video.files[0].fingerprint if video.files else f"yt-{authoritative_match.youtube_video_id}"
             downloaded = download_thumbnail(thumbnail_url, settings.cache_dir, fingerprint, force_replace=True)
             if downloaded:
                 video.thumbnail_path = downloaded

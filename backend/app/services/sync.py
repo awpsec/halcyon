@@ -1662,7 +1662,13 @@ def build_search_queries(
     normalized_title = " ".join(tokenize_text(video.title))
     title_tokens = tokenize_text(video.title)
     compact_title = " ".join(title_tokens[:12]) if title_tokens else normalized_title
-    queries = []
+    queries = [
+        raw_title,
+        f"\"{raw_title}\"",
+        normalized_title,
+    ]
+    if compact_title and compact_title.lower() != video.title.lower():
+        queries.append(compact_title)
     hinted_channels = [
         hint.strip()
         for hint in (channel_hints or [])
@@ -1676,11 +1682,6 @@ def build_search_queries(
         queries.append(f"{hint} {raw_title}".strip())
         queries.append(f"{hint} {compact_title}".strip())
         queries.append(f"\"{compact_title}\" {hint}".strip())
-    queries.append(raw_title)
-    queries.append(f"\"{raw_title}\"")
-    queries.append(normalized_title)
-    if compact_title and compact_title.lower() != video.title.lower():
-        queries.append(compact_title)
     if video.series and video.episode_number:
         series_title = canonicalize_search_text(video.series.name)
         queries.append(f"{series_title} part {video.episode_number}".strip())
@@ -1693,7 +1694,7 @@ def build_search_queries(
         cleaned = re.sub(r"\bunknown channel\b", "", cleaned, flags=re.IGNORECASE).strip()
         if cleaned and cleaned not in deduped:
             deduped.append(cleaned)
-    return deduped[:4]
+    return deduped[:8]
 
 
 async def fetch_channel_candidates(client: httpx.AsyncClient, api_key: str, channel_name: str, requests_per_second: int) -> list[dict]:
@@ -2819,7 +2820,7 @@ async def fetch_google_dork_video_ids(
         for video_id in extract_video_ids_from_urls(urls):
             if video_id not in results:
                 results.append(video_id)
-        if results:
+        if len(results) >= 8:
             break
     return results[:8]
 
@@ -2849,7 +2850,7 @@ async def fetch_youtube_web_video_ids(
                 results.append(video_id)
             if len(results) >= 8:
                 break
-        if results:
+        if len(results) >= 8:
             break
     return results[:8]
 
@@ -2882,7 +2883,9 @@ async def fetch_youtube_web_candidates(
                 continue
             results.append(candidate)
             seen_ids.add(video_id)
-        if results:
+            if len(results) >= 12:
+                break
+        if len(results) >= 12:
             break
     return results[:12]
 
@@ -3202,6 +3205,11 @@ async def apply_sync_item(
     match.rejected_youtube_video_ids = list(dict.fromkeys(rejected_youtube_video_ids or []))
     match.last_synced_at = datetime.utcnow()
     match.stale = False
+
+    if status != "matched":
+        db.commit()
+        db.refresh(match)
+        return match
 
     snapshot = db.scalar(select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == video_id))
     if not snapshot:
@@ -3736,7 +3744,7 @@ async def sync_video(
                     snippet = candidate.get("snippet", {})
                     resolved_name = resolve_display_name(video.channel.name, snippet.get("channelTitle"))
                     if resolved_name == snippet.get("channelTitle") and candidate.get("id", {}).get("channelId"):
-                        channel_ids.append(candidate["id"]["channelId"])
+                        deduped_channel_ids.append(candidate["id"]["channelId"])
             except YouTubeSyncError as exc:
                 logger.warning("Sync channel fallback video_id=%s channel=%s error=%s", video.id, video.channel.name, exc)
                 api_error = exc
@@ -3773,8 +3781,8 @@ async def sync_video(
                 channel_ids=deduped_channel_ids[:2] or None,
                 status_callback=status_callback,
             )
-            if not candidates and deduped_channel_ids:
-                candidates = await fetch_search_candidates(
+            if deduped_channel_ids:
+                broader_candidates = await fetch_search_candidates(
                     client,
                     effective_api_key,
                     build_search_queries(video, include_channel=not force, channel_hints=channel_hints),
@@ -3782,6 +3790,17 @@ async def sync_video(
                     channel_ids=None,
                     status_callback=status_callback,
                 )
+                if broader_candidates:
+                    seen_candidate_ids = {
+                        item.get("id")
+                        for item in candidates
+                        if item.get("id")
+                    }
+                    candidates.extend(
+                        candidate
+                        for candidate in broader_candidates
+                        if candidate.get("id") and candidate.get("id") not in seen_candidate_ids
+                    )
             if deduped_channel_ids:
                 recent_candidates = await fetch_recent_channel_upload_candidates(
                     client,

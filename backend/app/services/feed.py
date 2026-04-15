@@ -14,9 +14,17 @@ from app.services.utils import parse_episode_number
 TRUSTED_PUBLISHED_AT_SOURCES = {"youtube-api", "watch-page"}
 
 
+def _authoritative_youtube_match(video: Video) -> YouTubeMatch | None:
+    match = video.youtube_match
+    if match and match.status == "matched":
+        return match
+    return None
+
+
 def _watch_ref(video: Video) -> str:
-    if video.youtube_match and video.youtube_match.status == "matched" and video.youtube_match.youtube_video_id:
-        return video.youtube_match.youtube_video_id
+    match = _authoritative_youtube_match(video)
+    if match and match.youtube_video_id:
+        return match.youtube_video_id
     return str(video.id)
 
 
@@ -35,14 +43,19 @@ def _stable_suggested_jitter(user_id: int, video_id: int) -> float:
 
 
 def _resolved_channel_snapshot(video: Video, db: Session) -> YouTubeChannelSnapshot | None:
-    youtube_channel_id = video.youtube_match.youtube_channel_id if video.youtube_match and video.youtube_match.youtube_channel_id else None
+    match = _authoritative_youtube_match(video)
+    youtube_channel_id = match.youtube_channel_id if match and match.youtube_channel_id else None
     if not youtube_channel_id and video.channel_id:
         youtube_channel_ids = [
             item
             for item in db.scalars(
                 select(YouTubeMatch.youtube_channel_id)
                 .join(Video, Video.id == YouTubeMatch.video_id)
-                .where(Video.channel_id == video.channel_id, YouTubeMatch.youtube_channel_id.is_not(None))
+                .where(
+                    Video.channel_id == video.channel_id,
+                    YouTubeMatch.status == "matched",
+                    YouTubeMatch.youtube_channel_id.is_not(None),
+                )
                 .distinct()
                 .limit(2)
             ).all()
@@ -84,9 +97,9 @@ def _trusted_snapshot_published_at(snapshot: YouTubeVideoSnapshot | None) -> dat
 
 def _trusted_published_at_by_video_id(videos: list[Video], db: Session) -> dict[int, datetime]:
     youtube_video_ids_by_video_id = {
-        video.id: video.youtube_match.youtube_video_id
+        video.id: match.youtube_video_id
         for video in videos
-        if video.youtube_match and video.youtube_match.youtube_video_id
+        if (match := _authoritative_youtube_match(video)) and match.youtube_video_id
     }
     youtube_video_ids = list({youtube_video_id for youtube_video_id in youtube_video_ids_by_video_id.values() if youtube_video_id})
     if not youtube_video_ids:
@@ -116,16 +129,17 @@ def _video_recency_timestamp(video: Video, trusted_published_at_by_video_id: dic
 
 def _video_to_card(video: Video, progress_by_video: dict[int, WatchProgress], reason: str, db: Session) -> FeedCard:
     video = apply_video_override(db, video)
+    match = _authoritative_youtube_match(video)
     progress = progress_by_video.get(video.id)
     comment_count = None
     like_count = None
     dislike_count = None
     rating = None
     view_count = None
-    published_at = None if video.youtube_match and video.youtube_match.youtube_video_id else video.published_at
+    published_at = None if match and match.youtube_video_id else video.published_at
     channel_name, channel_avatar_url = _channel_display(video, db)
-    if video.youtube_match and video.youtube_match.youtube_video_id:
-        snapshot = db.scalar(select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == video.youtube_match.youtube_video_id))
+    if match and match.youtube_video_id:
+        snapshot = db.scalar(select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == match.youtube_video_id))
         if snapshot:
             like_count = snapshot.like_count
             dislike_count = snapshot.dislike_count
