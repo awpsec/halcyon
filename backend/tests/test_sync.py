@@ -1210,6 +1210,100 @@ def test_sync_video_skips_generic_channel_name_in_fallback_queries_without_api(t
         assert all("Offline library" not in query for query in captured_queries)
 
 
+def test_sync_video_prioritizes_known_local_channel_queries_without_api(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="UFD Tech", slug="ufd-tech")
+        db.add(channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "ufd.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target")
+        target_video = Video(
+            title="The Nvidia Warranty Situation is Crazy",
+            slug="the-nvidia-warranty-situation-is-crazy",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=19 * 60 + 3,
+            published_at=datetime(2026, 4, 14),
+            is_available=True,
+        )
+        db.add(target_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=target_video.id,
+                absolute_path=str(target_path),
+                relative_path="ufd.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="ufdquery" * 8,
+            )
+        )
+        db.commit()
+
+        captured_queries: list[str] = []
+
+        async def fake_fetch_fallback_candidates(client, queries, requests_per_second, status_callback=None):
+            del client, requests_per_second, status_callback
+            captured_queries.extend(queries)
+            return [
+                {
+                    "id": "ufd123abc45",
+                    "snippet": {
+                        "title": "The Nvidia Warranty Situation is Crazy",
+                        "channelTitle": "UFD Tech",
+                        "channelId": "channel-ufd-tech",
+                        "publishedAt": "2026-04-14T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 19 * 60 + 3,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert result.youtube_channel_id == "channel-ufd-tech"
+        assert captured_queries
+        assert captured_queries[0].startswith("UFD Tech ")
+        assert "The Nvidia Warranty Situation is Crazy" in captured_queries[0]
+
+
 def test_sync_video_ignores_generic_channel_bucket_matches_without_api(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         generic_channel = Channel(name="Unknown Channel", slug="unknown-channel")

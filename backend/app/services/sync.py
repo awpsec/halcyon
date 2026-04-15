@@ -1745,13 +1745,7 @@ def build_search_queries(
     normalized_title = " ".join(tokenize_text(video.title))
     title_tokens = tokenize_text(video.title)
     compact_title = " ".join(title_tokens[:12]) if title_tokens else normalized_title
-    queries = [
-        raw_title,
-        f"\"{raw_title}\"",
-        normalized_title,
-    ]
-    if compact_title and compact_title.lower() != video.title.lower():
-        queries.append(compact_title)
+    queries: list[str] = []
     hinted_channels = [
         hint.strip()
         for hint in (channel_hints or [])
@@ -1761,6 +1755,15 @@ def build_search_queries(
         queries.append(f"{video.channel.name} {raw_title}".strip())
         queries.append(f"{video.channel.name} {compact_title}".strip())
         queries.append(f"\"{compact_title}\" {video.channel.name}".strip())
+    queries.extend(
+        [
+            raw_title,
+            f"\"{raw_title}\"",
+            normalized_title,
+        ]
+    )
+    if compact_title and compact_title.lower() != video.title.lower():
+        queries.append(compact_title)
     for hint in hinted_channels:
         queries.append(f"{hint} {raw_title}".strip())
         queries.append(f"{hint} {compact_title}".strip())
