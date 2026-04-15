@@ -325,17 +325,18 @@ def build_suggested_feed(db: Session, user_id: int) -> tuple[list[Video], dict[i
 
 def summarize_video(video: Video, progress: WatchProgress | None = None, db: Session | None = None) -> VideoSummary:
     overridden = apply_video_override(db, video) if db else video
+    match = _authoritative_youtube_match(overridden)
     comment_count = None
     like_count = None
     dislike_count = None
     rating = None
     view_count = None
-    published_at = None if overridden.youtube_match and overridden.youtube_match.youtube_video_id else overridden.published_at
+    published_at = None if match and match.youtube_video_id else overridden.published_at
     description = overridden.description
     channel_name = overridden.channel.name if overridden.channel else None
     channel_avatar_url = overridden.channel.avatar_url if overridden.channel else None
-    if db and overridden.youtube_match and overridden.youtube_match.youtube_video_id:
-        snapshot = db.scalar(select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == overridden.youtube_match.youtube_video_id))
+    if db and match and match.youtube_video_id:
+        snapshot = db.scalar(select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == match.youtube_video_id))
         if snapshot:
             like_count = snapshot.like_count
             dislike_count = snapshot.dislike_count

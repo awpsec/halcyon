@@ -1415,6 +1415,33 @@ def _candidate_meets_primary_match_threshold(score: float, reasons: list[str]) -
     return score >= threshold
 
 
+def _candidate_is_review_worthy(score: float, reasons: list[str]) -> bool:
+    reason_set = set(reasons)
+    if {"duration-mismatch", "duration-far", "episode-mismatch"} & reason_set:
+        return False
+    if _candidate_meets_primary_match_threshold(score, reasons):
+        return True
+    if "exact-title" in reason_set:
+        return True
+    return score >= 0.45 and bool(
+        reason_set
+        & {
+            "title-overlap-high",
+            "title-overlap",
+            "title-partial",
+            "title-partial-longform",
+            "duration-tight",
+            "duration",
+            "duration-loose",
+            "duration-longform",
+            "channel",
+            "channel-hint",
+            "series",
+            "episode",
+        }
+    )
+
+
 def _snapshot_candidate_item(
     snapshot: YouTubeVideoSnapshot,
     *,
@@ -3243,6 +3270,8 @@ async def build_review_candidate_queue(
                 status_callback=status_callback,
             )
         hydrated_score, hydrated_reasons = score_match(video, hydrated, channel_hints=channel_hints)
+        if not _candidate_is_review_worthy(hydrated_score, hydrated_reasons):
+            continue
         queue.append(
             serialize_review_candidate(
                 hydrated,
@@ -4070,6 +4099,20 @@ async def sync_video(
                 best_item = active_candidate["item"]
                 best_score = active_candidate["confidence"]
                 reasons = active_candidate["reasons"]
+            else:
+                best_item = None
+        if not best_item:
+            match = existing_match or ensure_youtube_match_row(db, video.id)
+            match.status = "unmatched"
+            match.confidence = 0.0
+            match.reasons = []
+            match.review_candidates = []
+            match.rejected_youtube_video_ids = list(dict.fromkeys(rejected_video_ids))
+            match.stale = True
+            logger.info("Sync unmatched after rejecting implausible review candidates video_id=%s title=%s", video.id, video.title)
+            db.commit()
+            db.refresh(match)
+            return match
         return await apply_sync_item(
             db,
             video,
@@ -4310,6 +4353,9 @@ async def send_video_to_review(
             best_item = active_candidate["item"]
             best_score = active_candidate["confidence"]
             reasons = active_candidate["reasons"]
+        else:
+            best_item = None
+    if best_item:
         return await apply_sync_item(
             db,
             video,

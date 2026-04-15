@@ -2379,6 +2379,54 @@ def test_build_home_feed_ignores_review_channel_snapshot(tmp_path: Path):
         assert target_card.channel == "Correct Channel"
 
 
+def test_summarize_video_ignores_review_snapshot_metadata(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Correct Channel", slug="correct-channel")
+        video = Video(
+            title="Review target",
+            slug="review-target-summary",
+            channel=channel,
+            duration_seconds=600,
+            published_at=datetime(2026, 4, 14),
+            description="Local description",
+            is_available=True,
+        )
+        db.add_all([channel, video])
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="review12345summary",
+                youtube_channel_id="wrong-channel",
+                status="review",
+                confidence=0.74,
+            )
+        )
+        db.add(
+            YouTubeVideoSnapshot(
+                youtube_video_id="review12345summary",
+                youtube_channel_id="wrong-channel",
+                title="Wrong review target",
+                description="Wrong review description",
+                published_at=datetime(2026, 4, 15),
+                published_at_source="watch-page",
+                view_count=999999,
+                like_count=12345,
+                dislike_count=456,
+                rating=1.1,
+            )
+        )
+        db.commit()
+
+        summary = feed_service.summarize_video(video, db=db)
+
+        assert summary.description == "Local description"
+        assert summary.published_at == datetime(2026, 4, 14)
+        assert summary.youtube_view_count is None
+        assert summary.youtube_like_count is None
+        assert summary.youtube_dislike_count is None
+
+
 def test_video_thumbnail_ignores_review_snapshot_remote_art(tmp_path: Path, monkeypatch):
     generated_thumb = tmp_path / "cache" / "thumbnails" / "local.jpg"
     generated_thumb.parent.mkdir(parents=True, exist_ok=True)
@@ -2442,6 +2490,115 @@ def test_video_thumbnail_ignores_review_snapshot_remote_art(tmp_path: Path, monk
         assert refreshed_video is not None
         assert refreshed_video.thumbnail_path == str(generated_thumb)
         assert response.path == str(generated_thumb)
+
+
+def test_build_review_candidate_queue_rejects_implausible_duration_mismatch(monkeypatch):
+    async def fail_hydrate(*args, **kwargs):
+        raise AssertionError("watch-page hydration should not run for watch-page candidates")
+
+    monkeypatch.setattr(sync_service, "hydrate_candidate_from_watch_page", fail_hydrate)
+
+    video = Video(
+        title="This is so fucking stupid...",
+        slug="this-is-so-fucking-stupid",
+        duration_seconds=22 * 60 + 43,
+        published_at=datetime(2026, 4, 14),
+        is_available=True,
+    )
+    candidates = [
+        {
+            "id": "wronghasan01",
+            "snippet": {
+                "title": "Hillary Clinton is so Fucking Stupid",
+                "channelTitle": "HasanAbi",
+                "channelId": "channel-hasan",
+                "publishedAt": "2026-04-14T12:00:00Z",
+            },
+            "statistics": {},
+            "_waytube_duration_seconds": 59 * 60 + 11,
+            "_waytube_source": "watch-page",
+        }
+    ]
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.build_review_candidate_queue(
+                client,
+                video,
+                candidates,
+                requests_per_second=3,
+            )
+
+    queue = asyncio.run(run())
+
+    assert queue == []
+
+
+def test_sync_video_rejects_implausible_review_only_candidate_without_api(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        generic_channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(generic_channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "implausible-review.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target")
+        video = Video(
+            title="This is so fucking stupid...",
+            slug="this-is-so-fucking-stupid-review-reject",
+            channel_id=generic_channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=22 * 60 + 43,
+            published_at=datetime(2026, 4, 14),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(target_path),
+                relative_path="implausible-review.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="reviewreject" * 6 + "ab",
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return [
+                {
+                    "id": "wronghasan01",
+                    "snippet": {
+                        "title": "Hillary Clinton is so Fucking Stupid",
+                        "channelTitle": "HasanAbi",
+                        "channelId": "channel-hasan",
+                        "publishedAt": "2026-04-14T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 59 * 60 + 11,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "unmatched"
+        assert result.youtube_video_id is None
+        assert result.youtube_channel_id is None
 
 
 def test_force_sync_refreshes_existing_match_by_id_before_researching(tmp_path: Path, monkeypatch):
