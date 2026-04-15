@@ -155,7 +155,7 @@ export function AppShell({
           label: "Profile",
         },
       ];
-      if (liveOverview?.enabled && liveOverview.api_key_configured) {
+      if (liveOverview?.enabled ?? true) {
         items.push({
           to: "/live",
           label: "Live",
@@ -164,7 +164,7 @@ export function AppShell({
       items.push(...baseNavItems.slice(1));
       return items;
     },
-    [liveOverview?.api_key_configured, liveOverview?.enabled, profile],
+    [liveOverview?.enabled, profile],
   );
 
   useEffect(() => {

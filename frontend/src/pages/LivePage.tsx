@@ -83,19 +83,6 @@ export function LivePage() {
     );
   }
 
-  if (!overview.api_key_configured) {
-    return (
-      <div className="page-stack live-page">
-        <section className="panel live-empty-panel">
-          <div className="section-heading">
-            <h2>Live</h2>
-          </div>
-          <EmptyState message="Add a YouTube API key in server settings to watch live streams here." />
-        </section>
-      </div>
-    );
-  }
-
   return (
     <div className="page-stack live-page">
       <section className="watch-description live-page-intro">

@@ -2159,6 +2159,116 @@ async def fetch_live_video_details(
     return hydrated
 
 
+def _extract_youtube_watch_id(url: str | None) -> str | None:
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if parsed.path != "/watch":
+        return None
+    video_id = parse_qs(parsed.query).get("v", [None])[0]
+    if not video_id:
+        return None
+    return str(video_id).strip() or None
+
+
+def _is_live_renderer(value: dict[str, Any]) -> bool:
+    for overlay in value.get("thumbnailOverlays", []) or []:
+        renderer = overlay.get("thumbnailOverlayTimeStatusRenderer") or {}
+        style = str(renderer.get("style") or "").strip().upper()
+        if style == "LIVE":
+            return True
+        text = extract_text_content(renderer.get("text"))
+        if text and "live" in text.casefold():
+            return True
+    for badge in value.get("badges", []) or []:
+        badge_text = extract_text_content(badge)
+        if badge_text and "live" in badge_text.casefold():
+            return True
+    return False
+
+
+def _collect_live_video_ids_from_value(value: Any, sink: list[str]) -> None:
+    if isinstance(value, dict):
+        video_id = value.get("videoId")
+        if isinstance(video_id, str) and video_id and _is_live_renderer(value) and video_id not in sink:
+            sink.append(video_id)
+        for nested in value.values():
+            _collect_live_video_ids_from_value(nested, sink)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_live_video_ids_from_value(item, sink)
+
+
+def extract_live_video_ids_from_html(html: str) -> list[str]:
+    video_ids: list[str] = []
+    initial = extract_json_blob(html, ["var ytInitialData = ", "ytInitialData = "]) or {}
+    if initial:
+        _collect_live_video_ids_from_value(initial, video_ids)
+    if video_ids:
+        return video_ids
+
+    for pattern in (
+        r'"videoId":"([^"]{11})".{0,2000}?"thumbnailOverlayTimeStatusRenderer":\{"style":"LIVE"',
+        r'"videoId":"([^"]{11})".{0,1200}?"badgeText":\{"runs":\[\{"text":"LIVE',
+    ):
+        for match in re.finditer(pattern, html, flags=re.DOTALL):
+            video_id = str(match.group(1) or "").strip()
+            if video_id and video_id not in video_ids:
+                video_ids.append(video_id)
+    return video_ids
+
+
+async def fetch_live_stream_candidates_web(
+    client: httpx.AsyncClient,
+    youtube_channel_id: str,
+    requests_per_second: int,
+    *,
+    local_channel_id: int | None = None,
+    channel_name: str | None = None,
+) -> tuple[bool, list[dict]]:
+    checked = False
+    video_ids: list[str] = []
+
+    for url in (
+        f"https://www.youtube.com/channel/{youtube_channel_id}/live",
+        f"https://www.youtube.com/channel/{youtube_channel_id}/streams",
+    ):
+        response = await throttled_get(
+            client,
+            url,
+            params={"hl": "en", "view": "2", "live_view": "501"},
+            requests_per_second=requests_per_second,
+            headers=REQUEST_HEADERS,
+        )
+        if response.is_error:
+            continue
+        checked = True
+        redirected_video_id = _extract_youtube_watch_id(str(response.url))
+        if redirected_video_id and redirected_video_id not in video_ids:
+            video_ids.append(redirected_video_id)
+        for candidate_id in extract_live_video_ids_from_html(response.text):
+            if candidate_id not in video_ids:
+                video_ids.append(candidate_id)
+        if video_ids:
+            break
+
+    items: list[dict] = []
+    for youtube_video_id in video_ids[:3]:
+        candidate = await fetch_watch_page_candidate(client, youtube_video_id, requests_per_second)
+        if not candidate:
+            continue
+        snippet = candidate.setdefault("snippet", {})
+        snippet["channelId"] = snippet.get("channelId") or youtube_channel_id
+        if channel_name and not snippet.get("channelTitle"):
+            snippet["channelTitle"] = channel_name
+        candidate["_waytube_live_web"] = True
+        candidate["_waytube_local_channel_id"] = local_channel_id
+        candidate["_waytube_checked_youtube_channel_id"] = youtube_channel_id
+        items.append(candidate)
+    return checked, items
+
+
 def _parse_iso8601_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -2170,11 +2280,11 @@ def _parse_iso8601_datetime(value: str | None) -> datetime | None:
 
 async def refresh_live_streams(
     db: Session,
-    api_key: str,
+    api_key: str | None,
     requests_per_second: int,
 ) -> list[YouTubeLiveStreamSnapshot]:
     settings_row = db.scalar(select(SyncSettings))
-    if settings_row:
+    if settings_row and api_key:
         normalize_youtube_api_quota(settings_row)
 
     monitored_ids = monitored_live_channel_ids(db)
@@ -2195,11 +2305,43 @@ async def refresh_live_streams(
         return []
 
     candidate_meta: dict[str, dict[str, Any]] = {}
-    attempted_channel_pairs: list[tuple[int, str]] = []
-    successful_channel_ids: set[str] = set()
+    detailed_items: list[dict] = []
+    checked_channel_ids: set[str] = set()
+    existing_live_rows_by_channel: dict[str, list[YouTubeLiveStreamSnapshot]] = {}
+    for row in db.scalars(
+        select(YouTubeLiveStreamSnapshot).where(YouTubeLiveStreamSnapshot.is_live.is_(True))
+    ).all():
+        existing_live_rows_by_channel.setdefault(str(row.youtube_channel_id), []).append(row)
     async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=REQUEST_HEADERS) as client:
+        use_api = bool(api_key)
         for channel_id, youtube_channel_id in channel_map.items():
-            attempted_channel_pairs.append((channel_id, youtube_channel_id))
+            local_channel = db.get(Channel, channel_id)
+            channel_label = local_channel.name if local_channel else None
+            existing_live_rows = existing_live_rows_by_channel.get(str(youtube_channel_id), [])
+
+            if use_api and existing_live_rows:
+                checked_channel_ids.add(str(youtube_channel_id))
+                for row in existing_live_rows:
+                    if row.youtube_video_id:
+                        candidate_meta[row.youtube_video_id] = {
+                            "channel_id": channel_id,
+                            "youtube_channel_id": youtube_channel_id,
+                        }
+                continue
+
+            if not use_api:
+                checked, web_items = await fetch_live_stream_candidates_web(
+                    client,
+                    youtube_channel_id,
+                    requests_per_second,
+                    local_channel_id=channel_id,
+                    channel_name=channel_label,
+                )
+                if checked:
+                    checked_channel_ids.add(str(youtube_channel_id))
+                detailed_items.extend(web_items)
+                continue
+
             channel_snapshot = db.scalar(
                 select(YouTubeChannelSnapshot).where(
                     YouTubeChannelSnapshot.youtube_channel_id == youtube_channel_id
@@ -2211,12 +2353,7 @@ async def refresh_live_streams(
                 else None
             )
             if not uploads_playlist_id:
-                channel_details = await fetch_channel_details(
-                    client,
-                    api_key,
-                    youtube_channel_id,
-                    requests_per_second,
-                )
+                channel_details = await fetch_channel_details(client, api_key, youtube_channel_id, requests_per_second)
                 content_details = (channel_details or {}).get("contentDetails", {}) or {}
                 uploads_playlist_id = (
                     content_details.get("relatedPlaylists", {}) or {}
@@ -2235,6 +2372,16 @@ async def refresh_live_streams(
                     channel_id,
                     youtube_channel_id,
                 )
+                checked, web_items = await fetch_live_stream_candidates_web(
+                    client,
+                    youtube_channel_id,
+                    requests_per_second,
+                    local_channel_id=channel_id,
+                    channel_name=channel_label,
+                )
+                if checked:
+                    checked_channel_ids.add(str(youtube_channel_id))
+                detailed_items.extend(web_items)
                 continue
             try:
                 video_ids = await fetch_recent_upload_playlist_video_ids(
@@ -2250,8 +2397,20 @@ async def refresh_live_streams(
                     youtube_channel_id,
                     exc,
                 )
+                if exc.fatal:
+                    use_api = False
+                    checked, web_items = await fetch_live_stream_candidates_web(
+                        client,
+                        youtube_channel_id,
+                        requests_per_second,
+                        local_channel_id=channel_id,
+                        channel_name=channel_label,
+                    )
+                    if checked:
+                        checked_channel_ids.add(str(youtube_channel_id))
+                    detailed_items.extend(web_items)
                 continue
-            successful_channel_ids.add(youtube_channel_id)
+            checked_channel_ids.add(str(youtube_channel_id))
             for youtube_video_id in video_ids:
                 if not youtube_video_id:
                     continue
@@ -2260,8 +2419,23 @@ async def refresh_live_streams(
                     "youtube_channel_id": youtube_channel_id,
                 }
 
-        detailed_items: list[dict] = []
-        if candidate_meta:
+        if not use_api and candidate_meta:
+            detailed_items = []
+            checked_channel_ids.clear()
+            for fallback_channel_id, fallback_youtube_channel_id in channel_map.items():
+                local_channel = db.get(Channel, fallback_channel_id)
+                checked, web_items = await fetch_live_stream_candidates_web(
+                    client,
+                    fallback_youtube_channel_id,
+                    requests_per_second,
+                    local_channel_id=fallback_channel_id,
+                    channel_name=local_channel.name if local_channel else None,
+                )
+                if checked:
+                    checked_channel_ids.add(str(fallback_youtube_channel_id))
+                detailed_items.extend(web_items)
+
+        if candidate_meta and use_api:
             try:
                 detailed_items = await fetch_live_video_details(
                     client,
@@ -2271,25 +2445,21 @@ async def refresh_live_streams(
                 )
             except YouTubeSyncError as exc:
                 logger.warning("Live detail lookup failed error=%s", exc)
-
-        live_detected_channel_ids: set[str] = set()
-        for item in detailed_items:
-            youtube_video_id = str(item.get("id") or "").strip()
-            if not youtube_video_id:
-                continue
-            meta = candidate_meta.get(youtube_video_id)
-            if not meta:
-                continue
-            snippet = item.get("snippet", {}) or {}
-            live_details = item.get("liveStreamingDetails", {}) or {}
-            if (
-                snippet.get("liveBroadcastContent") == "live"
-                or (
-                    live_details.get("actualStartTime")
-                    and not live_details.get("actualEndTime")
-                )
-            ):
-                live_detected_channel_ids.add(str(meta["youtube_channel_id"]))
+                if exc.fatal:
+                    detailed_items = []
+                    checked_channel_ids.clear()
+                    for fallback_channel_id, fallback_youtube_channel_id in channel_map.items():
+                        local_channel = db.get(Channel, fallback_channel_id)
+                        checked, web_items = await fetch_live_stream_candidates_web(
+                            client,
+                            fallback_youtube_channel_id,
+                            requests_per_second,
+                            local_channel_id=fallback_channel_id,
+                            channel_name=local_channel.name if local_channel else None,
+                        )
+                        if checked:
+                            checked_channel_ids.add(str(fallback_youtube_channel_id))
+                        detailed_items.extend(web_items)
 
     seen_video_ids: set[str] = set()
     existing_rows = {
@@ -2299,10 +2469,20 @@ async def refresh_live_streams(
     for item in detailed_items:
         youtube_video_id = str(item.get("id") or "").strip()
         if not youtube_video_id or youtube_video_id not in candidate_meta:
-            continue
+            snippet = item.get("snippet", {}) or {}
+            meta = {
+                "channel_id": item.get("_waytube_local_channel_id"),
+                "youtube_channel_id": item.get("_waytube_checked_youtube_channel_id") or snippet.get("channelId"),
+            }
+            if not youtube_video_id or not meta.get("channel_id") or not meta.get("youtube_channel_id"):
+                continue
+        else:
+            meta = candidate_meta.get(youtube_video_id)
         snippet = item.get("snippet", {}) or {}
         live_details = item.get("liveStreamingDetails", {}) or {}
         is_currently_live = (
+            bool(item.get("_waytube_live_web"))
+            or
             snippet.get("liveBroadcastContent") == "live"
             or (
                 live_details.get("actualStartTime")
@@ -2311,7 +2491,6 @@ async def refresh_live_streams(
         )
         if not is_currently_live:
             continue
-        meta = candidate_meta[youtube_video_id]
         row = existing_rows.get(youtube_video_id)
         if not row:
             row = YouTubeLiveStreamSnapshot(youtube_video_id=youtube_video_id)
@@ -2330,10 +2509,10 @@ async def refresh_live_streams(
         row.fetched_at = now
         seen_video_ids.add(youtube_video_id)
 
-    if successful_channel_ids:
+    if checked_channel_ids:
         stale_rows = db.scalars(
             select(YouTubeLiveStreamSnapshot).where(
-                YouTubeLiveStreamSnapshot.youtube_channel_id.in_(successful_channel_ids)
+                YouTubeLiveStreamSnapshot.youtube_channel_id.in_(checked_channel_ids)
             )
         ).all()
         for row in stale_rows:

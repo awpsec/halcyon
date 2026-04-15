@@ -10,10 +10,10 @@ import app.services.background as background_service
 import app.services.sync as sync_service
 from app.core.config import Settings
 from app.models.base import Base
-from app.models.entities import Channel, LibraryRoot, RetentionItem, SelectedFolder, Series, SyncJob, SyncSettings, UserProfile, Video, VideoFile, WatchProgress, YouTubeChannelSnapshot, YouTubeCommentReplySnapshot, YouTubeCommentSnapshot, YouTubeMatch, YouTubeVideoSnapshot
+from app.models.entities import Channel, LibraryRoot, LiveMonitoredChannel, RetentionItem, SelectedFolder, Series, SyncJob, SyncSettings, UserProfile, Video, VideoFile, WatchProgress, YouTubeChannelSnapshot, YouTubeCommentReplySnapshot, YouTubeCommentSnapshot, YouTubeLiveStreamSnapshot, YouTubeMatch, YouTubeVideoSnapshot
 from app.services.media import fingerprint_file
 from app.services.scanner import scan_selected_folders
-from app.services.sync import apply_sync_item, auto_organize_channel_files, choose_playlist_series_title, fetch_channel_about_details, sync_scope, sync_video
+from app.services.sync import apply_sync_item, auto_organize_channel_files, choose_playlist_series_title, fetch_channel_about_details, refresh_live_streams, sync_scope, sync_video
 from app.services.utils import slugify
 
 
@@ -716,6 +716,139 @@ def test_sync_video_disables_api_after_fatal_search_and_uses_fallback_match(tmp_
         assert result.status == "matched"
         assert result.youtube_video_id == "frankie123"
         assert result.youtube_channel_id == "channel-frankie"
+
+
+def test_refresh_live_streams_reuses_existing_live_channel_without_playlist_lookup(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="PGL", slug="pgl")
+        db.add(channel)
+        db.flush()
+        db.add(SyncSettings(live_tab_enabled=True))
+        db.add(LiveMonitoredChannel(channel_id=channel.id))
+        video = Video(
+            title="PGL upload",
+            slug="pgl-upload",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_channel_id="channel-pgl",
+                youtube_video_id="vod123",
+                status="matched",
+            )
+        )
+        db.add(
+            YouTubeLiveStreamSnapshot(
+                youtube_video_id="live123",
+                youtube_channel_id="channel-pgl",
+                channel_id=channel.id,
+                title="Current stream",
+                is_live=True,
+                last_seen_at=datetime.utcnow(),
+                fetched_at=datetime.utcnow(),
+            )
+        )
+        db.commit()
+
+        async def fail_playlist_lookup(*args, **kwargs):
+            raise AssertionError("playlist lookup should be skipped for an already-live channel")
+
+        async def fake_fetch_live_video_details(*args, **kwargs):
+            return [
+                {
+                    "id": "live123",
+                    "snippet": {
+                        "title": "Current stream",
+                        "channelTitle": "PGL",
+                        "channelId": "channel-pgl",
+                        "liveBroadcastContent": "live",
+                        "thumbnails": {},
+                    },
+                    "liveStreamingDetails": {
+                        "actualStartTime": "2026-04-15T12:00:00Z",
+                        "concurrentViewers": "4812",
+                    },
+                    "statistics": {},
+                }
+            ]
+
+        monkeypatch.setattr(sync_service, "fetch_recent_upload_playlist_video_ids", fail_playlist_lookup)
+        monkeypatch.setattr(sync_service, "fetch_live_video_details", fake_fetch_live_video_details)
+
+        async def run():
+            return await refresh_live_streams(db, api_key="test-api-key", requests_per_second=3)
+
+        rows = asyncio.run(run())
+
+        assert len(rows) == 1
+        assert rows[0].youtube_video_id == "live123"
+        assert rows[0].is_live is True
+        assert rows[0].concurrent_viewers == 4812
+
+
+def test_refresh_live_streams_uses_web_fallback_without_api_key(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="LVNDMARK", slug="lvndmark")
+        db.add(channel)
+        db.flush()
+        db.add(SyncSettings(live_tab_enabled=True))
+        db.add(LiveMonitoredChannel(channel_id=channel.id))
+        video = Video(
+            title="LVNDMARK upload",
+            slug="lvndmark-upload",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_channel_id="channel-lvndmark",
+                youtube_video_id="vod456",
+                status="matched",
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_live_stream_candidates_web(*args, **kwargs):
+            return (
+                True,
+                [
+                    {
+                        "id": "live-web-1",
+                        "snippet": {
+                            "title": "Checking out Bellum",
+                            "channelTitle": "LVNDMARK",
+                            "channelId": "channel-lvndmark",
+                            "thumbnails": {},
+                        },
+                        "statistics": {},
+                        "_waytube_live_web": True,
+                        "_waytube_local_channel_id": channel.id,
+                        "_waytube_checked_youtube_channel_id": "channel-lvndmark",
+                    }
+                ],
+            )
+
+        monkeypatch.setattr(sync_service, "fetch_live_stream_candidates_web", fake_fetch_live_stream_candidates_web)
+
+        async def run():
+            return await refresh_live_streams(db, api_key=None, requests_per_second=3)
+
+        rows = asyncio.run(run())
+
+        assert len(rows) == 1
+        assert rows[0].youtube_video_id == "live-web-1"
+        assert rows[0].youtube_channel_id == "channel-lvndmark"
+        assert rows[0].channel_id == channel.id
+        assert rows[0].is_live is True
 
 
 def test_apply_sync_item_review_keeps_existing_channel_assignment(tmp_path: Path, monkeypatch):

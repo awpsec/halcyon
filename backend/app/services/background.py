@@ -12,7 +12,7 @@ from app.services.scanner import scan_selected_folders_if_idle
 from app.services.subtitles import active_subtitle_job, process_subtitle_backfill_job, run_automatic_subtitle_pass, subtitle_service_configured
 from app.services.sync import normalize_channel_assignments, reconcile_sync_job, refresh_live_streams, sync_scope
 
-LIVE_SYNC_MIN_INTERVAL_SECONDS = 900
+LIVE_SYNC_MIN_INTERVAL_SECONDS = 1200
 
 
 def current_scan_interval_seconds(settings: Settings) -> int:
@@ -53,7 +53,7 @@ async def background_auto_sync_once(settings: Settings) -> None:
         if sync_settings.automatic_detection_enabled:
             if not active_running_sync_jobs(db):
                 await sync_scope(db, scope="orphans", target_id=None, api_key=api_key, quiet_if_idle=True)
-        if sync_settings.live_tab_enabled and api_key:
+        if sync_settings.live_tab_enabled:
             configured_interval = max(
                 LIVE_SYNC_MIN_INTERVAL_SECONDS,
                 min(sync_settings.scan_interval_seconds or settings.scan_interval_seconds, 3600),
