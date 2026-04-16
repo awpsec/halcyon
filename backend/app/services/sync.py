@@ -1788,6 +1788,89 @@ def periodic_stats_refresh_allowed(video: Video, snapshot: YouTubeVideoSnapshot)
     return datetime.utcnow() - anchor <= max_window
 
 
+def matched_metadata_is_confident(
+    db: Session,
+    video: Video,
+    snapshot: YouTubeVideoSnapshot | None,
+    *,
+    match: YouTubeMatch | None = None,
+    youtube_video_id: str | None = None,
+    confidence: float | None = None,
+    reasons: list[str] | None = None,
+    status: str | None = None,
+) -> bool:
+    resolved_match = match or video.youtube_match
+    resolved_status = status or (resolved_match.status if resolved_match else None)
+    resolved_video_id = str(
+        youtube_video_id
+        or (resolved_match.youtube_video_id if resolved_match else "")
+        or ""
+    ).strip()
+    resolved_confidence = float(
+        confidence
+        if confidence is not None
+        else (resolved_match.confidence if resolved_match and resolved_match.confidence is not None else 0.0)
+    )
+
+    if resolved_status != "matched" or not resolved_video_id or not snapshot:
+        return False
+    if str(snapshot.youtube_video_id or "").strip() != resolved_video_id:
+        return False
+    if (
+        not snapshot.title
+        or not snapshot.youtube_channel_id
+        or snapshot.published_at is None
+        or snapshot.published_at_source not in TRUSTED_PUBLISHED_AT_SOURCES
+        or snapshot.duration_seconds is None
+        or not snapshot.thumbnail_url
+    ):
+        return False
+    if (
+        video.channel
+        and not is_generic_channel_name(video.channel.name)
+        and not youtube_channel_matches_local_channel(
+            db,
+            local_channel=video.channel,
+            youtube_channel_id=snapshot.youtube_channel_id,
+        )
+    ):
+        return False
+    if not _existing_match_snapshot_is_plausible(db, video, snapshot):
+        return False
+    return resolved_confidence >= 0.85
+
+
+def periodic_engagement_refresh_due(
+    db: Session,
+    video: Video,
+    snapshot: YouTubeVideoSnapshot | None,
+    *,
+    match: YouTubeMatch | None = None,
+    youtube_video_id: str | None = None,
+    confidence: float | None = None,
+    reasons: list[str] | None = None,
+    status: str | None = None,
+) -> bool:
+    if not snapshot:
+        return False
+    if not matched_metadata_is_confident(
+        db,
+        video,
+        snapshot,
+        match=match,
+        youtube_video_id=youtube_video_id,
+        confidence=confidence,
+        reasons=reasons,
+        status=status,
+    ):
+        return False
+    if not periodic_stats_refresh_allowed(video, snapshot):
+        return False
+    if snapshot.view_count is None or snapshot.like_count is None:
+        return True
+    return not is_snapshot_fresh(snapshot.fetched_at)
+
+
 def video_requires_refresh(
     db: Session,
     video: Video,
@@ -1817,12 +1900,7 @@ def video_requires_refresh(
         prefer_high_res_banners=prefer_high_res_banners,
     ):
         return True
-    if not is_snapshot_fresh(snapshot.fetched_at) and periodic_stats_refresh_allowed(video, snapshot):
-        return True
-    if (
-        periodic_stats_refresh_allowed(video, snapshot)
-        and (snapshot.view_count is None or snapshot.like_count is None)
-    ):
+    if periodic_engagement_refresh_due(db, video, snapshot, match=match):
         return True
     return False
 
@@ -2808,7 +2886,9 @@ async def refresh_live_streams(
     ).all():
         existing_live_rows_by_channel.setdefault(str(row.youtube_channel_id), []).append(row)
     async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=REQUEST_HEADERS) as client:
-        use_api = bool(api_key)
+        # Keep live detection on the web/watch-page path even when an API key is configured.
+        # This preserves quota for library sync and avoids cross-channel live candidate drift.
+        use_api = False
         for channel_id, youtube_channel_id in channel_map.items():
             local_channel = db.get(Channel, channel_id)
             channel_label = local_channel.name if local_channel else None
@@ -3513,6 +3593,20 @@ async def apply_sync_item(
         return match
 
     snapshot = db.scalar(select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == video_id))
+    engagement_refresh_due = bool(
+        effective_api_key
+        and video_id
+        and periodic_engagement_refresh_due(
+            db,
+            video,
+            snapshot,
+            match=match,
+            youtube_video_id=video_id,
+            confidence=confidence,
+            reasons=reasons,
+            status=status,
+        )
+    )
     if not snapshot:
         snapshot = YouTubeVideoSnapshot(youtube_video_id=video_id, title=snippet.get("title", video.title))
         db.add(snapshot)
@@ -3596,7 +3690,7 @@ async def apply_sync_item(
             channel_details = channel_cache[channel_id]
         else:
             channel_details = None
-            if effective_api_key:
+            if effective_api_key and not engagement_refresh_due:
                 try:
                     channel_details = await fetch_channel_details(client, effective_api_key, channel_id, requests_per_second)
                 except YouTubeSyncError as exc:
@@ -3608,18 +3702,20 @@ async def apply_sync_item(
                     )
                     if exc.fatal:
                         effective_api_key = None
-            if channel_cache is not None:
+            if channel_cache is not None and not engagement_refresh_due:
                 channel_cache[channel_id] = channel_details
         needs_fallback_art = allow_fallback_art and (
             not channel_snapshot.avatar_url
             or not channel_snapshot.banner_url
         )
-        channel_fallback = await fetch_channel_about_details(
-            client,
-            channel_id,
-            requests_per_second,
-            include_art=needs_fallback_art and not channel_details,
-        )
+        channel_fallback = None
+        if not engagement_refresh_due:
+            channel_fallback = await fetch_channel_about_details(
+                client,
+                channel_id,
+                requests_per_second,
+                include_art=needs_fallback_art and not channel_details,
+            )
         if channel_details:
             channel_snippet = channel_details.get("snippet", {})
             channel_stats = channel_details.get("statistics", {})
@@ -3672,6 +3768,7 @@ async def apply_sync_item(
             and video_id
             and target_channel is not None
             and playlist_cache is not None
+            and not engagement_refresh_due
         ):
             try:
                 playlist_memberships = await fetch_channel_playlist_memberships(
@@ -3733,7 +3830,7 @@ async def apply_sync_item(
                         len(organization_moves),
                     )
 
-    if match.status == "matched" and effective_api_key:
+    if match.status == "matched" and effective_api_key and engagement_refresh_due and comment_limit > 0:
         reply_limit = max(0, int(max_replies_per_comment))
         try:
             comment_items = await fetch_top_comments(

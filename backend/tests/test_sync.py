@@ -2336,7 +2336,7 @@ def test_matched_youtube_channels_by_local_channel_skips_name_mismatches(tmp_pat
         assert sync_service.matched_youtube_channels_by_local_channel(db) == {}
 
 
-def test_refresh_live_streams_reuses_existing_live_channel_without_playlist_lookup(tmp_path: Path, monkeypatch):
+def test_refresh_live_streams_uses_web_lookup_even_with_api_key(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="PGL", slug="pgl")
         db.add(channel)
@@ -2379,30 +2379,38 @@ def test_refresh_live_streams_reuses_existing_live_channel_without_playlist_look
         )
         db.commit()
 
-        async def fail_playlist_lookup(*args, **kwargs):
-            raise AssertionError("playlist lookup should be skipped for an already-live channel")
+        async def fail_live_api(*args, **kwargs):
+            raise AssertionError("live refresh should not use youtube api helpers")
 
-        async def fake_fetch_live_video_details(*args, **kwargs):
-            return [
-                {
-                    "id": "live123",
-                    "snippet": {
-                        "title": "Current stream",
-                        "channelTitle": "PGL",
-                        "channelId": "channel-pgl",
-                        "liveBroadcastContent": "live",
-                        "thumbnails": {},
-                    },
-                    "liveStreamingDetails": {
-                        "actualStartTime": "2026-04-15T12:00:00Z",
-                        "concurrentViewers": "4812",
-                    },
-                    "statistics": {},
-                }
-            ]
+        async def fake_fetch_live_stream_candidates_web(*args, **kwargs):
+            return (
+                True,
+                [
+                    {
+                        "id": "live123",
+                        "snippet": {
+                            "title": "Current stream",
+                            "channelTitle": "PGL",
+                            "channelId": "channel-pgl",
+                            "liveBroadcastContent": "live",
+                            "thumbnails": {},
+                        },
+                        "liveStreamingDetails": {
+                            "actualStartTime": "2026-04-15T12:00:00Z",
+                            "concurrentViewers": "4812",
+                        },
+                        "statistics": {},
+                        "_waytube_live_web": True,
+                        "_waytube_local_channel_id": channel.id,
+                        "_waytube_checked_youtube_channel_id": "channel-pgl",
+                    }
+                ],
+            )
 
-        monkeypatch.setattr(sync_service, "fetch_recent_upload_playlist_video_ids", fail_playlist_lookup)
-        monkeypatch.setattr(sync_service, "fetch_live_video_details", fake_fetch_live_video_details)
+        monkeypatch.setattr(sync_service, "fetch_channel_details", fail_live_api)
+        monkeypatch.setattr(sync_service, "fetch_recent_upload_playlist_video_ids", fail_live_api)
+        monkeypatch.setattr(sync_service, "fetch_live_video_details", fail_live_api)
+        monkeypatch.setattr(sync_service, "fetch_live_stream_candidates_web", fake_fetch_live_stream_candidates_web)
 
         async def run():
             return await refresh_live_streams(db, api_key="test-api-key", requests_per_second=3)
@@ -2415,7 +2423,7 @@ def test_refresh_live_streams_reuses_existing_live_channel_without_playlist_look
         assert rows[0].concurrent_viewers == 4812
 
 
-def test_refresh_live_streams_marks_reused_live_row_stale_when_detail_channel_mismatches(tmp_path: Path, monkeypatch):
+def test_refresh_live_streams_marks_existing_live_row_stale_when_web_lookup_finds_no_valid_candidate(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="PGL", slug="pgl")
         db.add(channel)
@@ -2458,30 +2466,16 @@ def test_refresh_live_streams_marks_reused_live_row_stale_when_detail_channel_mi
         )
         db.commit()
 
-        async def fail_playlist_lookup(*args, **kwargs):
-            raise AssertionError("playlist lookup should be skipped for an already-live channel")
+        async def fail_live_api(*args, **kwargs):
+            raise AssertionError("live refresh should not use youtube api helpers")
 
-        async def fake_fetch_live_video_details(*args, **kwargs):
-            return [
-                {
-                    "id": "live123",
-                    "snippet": {
-                        "title": "Actually ESL stream",
-                        "channelTitle": "ESL Counter-Strike",
-                        "channelId": "channel-esl",
-                        "liveBroadcastContent": "live",
-                        "thumbnails": {},
-                    },
-                    "liveStreamingDetails": {
-                        "actualStartTime": "2026-04-15T12:00:00Z",
-                        "concurrentViewers": "4812",
-                    },
-                    "statistics": {},
-                }
-            ]
+        async def fake_fetch_live_stream_candidates_web(*args, **kwargs):
+            return True, []
 
-        monkeypatch.setattr(sync_service, "fetch_recent_upload_playlist_video_ids", fail_playlist_lookup)
-        monkeypatch.setattr(sync_service, "fetch_live_video_details", fake_fetch_live_video_details)
+        monkeypatch.setattr(sync_service, "fetch_channel_details", fail_live_api)
+        monkeypatch.setattr(sync_service, "fetch_recent_upload_playlist_video_ids", fail_live_api)
+        monkeypatch.setattr(sync_service, "fetch_live_video_details", fail_live_api)
+        monkeypatch.setattr(sync_service, "fetch_live_stream_candidates_web", fake_fetch_live_stream_candidates_web)
 
         async def run():
             return await refresh_live_streams(db, api_key="test-api-key", requests_per_second=3)
@@ -3355,6 +3349,69 @@ def test_video_requires_refresh_stops_periodic_refresh_for_old_matched_video(tmp
         )
 
 
+def test_video_requires_refresh_skips_periodic_refresh_for_low_confidence_match(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="Uncertain upload",
+            slug="uncertain-upload",
+            channel_id=channel.id,
+            created_at=datetime.utcnow() - timedelta(days=1),
+            published_at=datetime.utcnow() - timedelta(days=1),
+            duration_seconds=900,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="uncertain123",
+                youtube_channel_id="channel-uncertain",
+                status="matched",
+                confidence=0.74,
+                reasons=["title", "duration-tight"],
+            )
+        )
+        db.add(
+            YouTubeVideoSnapshot(
+                youtube_video_id="uncertain123",
+                youtube_channel_id="channel-uncertain",
+                title="Uncertain upload",
+                published_at=datetime.utcnow() - timedelta(days=1),
+                published_at_source="watch-page",
+                duration_seconds=900,
+                thumbnail_url="https://example.com/uncertain.jpg",
+                view_count=1200,
+                like_count=80,
+                fetched_at=datetime.utcnow() - timedelta(hours=7),
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-uncertain",
+                title="Unknown Channel",
+                avatar_url="https://example.com/uncertain-avatar.jpg",
+                banner_url="https://example.com/uncertain-banner.jpg",
+            )
+        )
+        db.commit()
+
+        assert (
+            sync_service.video_requires_refresh(
+                db,
+                video,
+                api_key_available=True,
+                allow_fallback_art=False,
+                prefer_high_res_banners=False,
+            )
+            is False
+        )
+
+
 def test_force_refresh_researches_implausible_existing_match_after_api_refresh_rejection(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         generic_channel = Channel(name="Unknown Channel", slug="unknown-channel")
@@ -3514,6 +3571,7 @@ def test_sync_scope_prioritizes_discovery_before_background_refresh(tmp_path: Pa
             slug="older-matched",
             created_at=datetime.utcnow() - timedelta(days=1),
             published_at=datetime.utcnow(),
+            duration_seconds=600,
             is_available=True,
         )
         discovery_video = Video(
@@ -3554,6 +3612,8 @@ def test_sync_scope_prioritizes_discovery_before_background_refresh(tmp_path: Pa
                 youtube_video_id="known-refresh",
                 youtube_channel_id="channel-refresh",
                 status="matched",
+                confidence=0.93,
+                reasons=["title", "duration-tight"],
             )
         )
         db.add(
@@ -4714,7 +4774,7 @@ def test_apply_sync_item_clears_stale_duplicate_match_before_assigning(tmp_path:
         assert surviving_matches[0].video_id == target_video.id
 
 
-def test_apply_sync_item_fetches_replies_beyond_inline_batch(tmp_path: Path, monkeypatch):
+def test_apply_sync_item_skips_comment_enrichment_until_engagement_refresh_is_due(tmp_path: Path, monkeypatch):
     def fake_settings() -> Settings:
         return Settings(
             mounted_roots=[],
@@ -4728,6 +4788,112 @@ def test_apply_sync_item_fetches_replies_beyond_inline_batch(tmp_path: Path, mon
 
     async def fake_channel_about(*args, **kwargs):
         return None
+
+    async def fake_channel_details(*args, **kwargs):
+        return {
+            "snippet": {
+                "title": "Initial Channel",
+                "description": "Initial channel description",
+                "thumbnails": {},
+            },
+            "statistics": {},
+            "brandingSettings": {"image": {}},
+            "contentDetails": {"relatedPlaylists": {}},
+        }
+
+    async def fail_fetch_top_comments(*args, **kwargs):
+        raise AssertionError("comments should not be fetched on initial metadata sync")
+
+    monkeypatch.setattr(sync_service, "get_settings", fake_settings)
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_about)
+    monkeypatch.setattr(sync_service, "fetch_channel_details", fake_channel_details)
+    monkeypatch.setattr(sync_service, "fetch_top_comments", fail_fetch_top_comments)
+    monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
+
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="Initial metadata sync",
+            slug="initial-metadata-sync",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=900,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(tmp_path / "initial-sync.mp4"),
+                relative_path="initial-sync.mp4",
+                file_size=123,
+                fingerprint="d" * 64,
+            )
+        )
+        db.commit()
+        db.refresh(video)
+
+        item = {
+            "id": "initial-sync-yt",
+            "snippet": {
+                "title": "Initial metadata sync",
+                "channelTitle": "Initial Channel",
+                "channelId": "initial-channel-id",
+                "publishedAt": "2026-04-14T12:00:00Z",
+                "description": "Initial metadata",
+                "thumbnails": {},
+            },
+            "statistics": {
+                "viewCount": "1234",
+                "likeCount": "56",
+            },
+            "_waytube_duration_seconds": 900,
+            "_waytube_source": "youtube-api",
+        }
+
+        async def run() -> None:
+            async with httpx.AsyncClient() as client:
+                await apply_sync_item(
+                    db,
+                    video,
+                    item,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                    api_key="test-api-key",
+                    confidence=0.93,
+                    reasons=["title", "duration-tight"],
+                    status="matched",
+                )
+
+        asyncio.run(run())
+
+        stored_comments = db.scalars(
+            select(YouTubeCommentSnapshot).where(YouTubeCommentSnapshot.youtube_video_id == "initial-sync-yt")
+        ).all()
+
+        assert stored_comments == []
+
+
+def test_apply_sync_item_fetches_replies_beyond_inline_batch(tmp_path: Path, monkeypatch):
+    def fake_settings() -> Settings:
+        return Settings(
+            mounted_roots=[],
+            config_dir=tmp_path / "config",
+            cache_dir=tmp_path / "cache",
+            background_tasks_enabled=False,
+        )
+
+    async def fake_ryd(*args, **kwargs):
+        return None
+
+    async def fail_channel_enrichment(*args, **kwargs):
+        raise AssertionError("engagement refresh should not re-fetch channel metadata")
 
     async def fake_fetch_top_comments(*args, **kwargs):
         return [
@@ -4777,7 +4943,9 @@ def test_apply_sync_item_fetches_replies_beyond_inline_batch(tmp_path: Path, mon
 
     monkeypatch.setattr(sync_service, "get_settings", fake_settings)
     monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
-    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_about)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fail_channel_enrichment)
+    monkeypatch.setattr(sync_service, "fetch_channel_details", fail_channel_enrichment)
+    monkeypatch.setattr(sync_service, "fetch_channel_playlist_memberships", fail_channel_enrichment)
     monkeypatch.setattr(sync_service, "fetch_top_comments", fake_fetch_top_comments)
     monkeypatch.setattr(sync_service, "fetch_comment_replies", fake_fetch_comment_replies)
     monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
@@ -4804,6 +4972,36 @@ def test_apply_sync_item_fetches_replies_beyond_inline_batch(tmp_path: Path, mon
                 relative_path="reply-test.mp4",
                 file_size=123,
                 fingerprint="c" * 64,
+            )
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="reply-test-yt",
+                youtube_channel_id="reply-channel-id",
+                status="matched",
+                confidence=0.93,
+                reasons=["title", "duration-tight"],
+            )
+        )
+        db.add(
+            YouTubeVideoSnapshot(
+                youtube_video_id="reply-test-yt",
+                youtube_channel_id="reply-channel-id",
+                title="Reply test video",
+                published_at=datetime.utcnow() - timedelta(days=1),
+                published_at_source="watch-page",
+                duration_seconds=900,
+                thumbnail_url="https://example.com/reply-thumb.jpg",
+                view_count=1234,
+                like_count=56,
+                fetched_at=datetime.utcnow() - timedelta(hours=7),
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="reply-channel-id",
+                title="Reply Channel",
             )
         )
         db.commit()
@@ -4838,8 +5036,9 @@ def test_apply_sync_item_fetches_replies_beyond_inline_batch(tmp_path: Path, mon
                     requests_per_second=3,
                     client=client,
                     api_key="test-api-key",
+                    playlist_cache={},
                     confidence=0.93,
-                    reasons=["title"],
+                    reasons=["title", "duration-tight", "refresh-by-id"],
                     status="matched",
                 )
 
