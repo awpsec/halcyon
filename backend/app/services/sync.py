@@ -510,6 +510,26 @@ def resolve_synced_channel_target(
         if current_channel
         else 0
     )
+    current_channel_locked = bool(
+        current_channel
+        and current_channel.slug != "unknown-channel"
+        and not is_generic_channel_name(current_channel.name)
+    )
+    current_channel_matches_incoming = bool(
+        current_channel_locked
+        and (
+            youtube_channel_id in current_channel_ids
+            or youtube_channel_matches_local_channel(
+                db,
+                local_channel=current_channel,
+                youtube_channel_id=youtube_channel_id,
+            )
+            or channel_names_confidently_match(current_channel.name, youtube_channel_title)
+        )
+    )
+
+    if current_channel_locked and not current_channel_matches_incoming:
+        return current_channel
 
     existing_channel_ids = db.scalars(
         select(Video.channel_id)

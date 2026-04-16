@@ -731,6 +731,62 @@ def test_resolve_synced_channel_target_ignores_review_rows_when_reusing_channels
         assert target_video.channel_id == resolved.id
 
 
+def test_resolve_synced_channel_target_keeps_locked_known_channel_when_incoming_creator_mismatches(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        frankie_channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
+        wrong_channel = Channel(name="Bizim Kanal", slug="bizim-kanal")
+        db.add_all([frankie_channel, wrong_channel])
+        db.commit()
+        db.refresh(frankie_channel)
+        db.refresh(wrong_channel)
+
+        wrong_video = Video(
+            title="Wrong carry-over",
+            slug="wrong-carry-over",
+            channel_id=wrong_channel.id,
+            duration_seconds=600,
+        )
+        target_video = Video(
+            title="LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+            slug="lady-bandits-locked-channel",
+            channel_id=frankie_channel.id,
+            duration_seconds=1443,
+        )
+        db.add_all([wrong_video, target_video])
+        db.commit()
+        db.refresh(wrong_video)
+        db.refresh(target_video)
+
+        db.add(
+            YouTubeMatch(
+                video_id=wrong_video.id,
+                youtube_video_id="bizim12345ab",
+                youtube_channel_id="channel-bizim",
+                status="matched",
+                confidence=0.93,
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-bizim",
+                title="Bizim Kanal",
+            )
+        )
+        db.commit()
+
+        resolved = sync_service.resolve_synced_channel_target(
+            db,
+            target_video,
+            "channel-bizim",
+            "Bizim Kanal",
+        )
+        db.flush()
+
+        assert resolved is not None
+        assert resolved.id == frankie_channel.id
+        assert target_video.channel_id == frankie_channel.id
+
+
 def test_apply_sync_item_preserves_existing_snapshot_metadata_when_refresh_is_sparse(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="Unknown Channel", slug="unknown-channel")
