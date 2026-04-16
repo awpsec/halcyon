@@ -434,7 +434,8 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
   const isAdmin = Boolean(profile?.is_admin);
   const requestedTab = searchParams.get("tab");
   const activeTab = normalizeSettingsTab(requestedTab, isAdmin);
-  const syncState = useAsyncData(() => (isAdmin ? api.syncSettings() : Promise.resolve(null)), [isAdmin]);
+  const [syncRefreshToken, setSyncRefreshToken] = useState(0);
+  const syncState = useAsyncData(() => (isAdmin ? api.syncSettings() : Promise.resolve(null)), [isAdmin, syncRefreshToken]);
   const rootsState = useAsyncData(() => (isAdmin ? api.libraryRoots() : Promise.resolve([])), [isAdmin]);
   const selectedState = useAsyncData(() => (isAdmin ? api.selectedFolders() : Promise.resolve([])), [isAdmin]);
   const storageState = useAsyncData(() => (isAdmin ? api.libraryStorage() : Promise.resolve(null)), [isAdmin]);
@@ -451,6 +452,29 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
     () => (isAdmin && browserRootId ? api.browse(browserRootId, "") : Promise.resolve(null)),
     [browserRootId, isAdmin],
   );
+
+  useEffect(() => {
+    if (!isAdmin) return;
+
+    const refreshSyncState = () => {
+      setSyncRefreshToken((value) => value + 1);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshSyncState();
+      }
+    };
+
+    const refreshInterval = window.setInterval(refreshSyncState, 60_000);
+    window.addEventListener("focus", refreshSyncState);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(refreshInterval);
+      window.removeEventListener("focus", refreshSyncState);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [isAdmin]);
   const [accountDisplayName, setAccountDisplayName] = useState(profile?.display_name ?? "");
   const [accountAvatarUrl, setAccountAvatarUrl] = useState(profile?.avatar_url ?? "");
   const [avatarCropSource, setAvatarCropSource] = useState<string | null>(null);

@@ -9,20 +9,33 @@ from sqlalchemy.orm import Session, joinedload
 from app.models.entities import QueueItem, Subscription, Video, WatchProgress, YouTubeChannelSnapshot, YouTubeCommentSnapshot, YouTubeMatch, YouTubeVideoSnapshot
 from app.schemas.common import FeedCard, FeedSection, VideoSummary
 from app.services.overrides import apply_video_override
-from app.services.utils import parse_episode_number
+from app.services.sync import youtube_channel_matches_local_channel
+from app.services.utils import is_generic_channel_name, parse_episode_number
 
 TRUSTED_PUBLISHED_AT_SOURCES = {"youtube-api", "watch-page"}
 
 
-def _authoritative_youtube_match(video: Video) -> YouTubeMatch | None:
+def _authoritative_youtube_match(video: Video, db: Session | None = None) -> YouTubeMatch | None:
     match = video.youtube_match
-    if match and match.status == "matched":
-        return match
-    return None
+    if not match or match.status != "matched":
+        return None
+    if (
+        db
+        and match.youtube_channel_id
+        and video.channel
+        and not is_generic_channel_name(video.channel.name)
+        and not youtube_channel_matches_local_channel(
+            db,
+            local_channel=video.channel,
+            youtube_channel_id=match.youtube_channel_id,
+        )
+    ):
+        return None
+    return match
 
 
-def _watch_ref(video: Video) -> str:
-    match = _authoritative_youtube_match(video)
+def _watch_ref(video: Video, db: Session | None = None) -> str:
+    match = _authoritative_youtube_match(video, db)
     if match and match.youtube_video_id:
         return match.youtube_video_id
     return str(video.id)
@@ -43,7 +56,7 @@ def _stable_suggested_jitter(user_id: int, video_id: int) -> float:
 
 
 def _resolved_channel_snapshot(video: Video, db: Session) -> YouTubeChannelSnapshot | None:
-    match = _authoritative_youtube_match(video)
+    match = _authoritative_youtube_match(video, db)
     youtube_channel_id = match.youtube_channel_id if match and match.youtube_channel_id else None
     if not youtube_channel_id and video.channel_id:
         youtube_channel_ids = [
@@ -61,6 +74,16 @@ def _resolved_channel_snapshot(video: Video, db: Session) -> YouTubeChannelSnaps
             ).all()
             if item
         ]
+        if video.channel and not is_generic_channel_name(video.channel.name):
+            youtube_channel_ids = [
+                channel_id
+                for channel_id in youtube_channel_ids
+                if youtube_channel_matches_local_channel(
+                    db,
+                    local_channel=video.channel,
+                    youtube_channel_id=channel_id,
+                )
+            ]
         if len(youtube_channel_ids) == 1:
             youtube_channel_id = youtube_channel_ids[0]
     if not youtube_channel_id:
@@ -99,7 +122,7 @@ def _trusted_published_at_by_video_id(videos: list[Video], db: Session) -> dict[
     youtube_video_ids_by_video_id = {
         video.id: match.youtube_video_id
         for video in videos
-        if (match := _authoritative_youtube_match(video)) and match.youtube_video_id
+        if (match := _authoritative_youtube_match(video, db)) and match.youtube_video_id
     }
     youtube_video_ids = list({youtube_video_id for youtube_video_id in youtube_video_ids_by_video_id.values() if youtube_video_id})
     if not youtube_video_ids:
@@ -129,7 +152,7 @@ def _video_recency_timestamp(video: Video, trusted_published_at_by_video_id: dic
 
 def _video_to_card(video: Video, progress_by_video: dict[int, WatchProgress], reason: str, db: Session) -> FeedCard:
     video = apply_video_override(db, video)
-    match = _authoritative_youtube_match(video)
+    match = _authoritative_youtube_match(video, db)
     progress = progress_by_video.get(video.id)
     comment_count = None
     like_count = None
@@ -151,7 +174,7 @@ def _video_to_card(video: Video, progress_by_video: dict[int, WatchProgress], re
             ) or None
     return FeedCard(
         id=video.id,
-        watch_ref=_watch_ref(video),
+        watch_ref=_watch_ref(video, db),
         title=video.title,
         channel=channel_name,
         channel_slug=video.channel.slug if video.channel else None,
@@ -325,7 +348,7 @@ def build_suggested_feed(db: Session, user_id: int) -> tuple[list[Video], dict[i
 
 def summarize_video(video: Video, progress: WatchProgress | None = None, db: Session | None = None) -> VideoSummary:
     overridden = apply_video_override(db, video) if db else video
-    match = _authoritative_youtube_match(overridden)
+    match = _authoritative_youtube_match(overridden, db)
     comment_count = None
     like_count = None
     dislike_count = None
@@ -351,7 +374,7 @@ def summarize_video(video: Video, progress: WatchProgress | None = None, db: Ses
         channel_name, channel_avatar_url = _channel_display(overridden, db)
     return VideoSummary(
         id=overridden.id,
-        watch_ref=_watch_ref(overridden),
+        watch_ref=_watch_ref(overridden, db),
         title=overridden.title,
         channel_id=overridden.channel_id,
         channel_name=channel_name,

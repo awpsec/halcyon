@@ -155,8 +155,9 @@ from app.services.sync import (
     resolve_synced_channel_target,
     send_video_to_review,
     sync_scope,
+    youtube_channel_matches_local_channel,
 )
-from app.services.utils import normalize_text, tokenize_text, tokens_match_query
+from app.services.utils import is_generic_channel_name, normalize_text, tokenize_text, tokens_match_query
 
 router = APIRouter()
 settings = get_settings()
@@ -578,6 +579,7 @@ def _build_explore_ranked_videos(
 
 
 def _channel_snapshot_for_channel(db: Session, channel_id: int) -> YouTubeChannelSnapshot | None:
+    channel = db.get(Channel, channel_id)
     youtube_channel_ids = [
         item
         for item in db.scalars(
@@ -593,6 +595,16 @@ def _channel_snapshot_for_channel(db: Session, channel_id: int) -> YouTubeChanne
         ).all()
         if item
     ]
+    if channel and not is_generic_channel_name(channel.name):
+        youtube_channel_ids = [
+            youtube_channel_id
+            for youtube_channel_id in youtube_channel_ids
+            if youtube_channel_matches_local_channel(
+                db,
+                local_channel=channel,
+                youtube_channel_id=youtube_channel_id,
+            )
+        ]
     if len(youtube_channel_ids) != 1:
         return None
     return db.scalar(select(YouTubeChannelSnapshot).where(YouTubeChannelSnapshot.youtube_channel_id == youtube_channel_ids[0]))

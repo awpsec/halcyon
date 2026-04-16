@@ -941,13 +941,40 @@ def test_build_youtube_api_quota_summary_clamps_remaining_values(tmp_path: Path)
         db.commit()
         db.refresh(settings_row)
 
-        summary = sync_service.build_youtube_api_quota_summary(settings_row)
+        original_current_day = sync_service.current_youtube_quota_day
+        sync_service.current_youtube_quota_day = lambda now=None: "2026-04-11"
+        try:
+            summary = sync_service.build_youtube_api_quota_summary(settings_row)
+        finally:
+            sync_service.current_youtube_quota_day = original_current_day
 
         assert summary["youtube_api_quota_daily_limit"] == 10_000
         assert summary["youtube_api_quota_used_units"] == 10_000
         assert summary["youtube_api_quota_remaining_units"] == 0
         assert summary["youtube_api_quota_remaining_percent"] == 0
         assert summary["youtube_api_quota_estimated"] is True
+
+
+def test_build_youtube_api_quota_summary_treats_stale_day_as_reset(tmp_path: Path) -> None:
+    with make_session(tmp_path) as db:
+        settings_row = SyncSettings(
+            youtube_api_quota_day="2026-04-15",
+            youtube_api_quota_used_units=10_000,
+        )
+        db.add(settings_row)
+        db.commit()
+        db.refresh(settings_row)
+
+        original_current_day = sync_service.current_youtube_quota_day
+        sync_service.current_youtube_quota_day = lambda now=None: "2026-04-16"
+        try:
+            summary = sync_service.build_youtube_api_quota_summary(settings_row)
+        finally:
+            sync_service.current_youtube_quota_day = original_current_day
+
+        assert summary["youtube_api_quota_used_units"] == 0
+        assert summary["youtube_api_quota_remaining_units"] == 10_000
+        assert summary["youtube_api_quota_remaining_percent"] == 100.0
 
 
 def test_choose_playlist_series_title_prefers_exact_membership_and_non_generic_playlist(tmp_path: Path) -> None:
@@ -1786,6 +1813,105 @@ def test_sync_video_reviews_weak_neighbor_channel_hint_matches_for_generic_chann
         result = asyncio.run(run())
 
         assert result.youtube_video_id == "wrongshroud001"
+        assert result.status == "review"
+        assert "channel-hint" in (result.reasons or [])
+
+
+def test_sync_video_reviews_hint_only_candidate_without_authoritative_channel(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        generic_channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(generic_channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "target-hint-review.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target-hint-review")
+        target_video = Video(
+            title="Best pirate game finally released",
+            slug="best-pirate-game-finally-released",
+            channel_id=generic_channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=2 * 3600 + 35 * 60 + 16,
+            published_at=datetime(2026, 4, 14),
+            is_available=True,
+        )
+        db.add(target_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=target_video.id,
+                absolute_path=str(target_path),
+                relative_path="target-hint-review.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="h" * 64,
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-shroud",
+                title="shroud",
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_recent_channel_upload_candidates_web(*args, **kwargs):
+            return []
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return [
+                {
+                    "id": "shroudpirate1",
+                    "snippet": {
+                        "title": "The best pirate game is finally out..",
+                        "channelTitle": "shroud",
+                        "channelId": "channel-shroud",
+                        "publishedAt": "2026-04-14T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 2 * 3600 + 35 * 60 + 16,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "infer_channel_ids_from_neighbor_titles", lambda *args, **kwargs: ["channel-shroud"])
+        monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates_web", fake_fetch_recent_channel_upload_candidates_web)
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.youtube_video_id == "shroudpirate1"
         assert result.status == "review"
         assert "channel-hint" in (result.reasons or [])
 
@@ -2748,6 +2874,74 @@ def test_refresh_live_streams_marks_existing_live_row_stale_when_web_lookup_find
         assert stale_row.youtube_channel_id == "channel-pgl"
 
 
+def test_refresh_live_streams_clears_rows_for_superseded_channel_mapping(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="PGL", slug="pgl")
+        db.add(channel)
+        db.flush()
+        db.add(SyncSettings(live_tab_enabled=True))
+        db.add(LiveMonitoredChannel(channel_id=channel.id))
+        video = Video(
+            title="PGL upload",
+            slug="pgl-upload-live-remap",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_channel_id="channel-pgl",
+                youtube_video_id="vod123",
+                status="matched",
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-pgl",
+                title="PGL",
+            )
+        )
+        db.add(
+            YouTubeLiveStreamSnapshot(
+                youtube_video_id="stale-esl-live",
+                youtube_channel_id="channel-esl",
+                channel_id=channel.id,
+                title="Wrong stream",
+                is_live=True,
+                last_seen_at=datetime.utcnow(),
+                fetched_at=datetime.utcnow(),
+            )
+        )
+        db.commit()
+
+        async def fail_live_api(*args, **kwargs):
+            raise AssertionError("live refresh should not use youtube api helpers")
+
+        async def fake_fetch_live_stream_candidates_web(*args, **kwargs):
+            return True, []
+
+        monkeypatch.setattr(sync_service, "fetch_channel_details", fail_live_api)
+        monkeypatch.setattr(sync_service, "fetch_recent_upload_playlist_video_ids", fail_live_api)
+        monkeypatch.setattr(sync_service, "fetch_live_video_details", fail_live_api)
+        monkeypatch.setattr(sync_service, "fetch_live_stream_candidates_web", fake_fetch_live_stream_candidates_web)
+
+        async def run():
+            return await refresh_live_streams(db, api_key="test-api-key", requests_per_second=3)
+
+        rows = asyncio.run(run())
+        stale_row = db.scalar(
+            select(YouTubeLiveStreamSnapshot).where(YouTubeLiveStreamSnapshot.youtube_video_id == "stale-esl-live")
+        )
+
+        assert rows == []
+        assert stale_row is not None
+        assert stale_row.is_live is False
+        assert stale_row.youtube_channel_id == "channel-esl"
+
+
 def test_refresh_live_streams_uses_web_fallback_without_api_key(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="LVNDMARK", slug="lvndmark")
@@ -2922,6 +3116,38 @@ def test_channel_snapshot_for_channel_ignores_review_matches(tmp_path: Path):
         assert routes_service._channel_snapshot_for_channel(db, channel.id) is None
 
 
+def test_channel_snapshot_for_channel_ignores_mismatched_matched_snapshot(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="PGL", slug="pgl")
+        video = Video(
+            title="Quarterfinal recap",
+            slug="quarterfinal-recap",
+            channel=channel,
+            duration_seconds=600,
+            is_available=True,
+        )
+        db.add_all([channel, video])
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="wrongmatched1",
+                youtube_channel_id="channel-esl",
+                status="matched",
+                confidence=0.92,
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-esl",
+                title="ESL Counter-Strike",
+            )
+        )
+        db.commit()
+
+        assert routes_service._channel_snapshot_for_channel(db, channel.id) is None
+
+
 def test_build_home_feed_ignores_review_channel_snapshot(tmp_path: Path):
     with make_session(tmp_path) as db:
         user = UserProfile(name="viewer", display_name="Viewer")
@@ -2958,6 +3184,44 @@ def test_build_home_feed_ignores_review_channel_snapshot(tmp_path: Path):
         target_card = next(card for card in cards if card.id == video.id)
 
         assert target_card.channel == "Correct Channel"
+
+
+def test_build_home_feed_ignores_mismatched_matched_channel_snapshot(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        user = UserProfile(name="viewer", display_name="Viewer")
+        channel = Channel(name="PGL", slug="pgl")
+        video = Video(
+            title="Quarterfinal recap",
+            slug="quarterfinal-recap-card",
+            channel=channel,
+            duration_seconds=600,
+            is_available=True,
+        )
+        db.add_all([user, channel, video])
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="wrongmatched2",
+                youtube_channel_id="channel-esl",
+                status="matched",
+                confidence=0.92,
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-esl",
+                title="ESL Counter-Strike",
+                avatar_url="https://example.com/wrong.jpg",
+            )
+        )
+        db.commit()
+
+        sections = feed_service.build_home_feed(db, user.id)
+        cards = [card for section in sections for card in section.items]
+        target_card = next(card for card in cards if card.id == video.id)
+
+        assert target_card.channel == "PGL"
 
 
 def test_summarize_video_ignores_review_snapshot_metadata(tmp_path: Path):
