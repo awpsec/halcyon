@@ -1568,6 +1568,134 @@ def test_sync_video_matches_ohnepixel_video_without_api(tmp_path: Path, monkeypa
         assert captured_queries[0].startswith("ohnePixel ")
 
 
+def test_sync_video_accepts_verified_known_channel_candidate_with_sparse_channel_title(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="LVNDMARK", slug="lvndmark")
+        db.add(channel)
+        db.flush()
+
+        known_path = tmp_path / "library" / "known.mp4"
+        target_path = tmp_path / "library" / "target.mp4"
+        known_path.parent.mkdir(parents=True, exist_ok=True)
+        known_path.write_bytes(b"known")
+        target_path.write_bytes(b"target")
+
+        known_video = Video(
+            title="Earlier LVNDMARK upload",
+            slug="earlier-lvndmark-upload",
+            channel_id=channel.id,
+            created_at=datetime.utcnow() - timedelta(days=1),
+            duration_seconds=1200,
+            is_available=True,
+        )
+        target_video = Video(
+            title="SOLO feels Crazy after the AI buff! Gray Zone Warfare",
+            slug="solo-feels-crazy-after-the-ai-buff-gray-zone-warfare",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=20 * 60 + 4,
+            published_at=datetime(2026, 4, 16),
+            is_available=True,
+        )
+        db.add_all([known_video, target_video])
+        db.flush()
+        db.add_all(
+            [
+                VideoFile(
+                    video_id=known_video.id,
+                    absolute_path=str(known_path),
+                    relative_path="known.mp4",
+                    file_size=known_path.stat().st_size,
+                    fingerprint="k" * 64,
+                ),
+                VideoFile(
+                    video_id=target_video.id,
+                    absolute_path=str(target_path),
+                    relative_path="target.mp4",
+                    file_size=target_path.stat().st_size,
+                    fingerprint="t" * 64,
+                ),
+            ]
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=known_video.id,
+                youtube_video_id="lvndmark-known-1",
+                youtube_channel_id="channel-lvndmark",
+                status="matched",
+                confidence=0.98,
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-lvndmark",
+                title="LVNDMARK",
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_recent_channel_upload_candidates_web(*args, **kwargs):
+            return [
+                {
+                    "id": "lvndmark-target-1",
+                    "snippet": {
+                        "title": "SOLO feels Crazy after the AI buff! - Gray Zone Warfare",
+                        "channelTitle": "",
+                        "channelId": "channel-lvndmark",
+                        "publishedAt": "2026-04-16T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 20 * 60 + 4,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return []
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates_web", fake_fetch_recent_channel_upload_candidates_web)
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert result.youtube_video_id == "lvndmark-target-1"
+        assert result.youtube_channel_id == "channel-lvndmark"
+        assert "duration-tight" in (result.reasons or [])
+
+
 def test_sync_video_keeps_searching_later_fallback_batches_after_noisy_first_hit(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="Asmongold TV", slug="asmongold-tv")
@@ -1811,7 +1939,7 @@ def test_sync_video_ignores_generic_channel_bucket_matches_without_api(tmp_path:
         assert all("Asmongold TV" not in query for query in captured_queries)
 
 
-def test_sync_video_reviews_weak_neighbor_channel_hint_matches_for_generic_channel(tmp_path: Path, monkeypatch):
+def test_sync_video_rejects_weak_neighbor_channel_hint_matches_for_generic_channel(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         generic_channel = Channel(name="Unknown Channel", slug="unknown-channel")
         db.add(generic_channel)
@@ -1867,30 +1995,9 @@ def test_sync_video_reviews_weak_neighbor_channel_hint_matches_for_generic_chann
                 }
             ]
 
-        async def fake_apply_sync_item(
-            db: Session,
-            video: Video,
-            item: dict,
-            **kwargs,
-        ) -> YouTubeMatch:
-            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
-            if not match:
-                match = YouTubeMatch(video_id=video.id)
-                db.add(match)
-                db.flush()
-            match.youtube_video_id = item["id"]
-            match.youtube_channel_id = item["snippet"]["channelId"]
-            match.status = kwargs["status"]
-            match.confidence = kwargs["confidence"]
-            match.reasons = kwargs["reasons"]
-            db.commit()
-            db.refresh(match)
-            return match
-
         monkeypatch.setattr(sync_service, "infer_channel_ids_from_neighbor_titles", lambda *args, **kwargs: ["channel-shroud"])
         monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates_web", fake_fetch_recent_channel_upload_candidates_web)
         monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
-        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
 
         async def run() -> YouTubeMatch:
             async with httpx.AsyncClient() as client:
@@ -1905,12 +2012,12 @@ def test_sync_video_reviews_weak_neighbor_channel_hint_matches_for_generic_chann
 
         result = asyncio.run(run())
 
-        assert result.youtube_video_id == "wrongshroud001"
-        assert result.status == "review"
-        assert "channel-hint" in (result.reasons or [])
+        assert result.youtube_video_id is None
+        assert result.status == "unmatched"
+        assert result.reasons == []
 
 
-def test_sync_video_reviews_hint_only_candidate_without_authoritative_channel(tmp_path: Path, monkeypatch):
+def test_sync_video_rejects_hint_only_candidate_without_authoritative_channel(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         generic_channel = Channel(name="Unknown Channel", slug="unknown-channel")
         db.add(generic_channel)
@@ -1966,30 +2073,9 @@ def test_sync_video_reviews_hint_only_candidate_without_authoritative_channel(tm
                 }
             ]
 
-        async def fake_apply_sync_item(
-            db: Session,
-            video: Video,
-            item: dict,
-            **kwargs,
-        ) -> YouTubeMatch:
-            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
-            if not match:
-                match = YouTubeMatch(video_id=video.id)
-                db.add(match)
-                db.flush()
-            match.youtube_video_id = item["id"]
-            match.youtube_channel_id = item["snippet"]["channelId"]
-            match.status = kwargs["status"]
-            match.confidence = kwargs["confidence"]
-            match.reasons = kwargs["reasons"]
-            db.commit()
-            db.refresh(match)
-            return match
-
         monkeypatch.setattr(sync_service, "infer_channel_ids_from_neighbor_titles", lambda *args, **kwargs: ["channel-shroud"])
         monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates_web", fake_fetch_recent_channel_upload_candidates_web)
         monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
-        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
 
         async def run() -> YouTubeMatch:
             async with httpx.AsyncClient() as client:
@@ -2004,9 +2090,9 @@ def test_sync_video_reviews_hint_only_candidate_without_authoritative_channel(tm
 
         result = asyncio.run(run())
 
-        assert result.youtube_video_id == "shroudpirate1"
-        assert result.status == "review"
-        assert "channel-hint" in (result.reasons or [])
+        assert result.youtube_video_id is None
+        assert result.status == "unmatched"
+        assert result.reasons == []
 
 
 def test_sync_video_ignores_mismatched_known_channel_ids_without_api(tmp_path: Path, monkeypatch):
@@ -2272,7 +2358,7 @@ def test_sync_video_uses_series_neighbor_channel_hints_for_new_episode_without_a
         assert any("FRANKIEonPCin1080p" in query for query in captured_queries)
 
 
-def test_sync_video_marks_known_channel_mismatch_as_review(tmp_path: Path, monkeypatch):
+def test_sync_video_rejects_known_channel_mismatch(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
         db.add(channel)
@@ -2319,6 +2405,87 @@ def test_sync_video_marks_known_channel_mismatch_as_review(tmp_path: Path, monke
                 }
             ]
 
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "unmatched"
+        assert result.youtube_video_id is None
+        assert result.youtube_channel_id is None
+        assert result.reasons == []
+
+
+def test_sync_video_ignores_review_rejections_during_automatic_matching(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Asmongold TV", slug="asmongold-tv")
+        db.add(channel)
+        db.flush()
+
+        video_path = tmp_path / "library" / "auto-ignore-review.mp4"
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"target")
+        video = Video(
+            title="Thank GOD we have body cams..",
+            slug="thank-god-we-have-body-cams",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=845,
+            published_at=datetime(2026, 4, 16),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(video_path),
+                relative_path="auto-ignore-review.mp4",
+                file_size=video_path.stat().st_size,
+                fingerprint="r" * 64,
+            )
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id=None,
+                youtube_channel_id=None,
+                status="review",
+                confidence=0.0,
+                rejected_youtube_video_ids=["asmongold-bodycam-1"],
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_recent_channel_upload_candidates_web(*args, **kwargs):
+            return []
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return [
+                {
+                    "id": "asmongold-bodycam-1",
+                    "snippet": {
+                        "title": "Thank GOD we have body cams..",
+                        "channelTitle": "Asmongold TV",
+                        "channelId": "channel-asmongold",
+                        "publishedAt": "2026-04-16T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 845,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
         async def fake_apply_sync_item(
             db: Session,
             video: Video,
@@ -2326,19 +2493,18 @@ def test_sync_video_marks_known_channel_mismatch_as_review(tmp_path: Path, monke
             **kwargs,
         ) -> YouTubeMatch:
             match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
-            if not match:
-                match = YouTubeMatch(video_id=video.id)
-                db.add(match)
-                db.flush()
+            assert match is not None
             match.youtube_video_id = item["id"]
             match.youtube_channel_id = item["snippet"]["channelId"]
             match.status = kwargs["status"]
             match.confidence = kwargs["confidence"]
             match.reasons = kwargs["reasons"]
+            match.rejected_youtube_video_ids = kwargs["rejected_youtube_video_ids"]
             db.commit()
             db.refresh(match)
             return match
 
+        monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates_web", fake_fetch_recent_channel_upload_candidates_web)
         monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
         monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
 
@@ -2355,9 +2521,10 @@ def test_sync_video_marks_known_channel_mismatch_as_review(tmp_path: Path, monke
 
         result = asyncio.run(run())
 
-        assert result.status == "review"
-        assert result.youtube_channel_id == "channel-bizim"
-        assert "channel-mismatch" in (result.reasons or [])
+        assert result.status == "matched"
+        assert result.youtube_video_id == "asmongold-bodycam-1"
+        assert result.youtube_channel_id == "channel-asmongold"
+        assert result.rejected_youtube_video_ids == []
 
 
 def test_sync_video_disables_api_after_fatal_search_and_uses_fallback_match(tmp_path: Path, monkeypatch):

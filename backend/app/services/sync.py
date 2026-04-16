@@ -1570,6 +1570,8 @@ def _candidate_has_match_authority(
     if local_channel_locked:
         if "channel-mismatch" in reason_set:
             return False
+        if verified_channel:
+            return meaningful_title and usable_duration
         if "channel" in reason_set:
             return meaningful_title and usable_duration
         return exact_title and usable_duration
@@ -4128,7 +4130,8 @@ async def sync_video(
     if status_callback:
         status_callback(phase="prepare", title=video.title, source="sync")
     existing_match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
-    rejected_video_ids = normalized_rejected_video_ids(existing_match)
+    review_rejected_video_ids = normalized_rejected_video_ids(existing_match)
+    rejected_video_ids: list[str] = []
     if existing_match and existing_match.status == "matched" and existing_match.youtube_video_id:
         refresh_snapshot = db.scalar(
             select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == existing_match.youtube_video_id)
@@ -4522,43 +4525,28 @@ async def sync_video(
             authoritative_channel_ids=authoritative_channel_ids,
             local_channel_locked=local_channel_locked,
         )
-        match_status = (
-            "matched"
-            if (
-                (_candidate_meets_primary_match_threshold(best_score, reasons) and match_has_authority)
-                or (local_known_channel_match and best_score >= 0.58 and match_has_authority)
+        is_confident_match = bool(
+            (
+                _candidate_meets_primary_match_threshold(best_score, reasons)
+                and match_has_authority
             )
-            else "review"
+            or (local_known_channel_match and best_score >= 0.58 and match_has_authority)
         )
-        if hard_channel_mismatch:
-            match_status = "review"
-        review_candidates = None
-        if match_status == "review":
-            review_candidates = await build_review_candidate_queue(
-                client,
-                video,
-                candidates,
-                requests_per_second=requests_per_second,
-                channel_hints=channel_hints,
-                rejected_video_ids=rejected_video_ids,
-                status_callback=status_callback,
-            )
-            if review_candidates:
-                active_candidate = review_candidates[0]
-                best_item = active_candidate["item"]
-                best_score = active_candidate["confidence"]
-                reasons = active_candidate["reasons"]
-            else:
-                best_item = None
-        if not best_item:
+        if hard_channel_mismatch or not is_confident_match:
             match = existing_match or ensure_youtube_match_row(db, video.id)
             match.status = "unmatched"
             match.confidence = 0.0
             match.reasons = []
             match.review_candidates = []
-            match.rejected_youtube_video_ids = list(dict.fromkeys(rejected_video_ids))
+            match.rejected_youtube_video_ids = list(dict.fromkeys(review_rejected_video_ids))
             match.stale = True
-            logger.info("Sync unmatched after rejecting implausible review candidates video_id=%s title=%s", video.id, video.title)
+            logger.info(
+                "Sync unmatched after rejecting non-authoritative candidate video_id=%s title=%s best_score=%.4f reasons=%s",
+                video.id,
+                video.title,
+                best_score,
+                ",".join(reasons or []),
+            )
             db.commit()
             db.refresh(match)
             return match
@@ -4576,9 +4564,9 @@ async def sync_video(
             prefer_high_res_banners=prefer_high_res_banners,
             confidence=best_score,
             reasons=reasons,
-            status=match_status,
-            review_candidates=review_candidates,
-            rejected_youtube_video_ids=rejected_video_ids if match_status == "review" else [],
+            status="matched",
+            review_candidates=None,
+            rejected_youtube_video_ids=[],
         )
     else:
         match = existing_match or ensure_youtube_match_row(db, video.id)
