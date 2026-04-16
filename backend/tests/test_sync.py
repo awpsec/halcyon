@@ -1696,6 +1696,94 @@ def test_sync_video_accepts_verified_known_channel_candidate_with_sparse_channel
         assert "duration-tight" in (result.reasons or [])
 
 
+def test_sync_video_accepts_strong_overlap_candidate_for_locked_local_channel_without_authority(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="UFD Tech", slug="ufd-tech")
+        db.add(channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "ufd.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target")
+        target_video = Video(
+            title="The Nvidia Warranty Situation is Crazy",
+            slug="the-nvidia-warranty-situation-is-crazy",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=19 * 60 + 3,
+            published_at=datetime(2026, 4, 16),
+            is_available=True,
+        )
+        db.add(target_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=target_video.id,
+                absolute_path=str(target_path),
+                relative_path="ufd.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="ufdtech" * 9 + "ab",
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return [
+                {
+                    "id": "ufd-warranty-1",
+                    "snippet": {
+                        "title": "Nvidia Warranty Situation Is Crazy",
+                        "channelTitle": "",
+                        "channelId": "channel-ufd-tech",
+                        "publishedAt": "2026-04-16T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 19 * 60 + 3,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert result.youtube_video_id == "ufd-warranty-1"
+        assert result.youtube_channel_id == "channel-ufd-tech"
+
+
 def test_sync_video_keeps_searching_later_fallback_batches_after_noisy_first_hit(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="Asmongold TV", slug="asmongold-tv")
@@ -2093,6 +2181,147 @@ def test_sync_video_rejects_hint_only_candidate_without_authoritative_channel(tm
         assert result.youtube_video_id is None
         assert result.status == "unmatched"
         assert result.reasons == []
+
+
+def test_sync_video_skips_rejected_hint_candidate_and_uses_next_exact_match(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        generic_channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        hint_channel = Channel(name="shroud", slug="shroud")
+        db.add_all([generic_channel, hint_channel])
+        db.flush()
+
+        known_path = tmp_path / "library" / "known-shroud.mp4"
+        target_path = tmp_path / "library" / "target-jre.mp4"
+        known_path.parent.mkdir(parents=True, exist_ok=True)
+        known_path.write_bytes(b"known")
+        target_path.write_bytes(b"target")
+
+        known_video = Video(
+            title="Previous shroud upload",
+            slug="previous-shroud-upload",
+            channel_id=hint_channel.id,
+            created_at=datetime.utcnow() - timedelta(days=1),
+            duration_seconds=1200,
+            is_available=True,
+        )
+        target_video = Video(
+            title="Joe Rogan Experience #2483 - Spencer Pratt",
+            slug="joe-rogan-experience-2483-spencer-pratt-next-match",
+            channel_id=generic_channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=2 * 3600 + 34 * 60 + 23,
+            published_at=datetime(2026, 4, 16),
+            is_available=True,
+        )
+        db.add_all([known_video, target_video])
+        db.flush()
+        db.add_all(
+            [
+                VideoFile(
+                    video_id=known_video.id,
+                    absolute_path=str(known_path),
+                    relative_path="known-shroud.mp4",
+                    file_size=known_path.stat().st_size,
+                    fingerprint="shroud" * 9 + "ab",
+                ),
+                VideoFile(
+                    video_id=target_video.id,
+                    absolute_path=str(target_path),
+                    relative_path="target-jre.mp4",
+                    file_size=target_path.stat().st_size,
+                    fingerprint="powerfuljre" * 6 + "abcd",
+                ),
+            ]
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=known_video.id,
+                youtube_video_id="knownshroud1",
+                youtube_channel_id="channel-shroud",
+                status="matched",
+                confidence=0.98,
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-shroud",
+                title="shroud",
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_recent_channel_upload_candidates_web(*args, **kwargs):
+            return []
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return [
+                {
+                    "id": "wrongshroudhint1",
+                    "snippet": {
+                        "title": "Joe Rogan #2483 with Spencer Pratt",
+                        "channelTitle": "shroud",
+                        "channelId": "channel-shroud",
+                        "publishedAt": "2026-04-16T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 2 * 3600 + 34 * 60 + 23,
+                    "_waytube_source": "watch-page",
+                },
+                {
+                    "id": "jre2483exact1",
+                    "snippet": {
+                        "title": "Joe Rogan Experience #2483 - Spencer Pratt",
+                        "channelTitle": "PowerfulJRE",
+                        "channelId": "channel-jre",
+                        "publishedAt": "2026-04-16T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 2 * 3600 + 34 * 60 + 23,
+                    "_waytube_source": "watch-page",
+                },
+            ]
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "infer_channel_ids_from_neighbor_titles", lambda *args, **kwargs: ["channel-shroud"])
+        monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates_web", fake_fetch_recent_channel_upload_candidates_web)
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert result.youtube_video_id == "jre2483exact1"
+        assert result.youtube_channel_id == "channel-jre"
 
 
 def test_sync_video_ignores_mismatched_known_channel_ids_without_api(tmp_path: Path, monkeypatch):

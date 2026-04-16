@@ -1539,19 +1539,24 @@ def _candidate_has_match_authority(
     exact_title = "exact-title" in reason_set
     usable_duration = bool(reason_set & {"duration-tight", "duration", "duration-loose", "duration-longform"})
 
+    if not meaningful_title or not usable_duration:
+        return False
+
     if local_channel_locked:
         if "channel-mismatch" in reason_set:
             return False
-        if verified_channel:
-            return meaningful_title and usable_duration
-        if "channel" in reason_set:
-            return meaningful_title and usable_duration
-        return exact_title and usable_duration
+        return True
 
     if verified_channel:
-        return meaningful_title and usable_duration
+        return True
 
-    return exact_title and usable_duration
+    if "channel" in reason_set:
+        return True
+
+    if exact_title:
+        return True
+
+    return "channel-hint" not in reason_set and "title-overlap-high" in reason_set
 
 
 def _snapshot_candidate_item(
@@ -4369,20 +4374,24 @@ async def sync_video(
             requests_per_second,
             status_callback=status_callback,
         )
-    best_score = 0.0
-    best_item = None
-    reasons: list[str] = []
+    scored_candidates: list[tuple[float, dict[str, Any], list[str]]] = []
     for candidate in candidates:
         youtube_video_id = str(candidate.get("id") or "").strip()
         if youtube_video_id and youtube_video_id in rejected_video_ids:
             continue
         score, candidate_reasons = score_match(video, candidate, channel_hints=channel_hints)
-        if score > best_score:
-            best_score = score
-            best_item = candidate
-            reasons = candidate_reasons
+        scored_candidates.append((score, candidate, candidate_reasons))
 
-    if best_item:
+    rejected_candidate_score = 0.0
+    rejected_candidate_reasons: list[str] = []
+    for initial_score, candidate, initial_reasons in sorted(
+        scored_candidates,
+        key=lambda item: item[0],
+        reverse=True,
+    ):
+        best_item = candidate
+        best_score = initial_score
+        reasons = list(initial_reasons)
         if best_item.get("_waytube_source") != "watch-page":
             best_item = await hydrate_candidate_from_watch_page(
                 client,
@@ -4391,6 +4400,8 @@ async def sync_video(
                 status_callback=status_callback,
             )
             best_score, reasons = score_match(video, best_item, channel_hints=channel_hints)
+        if best_score <= 0:
+            continue
         channel_id = best_item.get("snippet", {}).get("channelId")
         known_channel_match = bool(channel_id and channel_id in authoritative_channel_ids)
         local_channel_locked = bool(
@@ -4424,23 +4435,10 @@ async def sync_video(
             or (local_known_channel_match and best_score >= 0.58 and match_has_authority)
         )
         if hard_channel_mismatch or not is_confident_match:
-            match = existing_match or ensure_youtube_match_row(db, video.id)
-            match.status = "unmatched"
-            match.confidence = 0.0
-            match.reasons = []
-            match.review_candidates = []
-            match.rejected_youtube_video_ids = []
-            match.stale = True
-            logger.info(
-                "Sync unmatched after rejecting non-authoritative candidate video_id=%s title=%s best_score=%.4f reasons=%s",
-                video.id,
-                video.title,
-                best_score,
-                ",".join(reasons or []),
-            )
-            db.commit()
-            db.refresh(match)
-            return match
+            if best_score > rejected_candidate_score:
+                rejected_candidate_score = best_score
+                rejected_candidate_reasons = list(reasons)
+            continue
         return await apply_sync_item(
             db,
             video,
@@ -4457,12 +4455,23 @@ async def sync_video(
             reasons=reasons,
             status="matched",
         )
+
+    match = existing_match or ensure_youtube_match_row(db, video.id)
+    match.status = "unmatched"
+    match.confidence = 0.0
+    match.reasons = []
+    match.stale = True
+    if rejected_candidate_score > 0:
+        match.review_candidates = []
+        match.rejected_youtube_video_ids = []
+        logger.info(
+            "Sync unmatched after rejecting non-authoritative candidates video_id=%s title=%s best_score=%.4f reasons=%s",
+            video.id,
+            video.title,
+            rejected_candidate_score,
+            ",".join(rejected_candidate_reasons or []),
+        )
     else:
-        match = existing_match or ensure_youtube_match_row(db, video.id)
-        match.status = "unmatched"
-        match.confidence = 0.0
-        match.reasons = []
-        match.stale = True
         logger.info("Sync unmatched video_id=%s title=%s", video.id, video.title)
 
     db.commit()
