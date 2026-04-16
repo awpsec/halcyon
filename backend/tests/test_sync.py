@@ -572,6 +572,58 @@ def test_fetch_fallback_candidates_merges_across_query_batches(monkeypatch):
     assert seen_web_candidate_batches == [["q1", "q2", "q3", "q4"], ["q5", "q6"]]
 
 
+def test_fetch_fallback_candidates_continues_after_full_first_batch(monkeypatch):
+    seen_google_batches: list[list[str]] = []
+
+    async def fake_fetch_google_dork_video_ids(client, queries, requests_per_second, status_callback=None):
+        del client, requests_per_second, status_callback
+        seen_google_batches.append(list(queries))
+        if len(seen_google_batches) == 1:
+            return [f"first{index:02d}batch"[:11] for index in range(12)]
+        return ["secondbat01"]
+
+    async def fake_fetch_youtube_web_video_ids(client, queries, requests_per_second, status_callback=None):
+        del client, queries, requests_per_second, status_callback
+        return []
+
+    async def fake_fetch_youtube_web_candidates(client, queries, requests_per_second, status_callback=None):
+        del client, queries, requests_per_second, status_callback
+        return []
+
+    async def fake_fetch_watch_page_candidate(client, youtube_video_id, requests_per_second, status_callback=None):
+        del client, requests_per_second, status_callback
+        return {
+            "id": youtube_video_id,
+            "snippet": {
+                "title": f"Candidate {youtube_video_id}",
+                "channelTitle": "Known Channel",
+                "channelId": "channel-known",
+                "publishedAt": "2026-04-15T12:00:00Z",
+            },
+            "statistics": {},
+            "_waytube_duration_seconds": 600,
+            "_waytube_source": "watch-page",
+        }
+
+    monkeypatch.setattr(sync_service, "fetch_google_dork_video_ids", fake_fetch_google_dork_video_ids)
+    monkeypatch.setattr(sync_service, "fetch_youtube_web_video_ids", fake_fetch_youtube_web_video_ids)
+    monkeypatch.setattr(sync_service, "fetch_youtube_web_candidates", fake_fetch_youtube_web_candidates)
+    monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_fallback_candidates(
+                client,
+                ["q1", "q2", "q3", "q4", "q5", "q6"],
+                3,
+            )
+
+    result = asyncio.run(run())
+
+    assert [item["id"] for item in result][-1] == "secondbat01"
+    assert seen_google_batches == [["q1", "q2", "q3", "q4"], ["q5", "q6"]]
+
+
 def test_fetch_fallback_candidates_advances_to_next_query_batch_when_first_batch_empty(monkeypatch):
     seen_google_batches: list[list[str]] = []
 
@@ -4345,6 +4397,144 @@ def test_non_force_refresh_researches_implausible_existing_match_without_api(tmp
         assert result.status == "matched"
         assert result.youtube_video_id == "jre2483abc1"
         assert result.youtube_channel_id == "channel-jre"
+
+
+def test_non_force_refresh_researches_known_channel_mismatch_without_api(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
+        db.add(channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "frankie-refresh.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target")
+        video = Video(
+            title="LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+            slug="lady-bandits-refresh",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=1443,
+            published_at=datetime(2026, 4, 11),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(target_path),
+                relative_path="frankie-refresh.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="frankierefresh" * 5,
+            )
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="wrong-bizim-id",
+                youtube_channel_id="channel-bizim",
+                status="matched",
+                confidence=0.93,
+                reasons=["exact-title", "duration-tight"],
+            )
+        )
+        db.add(
+            YouTubeVideoSnapshot(
+                youtube_video_id="wrong-bizim-id",
+                youtube_channel_id="channel-bizim",
+                title="LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+                published_at=datetime(2026, 4, 11),
+                published_at_source="watch-page",
+                duration_seconds=1443,
+                thumbnail_url="https://example.com/wrong-frankie.jpg",
+                view_count=100,
+                like_count=50,
+                dislike_count=2,
+                fetched_at=datetime.utcnow(),
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-bizim",
+                title="Bizim Kanal",
+            )
+        )
+        db.commit()
+
+        search_called = False
+
+        async def fake_fetch_watch_page_candidate(*args, **kwargs):
+            return {
+                "id": "wrong-bizim-id",
+                "snippet": {
+                    "title": "LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+                    "channelTitle": "Bizim Kanal",
+                    "channelId": "channel-bizim",
+                    "publishedAt": "2026-04-11T12:00:00Z",
+                    "description": "Still wrong",
+                    "thumbnails": {},
+                },
+                "statistics": {"viewCount": 100, "likeCount": 50},
+                "_waytube_duration_seconds": 1443,
+                "_waytube_source": "watch-page",
+            }
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            nonlocal search_called
+            search_called = True
+            return [
+                {
+                    "id": "frankie-correct-1",
+                    "snippet": {
+                        "title": "LADY BANDITS! - Arma 2: DayZ Mod - Ep.30",
+                        "channelTitle": "FRANKIEonPCin1080p",
+                        "channelId": "channel-frankie",
+                        "publishedAt": "2026-04-11T12:00:00Z",
+                    },
+                    "statistics": {"viewCount": 340000, "likeCount": 15000},
+                    "_waytube_duration_seconds": 1443,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            assert match is not None
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert search_called is True
+        assert result.status == "matched"
+        assert result.youtube_video_id == "frankie-correct-1"
+        assert result.youtube_channel_id == "channel-frankie"
 
 
 def test_video_requires_refresh_stops_periodic_refresh_for_old_matched_video(tmp_path: Path):

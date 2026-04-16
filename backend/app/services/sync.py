@@ -1516,14 +1516,18 @@ def _candidate_meets_refresh_by_id_threshold(
     *,
     existing_match_plausible: bool,
 ) -> bool:
+    reason_set = set(reasons)
+    if {"channel-mismatch", "duration-mismatch", "duration-far", "episode-mismatch"} & reason_set:
+        return False
     if _candidate_meets_primary_match_threshold(score, reasons):
+        return True
+    if score >= 0.64 and "channel" in reason_set and bool(
+        reason_set & {"duration-tight", "duration", "duration-loose", "duration-longform"}
+    ):
         return True
     if not existing_match_plausible:
         return False
 
-    reason_set = set(reasons)
-    if {"channel-mismatch", "duration-mismatch", "duration-far", "episode-mismatch"} & reason_set:
-        return False
     return score >= 0.64 and bool(
         reason_set
         & {
@@ -1623,6 +1627,18 @@ def _existing_match_snapshot_is_plausible(
             )
         )
         channel_title = channel_snapshot.title if channel_snapshot and channel_snapshot.title else None
+    if video.channel and not is_generic_channel_name(video.channel.name) and channel_title:
+        creator_matches = False
+        if snapshot.youtube_channel_id:
+            creator_matches = youtube_channel_matches_local_channel(
+                db,
+                local_channel=video.channel,
+                youtube_channel_id=snapshot.youtube_channel_id,
+            )
+        if not creator_matches and channel_title:
+            creator_matches = channel_names_search_match(video.channel.name, channel_title)
+        if not creator_matches:
+            return False
     score, reasons = score_match(
         video,
         _snapshot_candidate_item(snapshot, channel_title=channel_title),
@@ -3498,9 +3514,7 @@ async def fetch_fallback_candidates(client: httpx.AsyncClient, queries: list[str
                 ),
             )
         merge_candidate_items(merged_candidates, candidates)
-        if len(merged_candidates) >= 12:
-            break
-    return merged_candidates[:12]
+    return merged_candidates[:24]
 
 
 async def hydrate_candidate_from_watch_page(
