@@ -48,7 +48,7 @@ from app.models.entities import (
 )
 from app.core.config import get_settings
 from app.services.media import download_thumbnail, fingerprint_file, generate_thumbnail
-from app.services.utils import canonicalize_search_text, clean_display_title, is_generic_channel_name, normalize_text, parse_episode_number, resolve_display_name, slugify, tokenize_text
+from app.services.utils import canonicalize_search_text, clean_display_title, is_generic_channel_name, normalize_text, parse_episode_number, resolve_display_name, slugify, title_similarity, tokenize_text
 
 YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 GOOGLE_SEARCH_BASE = "https://www.google.com/search"
@@ -1424,20 +1424,22 @@ def _extract_api_error(response: httpx.Response) -> str:
 def score_match(video: Video, item: dict, *, channel_hints: list[str] | None = None) -> tuple[float, list[str]]:
     reasons: list[str] = []
     score = 0.0
-    title = normalize_text(item.get("snippet", {}).get("title") or "")
+    candidate_title = item.get("snippet", {}).get("title") or ""
+    title = normalize_text(candidate_title)
     channel = normalize_text(item.get("snippet", {}).get("channelTitle") or "")
     video_title = normalize_text(video.title)
     video_tokens = set(tokenize_text(video_title))
     title_tokens = set(tokenize_text(title))
     overlap = len(video_tokens & title_tokens) / max(1, len(video_tokens))
+    similarity = title_similarity(video.title, candidate_title)
 
     if video_title == title:
         score += 0.48
         reasons.append("exact-title")
-    elif overlap >= 0.8:
+    elif overlap >= 0.8 or similarity >= 0.9:
         score += 0.42
         reasons.append("title-overlap-high")
-    elif overlap >= 0.55:
+    elif overlap >= 0.55 or similarity >= 0.8:
         score += 0.28
         reasons.append("title-overlap")
     elif overlap >= 0.35:
@@ -1506,7 +1508,24 @@ def score_match(video: Video, item: dict, *, channel_hints: list[str] | None = N
 
 
 def _candidate_meets_primary_match_threshold(score: float, reasons: list[str]) -> bool:
-    threshold = 0.72 if {"duration-tight", "duration", "exact-title"} & set(reasons) else 0.8
+    reason_set = set(reasons)
+    if "exact-title" in reason_set and reason_set & {"duration-tight", "duration", "duration-loose", "duration-longform"}:
+        return score >= 0.58
+    if "title-overlap-high" in reason_set and "duration-tight" in reason_set:
+        return score >= 0.68
+    if (
+        "title-overlap-high" in reason_set
+        and reason_set & {"duration", "duration-loose", "duration-longform"}
+        and reason_set & {"date", "channel", "channel-hint", "series", "episode"}
+    ):
+        return score >= 0.68
+    if (
+        "title-overlap" in reason_set
+        and "duration-tight" in reason_set
+        and reason_set & {"date", "channel", "channel-hint", "series", "episode"}
+    ):
+        return score >= 0.64
+    threshold = 0.72 if {"duration-tight", "duration", "exact-title"} & reason_set else 0.8
     return score >= threshold
 
 
@@ -1580,7 +1599,16 @@ def _candidate_has_match_authority(
     if exact_title:
         return True
 
-    return "channel-hint" not in reason_set and "title-overlap-high" in reason_set
+    if "title-overlap-high" in reason_set and "duration-tight" in reason_set:
+        return "channel-hint" not in reason_set
+
+    return (
+        "channel-hint" not in reason_set
+        and
+        "title-overlap" in reason_set
+        and "duration-tight" in reason_set
+        and bool(reason_set & {"date", "series", "episode"})
+    )
 
 
 def _snapshot_candidate_item(

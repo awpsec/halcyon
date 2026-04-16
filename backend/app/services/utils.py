@@ -65,6 +65,21 @@ def tokenize_text(value: str) -> list[str]:
     return [token for token in normalize_text(value).split(" ") if token]
 
 
+def title_similarity(left: str, right: str) -> float:
+    left_normalized = normalize_text(left)
+    right_normalized = normalize_text(right)
+    if not left_normalized or not right_normalized:
+        return 0.0
+    return max(
+        SequenceMatcher(None, left_normalized, right_normalized).ratio(),
+        SequenceMatcher(
+            None,
+            left_normalized.replace(" ", ""),
+            right_normalized.replace(" ", ""),
+        ).ratio(),
+    )
+
+
 def canonicalize_search_text(value: str) -> str:
     working = unicodedata.normalize("NFKC", value)
     replacements = {
