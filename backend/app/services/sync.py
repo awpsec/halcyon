@@ -1426,14 +1426,14 @@ def score_match(video: Video, item: dict, *, channel_hints: list[str] | None = N
 
     if video.channel and not is_generic_channel_name(video.channel.name):
         candidate_channel_title = item.get("snippet", {}).get("channelTitle")
-        if channel and channel_names_confidently_match(video.channel.name, candidate_channel_title):
+        if channel and channel_names_search_match(video.channel.name, candidate_channel_title):
             score += 0.24
             reasons.append("channel")
         elif channel:
             score -= 0.18
             reasons.append("channel-mismatch")
     elif channel_hints:
-        if any(channel_names_confidently_match(hint, item.get("snippet", {}).get("channelTitle")) for hint in channel_hints):
+        if any(channel_names_search_match(hint, item.get("snippet", {}).get("channelTitle")) for hint in channel_hints):
             score += 0.24
             reasons.append("channel-hint")
     duration = item.get("_waytube_duration_seconds")
@@ -1784,6 +1784,27 @@ def channel_names_confidently_match(local_name: str | None, synced_name: str | N
         extra_in_synced <= CHANNEL_AUTHORITY_OPTIONAL_TOKENS
         and extra_in_local <= CHANNEL_AUTHORITY_OPTIONAL_TOKENS
     )
+
+
+def channel_names_search_match(local_name: str | None, synced_name: str | None) -> bool:
+    if not local_name or not synced_name:
+        return False
+    if is_generic_channel_name(local_name) or is_generic_channel_name(synced_name):
+        return False
+
+    local_tokens = set(tokenize_text(local_name))
+    synced_tokens = set(tokenize_text(synced_name))
+    if not local_tokens or not synced_tokens:
+        return False
+
+    extra_in_synced = synced_tokens - local_tokens
+    extra_in_local = local_tokens - synced_tokens
+    if extra_in_synced & CHANNEL_AUTHORITY_REJECT_TOKENS:
+        return False
+    if extra_in_local & CHANNEL_AUTHORITY_REJECT_TOKENS:
+        return False
+
+    return resolve_display_name(local_name, synced_name) == synced_name
 
 
 def youtube_channel_matches_local_channel(
@@ -3244,7 +3265,7 @@ async def fetch_google_dork_video_ids(
         for video_id in extract_video_ids_from_urls(urls):
             if video_id not in results:
                 results.append(video_id)
-        if results:
+        if len(results) >= 8:
             break
     return results[:8]
 
@@ -3274,7 +3295,7 @@ async def fetch_youtube_web_video_ids(
                 results.append(video_id)
             if len(results) >= 8:
                 break
-        if results:
+        if len(results) >= 8:
             break
     return results[:8]
 
@@ -3385,6 +3406,7 @@ async def fetch_watch_page_candidate(
 
 
 async def fetch_fallback_candidates(client: httpx.AsyncClient, queries: list[str], requests_per_second: int, status_callback=None) -> list[dict]:
+    merged_candidates: list[dict] = []
     for query_batch in fallback_query_batches(queries):
         candidates: list[dict] = []
         candidate_ids = await fetch_google_dork_video_ids(
@@ -3393,13 +3415,16 @@ async def fetch_fallback_candidates(client: httpx.AsyncClient, queries: list[str
             requests_per_second,
             status_callback=status_callback,
         )
-        if not candidate_ids:
-            candidate_ids = await fetch_youtube_web_video_ids(
+        if len(candidate_ids) < 6:
+            youtube_web_ids = await fetch_youtube_web_video_ids(
                 client,
                 query_batch,
                 requests_per_second,
                 status_callback=status_callback,
             )
+            for youtube_video_id in youtube_web_ids:
+                if youtube_video_id not in candidate_ids:
+                    candidate_ids.append(youtube_video_id)
         for youtube_video_id in candidate_ids[:6]:
             candidate = await fetch_watch_page_candidate(
                 client,
@@ -3408,8 +3433,8 @@ async def fetch_fallback_candidates(client: httpx.AsyncClient, queries: list[str
                 status_callback=status_callback,
             )
             if candidate:
-                candidates.append(candidate)
-        if not candidates:
+                merge_candidate_items(candidates, [candidate])
+        if len(candidates) < 8:
             merge_candidate_items(
                 candidates,
                 await fetch_youtube_web_candidates(
@@ -3419,9 +3444,10 @@ async def fetch_fallback_candidates(client: httpx.AsyncClient, queries: list[str
                     status_callback=status_callback,
                 ),
             )
-        if candidates:
-            return candidates
-    return []
+        merge_candidate_items(merged_candidates, candidates)
+        if len(merged_candidates) >= 12:
+            break
+    return merged_candidates[:12]
 
 
 async def hydrate_candidate_from_watch_page(

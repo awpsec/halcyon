@@ -193,7 +193,7 @@ def test_fetch_youtube_web_candidates_parses_video_renderers(monkeypatch):
     assert results[0]["_waytube_duration_seconds"] == 36 * 60 + 39
 
 
-def test_fetch_google_dork_video_ids_stops_after_first_successful_query(monkeypatch):
+def test_fetch_google_dork_video_ids_merges_across_queries(monkeypatch):
     html_by_query = {
         'site:youtube.com/watch "Asmongold TV British Navy is a joke now"': """
         <html><body>
@@ -227,7 +227,7 @@ def test_fetch_google_dork_video_ids_stops_after_first_successful_query(monkeypa
 
     results = asyncio.run(run())
 
-    assert results == ["wrong12345a"]
+    assert results == ["wrong12345a", "right12345b"]
 
 
 def test_fetch_youtube_web_candidates_merges_across_queries(monkeypatch):
@@ -514,7 +514,7 @@ def test_fetch_live_stream_candidates_web_rejects_variant_channel_title_when_id_
     assert items == []
 
 
-def test_fetch_fallback_candidates_stops_after_first_non_empty_query_batch(monkeypatch):
+def test_fetch_fallback_candidates_merges_across_query_batches(monkeypatch):
     seen_google_batches: list[list[str]] = []
     seen_web_id_batches: list[list[str]] = []
     seen_web_candidate_batches: list[list[str]] = []
@@ -522,7 +522,9 @@ def test_fetch_fallback_candidates_stops_after_first_non_empty_query_batch(monke
     async def fake_fetch_google_dork_video_ids(client, queries, requests_per_second, status_callback=None):
         del client, requests_per_second, status_callback
         seen_google_batches.append(list(queries))
-        return ["firstbatch01a"]
+        if len(seen_google_batches) == 1:
+            return ["firstbatch01a"]
+        return ["secondbatch1"]
 
     async def fake_fetch_youtube_web_video_ids(client, queries, requests_per_second, status_callback=None):
         del client, requests_per_second, status_callback
@@ -564,10 +566,10 @@ def test_fetch_fallback_candidates_stops_after_first_non_empty_query_batch(monke
 
     result = asyncio.run(run())
 
-    assert [item["id"] for item in result] == ["firstbatch01a"]
-    assert seen_google_batches == [["q1", "q2", "q3", "q4"]]
-    assert seen_web_id_batches == []
-    assert seen_web_candidate_batches == []
+    assert [item["id"] for item in result] == ["firstbatch01a", "secondbatch1"]
+    assert seen_google_batches == [["q1", "q2", "q3", "q4"], ["q5", "q6"]]
+    assert seen_web_id_batches == [["q1", "q2", "q3", "q4"], ["q5", "q6"]]
+    assert seen_web_candidate_batches == [["q1", "q2", "q3", "q4"], ["q5", "q6"]]
 
 
 def test_fetch_fallback_candidates_advances_to_next_query_batch_when_first_batch_empty(monkeypatch):
@@ -620,6 +622,65 @@ def test_fetch_fallback_candidates_advances_to_next_query_batch_when_first_batch
 
     assert [item["id"] for item in result] == ["secondbat01"]
     assert seen_google_batches == [["q1", "q2", "q3", "q4"], ["q5", "q6"]]
+
+
+def test_fetch_fallback_candidates_merges_watch_page_and_web_candidates(monkeypatch):
+    async def fake_fetch_google_dork_video_ids(client, queries, requests_per_second, status_callback=None):
+        del client, queries, requests_per_second, status_callback
+        return ["watchpage01a"]
+
+    async def fake_fetch_youtube_web_video_ids(client, queries, requests_per_second, status_callback=None):
+        del client, queries, requests_per_second, status_callback
+        return ["watchpage01a", "watchpage01b"]
+
+    async def fake_fetch_youtube_web_candidates(client, queries, requests_per_second, status_callback=None):
+        del client, queries, requests_per_second, status_callback
+        return [
+            {
+                "id": "webcand001a",
+                "snippet": {
+                    "title": "Web candidate title",
+                    "channelTitle": "Known Channel",
+                    "channelId": "channel-known",
+                    "publishedAt": "2026-04-15T12:00:00Z",
+                },
+                "statistics": {},
+                "_waytube_duration_seconds": 600,
+                "_waytube_source": "youtube-web-search",
+            }
+        ]
+
+    async def fake_fetch_watch_page_candidate(client, youtube_video_id, requests_per_second, status_callback=None):
+        del client, requests_per_second, status_callback
+        return {
+            "id": youtube_video_id,
+            "snippet": {
+                "title": f"Watch page {youtube_video_id}",
+                "channelTitle": "Known Channel",
+                "channelId": "channel-known",
+                "publishedAt": "2026-04-15T12:00:00Z",
+            },
+            "statistics": {},
+            "_waytube_duration_seconds": 600,
+            "_waytube_source": "watch-page",
+        }
+
+    monkeypatch.setattr(sync_service, "fetch_google_dork_video_ids", fake_fetch_google_dork_video_ids)
+    monkeypatch.setattr(sync_service, "fetch_youtube_web_video_ids", fake_fetch_youtube_web_video_ids)
+    monkeypatch.setattr(sync_service, "fetch_youtube_web_candidates", fake_fetch_youtube_web_candidates)
+    monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_fallback_candidates(
+                client,
+                ["q1", "q2"],
+                3,
+            )
+
+    result = asyncio.run(run())
+
+    assert [item["id"] for item in result] == ["watchpage01a", "watchpage01b", "webcand001a"]
 
 
 def test_resolve_synced_channel_target_ignores_review_rows_when_reusing_channels(tmp_path: Path):
@@ -1385,6 +1446,104 @@ def test_sync_video_prioritizes_known_local_channel_queries_without_api(tmp_path
         assert captured_queries
         assert captured_queries[0].startswith("UFD Tech ")
         assert "The Nvidia Warranty Situation is Crazy" in captured_queries[0]
+
+
+def test_sync_video_keeps_searching_later_fallback_batches_after_noisy_first_hit(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Asmongold TV", slug="asmongold-tv")
+        db.add(channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "asmon.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target")
+        target_video = Video(
+            title="British Navy is a joke now",
+            slug="british-navy-is-a-joke-now-later-batch",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=15 * 60,
+            published_at=datetime(2026, 4, 14),
+            is_available=True,
+        )
+        db.add(target_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=target_video.id,
+                absolute_path=str(target_path),
+                relative_path="asmon.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="laterbatch" * 6 + "ab",
+            )
+        )
+        db.commit()
+
+        seen_google_batches: list[list[str]] = []
+
+        async def fake_fetch_google_dork_video_ids(client, queries, requests_per_second, status_callback=None):
+            del client, requests_per_second, status_callback
+            seen_google_batches.append(list(queries))
+            if len(seen_google_batches) == 1:
+                return ["wronghasan01"]
+            return ["rightasmon1"]
+
+        async def fake_fetch_youtube_web_video_ids(*args, **kwargs):
+            return []
+
+        async def fake_fetch_youtube_web_candidates(*args, **kwargs):
+            return []
+
+        async def fake_fetch_watch_page_candidate(client, youtube_video_id, requests_per_second, status_callback=None):
+            del client, requests_per_second, status_callback
+            if youtube_video_id == "wronghasan01":
+                return {
+                    "id": "wronghasan01",
+                    "snippet": {
+                        "title": "Hillary Clinton is so Fucking Stupid",
+                        "channelTitle": "HasanAbi",
+                        "channelId": "channel-hasan",
+                        "publishedAt": "2026-04-14T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 59 * 60 + 11,
+                    "_waytube_source": "watch-page",
+                }
+            return {
+                "id": "rightasmon1",
+                "snippet": {
+                    "title": "British Navy is a joke now",
+                    "channelTitle": "Asmongold TV",
+                    "channelId": "channel-asmongold",
+                    "publishedAt": "2026-04-14T12:00:00Z",
+                },
+                "statistics": {},
+                "_waytube_duration_seconds": 15 * 60,
+                "_waytube_source": "watch-page",
+            }
+
+        monkeypatch.setattr(sync_service, "fetch_google_dork_video_ids", fake_fetch_google_dork_video_ids)
+        monkeypatch.setattr(sync_service, "fetch_youtube_web_video_ids", fake_fetch_youtube_web_video_ids)
+        monkeypatch.setattr(sync_service, "fetch_youtube_web_candidates", fake_fetch_youtube_web_candidates)
+        monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert result.youtube_video_id == "rightasmon1"
+        assert result.youtube_channel_id == "channel-asmongold"
+        assert len(seen_google_batches) == 2
 
 
 def test_sync_video_ignores_generic_channel_bucket_matches_without_api(tmp_path: Path, monkeypatch):
@@ -2387,6 +2546,13 @@ def test_channel_names_confidently_match_rejects_clip_variants():
     assert sync_service.channel_names_confidently_match("Austin Evans", "Austin Evans Clips") is False
     assert sync_service.channel_names_confidently_match("ohnePixel", "ohnePixel Clips") is False
     assert sync_service.channel_names_confidently_match("PGL", "PGL CS2") is False
+
+
+def test_channel_names_search_match_allows_safe_variants_but_rejects_clips():
+    assert sync_service.channel_names_search_match("Asmongold", "Asmongold TV") is True
+    assert sync_service.channel_names_search_match("PGL", "PGL CS2") is True
+    assert sync_service.channel_names_search_match("Austin Evans", "Austin Evans Clips") is False
+    assert sync_service.channel_names_search_match("ohnePixel", "ohnePixel Highlights") is False
 
 
 def test_matched_youtube_channels_by_local_channel_skips_clip_variants(tmp_path: Path):
