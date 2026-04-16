@@ -1798,6 +1798,19 @@ def _snapshot_candidate_item(
     }
 
 
+def candidate_requires_api_gap_fill(item: dict[str, Any]) -> bool:
+    snippet = item.get("snippet", {}) or {}
+    statistics = item.get("statistics", {}) or {}
+    return bool(
+        not snippet.get("description")
+        or not snippet.get("publishedAt")
+        or not snippet.get("channelId")
+        or item.get("_waytube_duration_seconds") is None
+        or parse_maybe_int(statistics.get("viewCount")) is None
+        or parse_maybe_int(statistics.get("likeCount")) is None
+    )
+
+
 def _existing_match_snapshot_is_plausible(
     db: Session,
     video: Video,
@@ -3965,6 +3978,7 @@ async def apply_sync_item(
     confidence: float = 1.0,
     reasons: list[str] | None = None,
     status: str = "matched",
+    engagement_only: bool = False,
 ) -> YouTubeMatch:
     snippet = item.get("snippet", {})
     statistics = item.get("statistics", {})
@@ -4046,19 +4060,22 @@ async def apply_sync_item(
     if not snapshot:
         snapshot = YouTubeVideoSnapshot(youtube_video_id=video_id, title=snippet.get("title", video.title))
         db.add(snapshot)
-    snapshot.youtube_channel_id = channel_id
-    snapshot.title = clean_display_title(snippet.get("title") or snapshot.title or video.title)
-    incoming_description = snippet.get("description")
-    if isinstance(incoming_description, str) and incoming_description.strip():
-        snapshot.description = incoming_description
-    incoming_duration_seconds = item.get("_waytube_duration_seconds")
-    if incoming_duration_seconds is not None:
-        snapshot.duration_seconds = incoming_duration_seconds
-    thumbnail_url = best_thumbnail_url(snippet.get("thumbnails")) or snapshot.thumbnail_url
-    snapshot.thumbnail_url = thumbnail_url
-    incoming_tags = snippet.get("tags")
-    if isinstance(incoming_tags, list) and incoming_tags:
-        snapshot.tags = incoming_tags
+    if not engagement_only or not snapshot.youtube_channel_id:
+        snapshot.youtube_channel_id = channel_id
+    thumbnail_url = snapshot.thumbnail_url
+    if not engagement_only:
+        snapshot.title = clean_display_title(snippet.get("title") or snapshot.title or video.title)
+        incoming_description = snippet.get("description")
+        if isinstance(incoming_description, str) and incoming_description.strip():
+            snapshot.description = incoming_description
+        incoming_duration_seconds = item.get("_waytube_duration_seconds")
+        if incoming_duration_seconds is not None:
+            snapshot.duration_seconds = incoming_duration_seconds
+        thumbnail_url = best_thumbnail_url(snippet.get("thumbnails")) or snapshot.thumbnail_url
+        snapshot.thumbnail_url = thumbnail_url
+        incoming_tags = snippet.get("tags")
+        if isinstance(incoming_tags, list) and incoming_tags:
+            snapshot.tags = incoming_tags
     incoming_view_count = parse_maybe_int(statistics.get("viewCount"))
     if incoming_view_count is not None:
         snapshot.view_count = incoming_view_count
@@ -4080,35 +4097,36 @@ async def apply_sync_item(
             snapshot.rating = float(ryd_snapshot.get("rating")) if ryd_snapshot.get("rating") is not None else None
         except (TypeError, ValueError):
             snapshot.rating = None
-    snapshot.published_at, snapshot.published_at_source = resolve_snapshot_published_at(
-        youtube_published_at=snippet.get("publishedAt"),
-        source=item.get("_waytube_source"),
-        existing_published_at=snapshot.published_at,
-        existing_source=snapshot.published_at_source,
-    )
+    if not engagement_only:
+        snapshot.published_at, snapshot.published_at_source = resolve_snapshot_published_at(
+            youtube_published_at=snippet.get("publishedAt"),
+            source=item.get("_waytube_source"),
+            existing_published_at=snapshot.published_at,
+            existing_source=snapshot.published_at_source,
+        )
     snapshot.fetched_at = datetime.utcnow()
-    matched_fields: list[str] = ["title"]
+    matched_fields: list[str] = [] if engagement_only else ["title"]
     organization_moves: list[tuple[Path, Path]] = []
-    if snapshot.description:
+    if not engagement_only and snapshot.description:
         matched_fields.append("description")
-    if snapshot.published_at is not None:
+    if not engagement_only and snapshot.published_at is not None:
         matched_fields.append("uploaded")
     if snapshot.like_count is not None:
         matched_fields.append("likes")
     if snapshot.view_count is not None:
         matched_fields.append("views")
     cache_dir = get_settings().cache_dir
-    if thumbnail_url:
+    if not engagement_only and thumbnail_url:
         fingerprint = video.files[0].fingerprint if video.files else f"yt-{video_id}"
         downloaded = download_thumbnail(thumbnail_url, cache_dir, fingerprint, force_replace=True)
         if downloaded:
             video.thumbnail_path = downloaded
-    elif not video.thumbnail_path and video.files:
+    elif not engagement_only and not video.thumbnail_path and video.files:
         generated = generate_thumbnail(Path(video.files[0].absolute_path), cache_dir, video.files[0].fingerprint)
         if generated:
             video.thumbnail_path = generated
 
-    if channel_id:
+    if channel_id and not engagement_only:
         matched_fields.append("channel")
         channel_snapshot = db.scalar(select(YouTubeChannelSnapshot).where(YouTubeChannelSnapshot.youtube_channel_id == channel_id))
         if not channel_snapshot:
@@ -4270,7 +4288,7 @@ async def apply_sync_item(
                         video.id,
                         target_channel.slug if target_channel else None,
                         len(organization_moves),
-                    )
+                        )
 
     if match.status == "matched" and effective_api_key and engagement_refresh_due and comment_limit > 0:
         reply_limit = max(0, int(max_replies_per_comment))
@@ -4535,6 +4553,7 @@ async def sync_video(
                             confidence=max(existing_match.confidence or 0.0, refresh_score),
                             reasons=refresh_reasons,
                             status="matched",
+                            engagement_only=True,
                         )
             if not force and existing_match_plausible:
                 existing_match.last_synced_at = datetime.utcnow()
@@ -4766,6 +4785,32 @@ async def sync_video(
         status_callback=status_callback,
     )
     if best_item:
+        if (
+            effective_api_key
+            and best_item.get("id")
+            and (channel_cache is not None or playlist_cache is not None)
+            and candidate_requires_api_gap_fill(best_item)
+        ):
+            try:
+                api_gap_fill_item = await fetch_video_details_by_id(
+                    client,
+                    effective_api_key,
+                    str(best_item.get("id")),
+                    requests_per_second,
+                )
+            except YouTubeSyncError as exc:
+                logger.warning(
+                    "Sync api gap-fill skipped video_id=%s youtube_video_id=%s error=%s",
+                    video.id,
+                    best_item.get("id"),
+                    exc,
+                )
+                api_error = exc
+                if exc.fatal:
+                    effective_api_key = None
+            else:
+                if api_gap_fill_item and str(api_gap_fill_item.get("id") or "").strip() == str(best_item.get("id") or "").strip():
+                    best_item = merge_candidate_item(best_item, api_gap_fill_item)
         return await apply_sync_item(
             db,
             video,
@@ -4874,6 +4919,32 @@ async def sync_video(
                 status_callback=status_callback,
             )
             if best_item:
+                if (
+                    effective_api_key
+                    and best_item.get("id")
+                    and (channel_cache is not None or playlist_cache is not None)
+                    and candidate_requires_api_gap_fill(best_item)
+                ):
+                    try:
+                        api_gap_fill_item = await fetch_video_details_by_id(
+                            client,
+                            effective_api_key,
+                            str(best_item.get("id")),
+                            requests_per_second,
+                        )
+                    except YouTubeSyncError as exc:
+                        logger.warning(
+                            "Sync api gap-fill skipped video_id=%s youtube_video_id=%s error=%s",
+                            video.id,
+                            best_item.get("id"),
+                            exc,
+                        )
+                        api_error = exc
+                        if exc.fatal:
+                            effective_api_key = None
+                    else:
+                        if api_gap_fill_item and str(api_gap_fill_item.get("id") or "").strip() == str(best_item.get("id") or "").strip():
+                            best_item = merge_candidate_item(best_item, api_gap_fill_item)
                 return await apply_sync_item(
                     db,
                     video,

@@ -3697,6 +3697,129 @@ def test_sync_video_prefers_fallback_before_api_search_and_channel_lookup(tmp_pa
                     comment_limit=25,
                     requests_per_second=3,
                     client=client,
+                    channel_cache={},
+                    playlist_cache={},
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert result.youtube_video_id == "ufd123abc45"
+        assert result.youtube_channel_id == "channel-ufd-tech"
+
+
+def test_sync_video_uses_api_by_id_to_fill_missing_fallback_stats(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="UFD Tech", slug="ufd-tech")
+        db.add(channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "ufd-gap-fill.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target")
+        video = Video(
+            title="The Nvidia Warranty Situation is Crazy",
+            slug="the-nvidia-warranty-situation-is-crazy-gap-fill",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=19 * 60 + 3,
+            published_at=datetime(2026, 4, 14),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(target_path),
+                relative_path="ufd-gap-fill.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="ufd-gap-fill" * 5,
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return [
+                {
+                    "id": "ufd123abc45",
+                    "snippet": {
+                        "title": "The Nvidia Warranty Situation is Crazy",
+                        "channelTitle": "UFD Tech",
+                        "channelId": "channel-ufd-tech",
+                        "publishedAt": "2026-04-14T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 19 * 60 + 3,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fail_fetch_channel_candidates(*args, **kwargs):
+            raise AssertionError("channel API lookup should not run when fallback already matched confidently")
+
+        async def fail_fetch_search_candidates(*args, **kwargs):
+            raise AssertionError("video API search should not run when fallback already matched confidently")
+
+        async def fake_fetch_video_details_by_id(*args, **kwargs):
+            return {
+                "id": "ufd123abc45",
+                "snippet": {
+                    "title": "The Nvidia Warranty Situation is Crazy",
+                    "channelTitle": "UFD Tech",
+                    "channelId": "channel-ufd-tech",
+                    "publishedAt": "2026-04-14T12:00:00Z",
+                    "description": "Gap-filled description",
+                    "thumbnails": {},
+                },
+                "statistics": {
+                    "viewCount": "4500",
+                    "likeCount": "321",
+                },
+                "_waytube_duration_seconds": 19 * 60 + 3,
+                "_waytube_source": "youtube-api",
+            }
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            assert item["statistics"]["viewCount"] == "4500"
+            assert item["statistics"]["likeCount"] == "321"
+            assert item["snippet"]["description"] == "Gap-filled description"
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "fetch_channel_candidates", fail_fetch_channel_candidates)
+        monkeypatch.setattr(sync_service, "fetch_search_candidates", fail_fetch_search_candidates)
+        monkeypatch.setattr(sync_service, "fetch_video_details_by_id", fake_fetch_video_details_by_id)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    video,
+                    api_key="test-api-key",
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                    channel_cache={},
+                    playlist_cache={},
                 )
 
         result = asyncio.run(run())
@@ -7061,6 +7184,10 @@ def test_sync_video_uses_api_refresh_for_periodic_engagement_window(tmp_path: Pa
 
         assert result.status == "matched"
         assert refreshed_snapshot is not None
+        assert refreshed_snapshot.title == "Joe Rogan Experience #2484 - David Cross"
+        assert refreshed_snapshot.description == "Existing metadata"
+        assert refreshed_snapshot.published_at_source == "youtube-api"
+        assert refreshed_snapshot.thumbnail_url == "https://i.ytimg.com/vi/jre2484abc1/hqdefault.jpg"
         assert refreshed_snapshot.view_count == 33000
         assert refreshed_snapshot.like_count == 1300
         assert len(stored_comments) == 1
