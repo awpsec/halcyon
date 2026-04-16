@@ -477,7 +477,13 @@ def test_fetch_live_stream_candidates_web_rejects_variant_channel_title_when_id_
             self.is_error = False
             self.url = url
 
+    calls = {"count": 0}
+
     async def fake_throttled_get(*args, **kwargs):
+        del kwargs
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return DummyResponse(args[1])
         return DummyResponse("https://www.youtube.com/watch?v=abc123def45")
 
     async def fake_fetch_watch_page_candidate(*args, **kwargs):
@@ -512,6 +518,113 @@ def test_fetch_live_stream_candidates_web_rejects_variant_channel_title_when_id_
 
     assert checked is True
     assert items == []
+
+
+def test_fetch_live_stream_candidates_web_preserves_live_renderer_metadata_when_watch_page_is_sparse(monkeypatch):
+    html = """
+    <html><body><script>
+    var ytInitialData = {
+      "contents": {
+        "twoColumnBrowseResultsRenderer": {
+          "tabs": [
+            {
+              "tabRenderer": {
+                "content": {
+                  "richGridRenderer": {
+                    "contents": [
+                      {
+                        "richItemRenderer": {
+                          "content": {
+                            "videoRenderer": {
+                              "videoId": "abc123def45",
+                              "title": {"runs": [{"text": "PGL Bucharest 2026 - Main Stream"}]},
+                              "ownerText": {
+                                "runs": [
+                                  {
+                                    "text": "PGL",
+                                    "navigationEndpoint": {
+                                      "browseEndpoint": {
+                                        "browseId": "channel-pgl"
+                                      }
+                                    }
+                                  }
+                                ]
+                              },
+                              "thumbnailOverlays": [
+                                {
+                                  "thumbnailOverlayTimeStatusRenderer": {
+                                    "style": "LIVE",
+                                    "text": {"runs": [{"text": "LIVE"}]}
+                                  }
+                                }
+                              ],
+                              "thumbnail": {
+                                "thumbnails": [
+                                  {"url": "https://i.ytimg.com/vi/abc123def45/hqdefault.jpg"}
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    };
+    </script></body></html>
+    """
+
+    class DummyResponse:
+        def __init__(self, url: str, text: str):
+            self.text = text
+            self.is_error = False
+            self.url = url
+
+    async def fake_throttled_get(*args, **kwargs):
+        del kwargs
+        url = args[1]
+        return DummyResponse(url, html)
+
+    async def fake_fetch_watch_page_candidate(*args, **kwargs):
+        return {
+            "id": "abc123def45",
+            "snippet": {
+                "title": "",
+                "channelTitle": None,
+                "channelId": None,
+                "description": None,
+                "publishedAt": None,
+                "thumbnails": {},
+            },
+            "statistics": {},
+            "_waytube_duration_seconds": None,
+            "_waytube_source": "watch-page",
+        }
+
+    monkeypatch.setattr(sync_service, "throttled_get", fake_throttled_get)
+    monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_live_stream_candidates_web(
+                client,
+                "channel-pgl",
+                3,
+                channel_name="PGL",
+            )
+
+    checked, items = asyncio.run(run())
+
+    assert checked is True
+    assert len(items) == 1
+    assert items[0]["snippet"]["title"] == "PGL Bucharest 2026 - Main Stream"
+    assert items[0]["snippet"]["channelTitle"] == "PGL"
+    assert items[0]["snippet"]["channelId"] == "channel-pgl"
 
 
 def test_fetch_fallback_candidates_merges_across_query_batches(monkeypatch):
@@ -570,6 +683,73 @@ def test_fetch_fallback_candidates_merges_across_query_batches(monkeypatch):
     assert seen_google_batches == [["q1", "q2", "q3", "q4"], ["q5", "q6"]]
     assert seen_web_id_batches == [["q1", "q2", "q3", "q4"], ["q5", "q6"]]
     assert seen_web_candidate_batches == [["q1", "q2", "q3", "q4"], ["q5", "q6"]]
+
+
+def test_fetch_fallback_candidates_preserves_rich_youtube_web_metadata_for_duplicate_ids(monkeypatch):
+    async def fake_fetch_google_dork_video_ids(client, queries, requests_per_second, status_callback=None):
+        del client, queries, requests_per_second, status_callback
+        return []
+
+    async def fake_fetch_youtube_web_video_ids(client, queries, requests_per_second, status_callback=None):
+        del client, queries, requests_per_second, status_callback
+        return ["abc123def45"]
+
+    async def fake_fetch_watch_page_candidate(client, youtube_video_id, requests_per_second, status_callback=None):
+        del client, youtube_video_id, requests_per_second, status_callback
+        return {
+            "id": "abc123def45",
+            "snippet": {
+                "title": "",
+                "channelTitle": None,
+                "channelId": None,
+                "description": None,
+                "publishedAt": None,
+                "thumbnails": {},
+            },
+            "statistics": {},
+            "_waytube_duration_seconds": 1905,
+            "_waytube_source": "watch-page",
+        }
+
+    async def fake_fetch_youtube_web_candidates(client, queries, requests_per_second, status_callback=None):
+        del client, queries, requests_per_second, status_callback
+        return [
+            {
+                "id": "abc123def45",
+                "snippet": {
+                    "title": "These body cams are wild",
+                    "channelTitle": "Asmongold TV",
+                    "channelId": "channel-asmongold",
+                    "description": None,
+                    "publishedAt": None,
+                    "thumbnails": {"high": {"url": "https://i.ytimg.com/vi/abc123def45/hqdefault.jpg"}},
+                },
+                "statistics": {"viewCount": 1500},
+                "_waytube_duration_seconds": 1906,
+                "_waytube_source": "youtube-web-search",
+            }
+        ]
+
+    monkeypatch.setattr(sync_service, "fetch_google_dork_video_ids", fake_fetch_google_dork_video_ids)
+    monkeypatch.setattr(sync_service, "fetch_youtube_web_video_ids", fake_fetch_youtube_web_video_ids)
+    monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+    monkeypatch.setattr(sync_service, "fetch_youtube_web_candidates", fake_fetch_youtube_web_candidates)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_fallback_candidates(
+                client,
+                ["These body cams are wild"],
+                3,
+            )
+
+    result = asyncio.run(run())
+
+    assert len(result) == 1
+    assert result[0]["snippet"]["title"] == "These body cams are wild"
+    assert result[0]["snippet"]["channelTitle"] == "Asmongold TV"
+    assert result[0]["snippet"]["channelId"] == "channel-asmongold"
+    assert result[0]["_waytube_duration_seconds"] == 1905
 
 
 def test_fetch_fallback_candidates_continues_after_full_first_batch(monkeypatch):

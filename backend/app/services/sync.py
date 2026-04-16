@@ -2875,6 +2875,19 @@ def _is_live_renderer(value: dict[str, Any]) -> bool:
     return False
 
 
+def _collect_live_video_renderers_from_value(value: Any, sink: list[dict[str, Any]]) -> None:
+    if isinstance(value, dict):
+        renderer = value.get("videoRenderer")
+        if isinstance(renderer, dict) and _is_live_renderer(renderer):
+            sink.append(renderer)
+        for nested in value.values():
+            _collect_live_video_renderers_from_value(nested, sink)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_live_video_renderers_from_value(item, sink)
+
+
 def _collect_live_video_ids_from_value(value: Any, sink: list[str]) -> None:
     if isinstance(value, dict):
         video_id = value.get("videoId")
@@ -2907,6 +2920,27 @@ def extract_live_video_ids_from_html(html: str) -> list[str]:
     return video_ids
 
 
+def extract_live_candidates_from_html(html: str, *, source: str = "youtube-live-channel", limit: int = 6) -> list[dict]:
+    initial = extract_json_blob(html, ["var ytInitialData = ", "ytInitialData = "]) or {}
+    renderers: list[dict[str, Any]] = []
+    if initial:
+        _collect_live_video_renderers_from_value(initial, renderers)
+    candidates: list[dict] = []
+    seen_ids: set[str] = set()
+    for renderer in renderers:
+        candidate = render_video_candidate_from_renderer(renderer, source=source)
+        if not candidate:
+            continue
+        video_id = str(candidate.get("id") or "").strip()
+        if not video_id or video_id in seen_ids:
+            continue
+        seen_ids.add(video_id)
+        candidates.append(candidate)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
 def _live_candidate_matches_monitored_channel(
     candidate: dict[str, Any],
     *,
@@ -2934,6 +2968,8 @@ async def fetch_live_stream_candidates_web(
 ) -> tuple[bool, list[dict]]:
     checked = False
     video_ids: list[str] = []
+    trusted_redirect_video_ids: set[str] = set()
+    seed_candidates: list[dict] = []
     logger.info(
         "Live web lookup start channel_id=%s youtube_channel_id=%s",
         local_channel_id,
@@ -2957,8 +2993,18 @@ async def fetch_live_stream_candidates_web(
         redirected_video_id = _extract_youtube_watch_id(str(response.url))
         if redirected_video_id and redirected_video_id not in video_ids:
             video_ids.append(redirected_video_id)
+            if url.endswith("/live"):
+                trusted_redirect_video_ids.add(redirected_video_id)
+        merge_candidate_items(
+            seed_candidates,
+            extract_live_candidates_from_html(response.text, source="youtube-live-channel", limit=6),
+        )
         for candidate_id in extract_live_video_ids_from_html(response.text):
             if candidate_id not in video_ids:
+                video_ids.append(candidate_id)
+        for candidate in seed_candidates:
+            candidate_id = str(candidate.get("id") or "").strip()
+            if candidate_id and candidate_id not in video_ids:
                 video_ids.append(candidate_id)
         if video_ids:
             break
@@ -2972,7 +3018,33 @@ async def fetch_live_stream_candidates_web(
 
     items: list[dict] = []
     for youtube_video_id in video_ids[:3]:
-        candidate = await fetch_watch_page_candidate(client, youtube_video_id, requests_per_second)
+        seed_candidate = next(
+            (item for item in seed_candidates if str(item.get("id") or "").strip() == youtube_video_id),
+            None,
+        )
+        if not seed_candidate and youtube_video_id in trusted_redirect_video_ids:
+            seed_candidate = {
+                "id": youtube_video_id,
+                "snippet": {
+                    "title": None,
+                    "channelTitle": channel_name,
+                    "channelId": youtube_channel_id,
+                    "description": None,
+                    "publishedAt": None,
+                    "thumbnails": {},
+                },
+                "statistics": {},
+                "_waytube_duration_seconds": None,
+                "_waytube_source": "youtube-live-redirect",
+            }
+        if seed_candidate:
+            candidate = await hydrate_candidate_from_watch_page(
+                client,
+                seed_candidate,
+                requests_per_second,
+            )
+        else:
+            candidate = await fetch_watch_page_candidate(client, youtube_video_id, requests_per_second)
         if not candidate:
             logger.info(
                 "Live web lookup candidate skipped youtube_channel_id=%s video_id=%s reason=watch-page-missing",
@@ -3335,6 +3407,104 @@ async def fetch_return_youtube_dislike_details(
     return payload
 
 
+def merge_non_empty_mapping(base: dict | None, incoming: dict | None) -> dict:
+    merged = dict(base or {})
+    for key, value in (incoming or {}).items():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, list) and not value:
+            continue
+        if isinstance(value, dict):
+            if not value:
+                continue
+            existing = merged.get(key)
+            if isinstance(existing, dict):
+                merged[key] = merge_non_empty_mapping(existing, value)
+                continue
+        if key not in merged:
+            merged[key] = value
+            continue
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = value
+        elif isinstance(existing, str) and not existing.strip():
+            merged[key] = value
+        elif isinstance(existing, list) and not existing:
+            merged[key] = value
+        elif isinstance(existing, dict) and not existing:
+            merged[key] = value
+    return merged
+
+
+def candidate_metadata_signal_score(item: dict | None) -> int:
+    candidate = item or {}
+    snippet = candidate.get("snippet", {}) or {}
+    statistics = candidate.get("statistics", {}) or {}
+    score = 0
+    if str(snippet.get("title") or "").strip():
+        score += 4
+    if str(snippet.get("channelTitle") or "").strip():
+        score += 3
+    if str(snippet.get("channelId") or "").strip():
+        score += 4
+    if str(snippet.get("description") or "").strip():
+        score += 1
+    if str(snippet.get("publishedAt") or "").strip():
+        score += 2
+    if best_thumbnail_url(snippet.get("thumbnails")):
+        score += 1
+    if candidate.get("_waytube_duration_seconds") is not None:
+        score += 2
+    for key in ("viewCount", "likeCount", "commentCount"):
+        if statistics.get(key) is not None:
+            score += 1
+    if candidate.get("_waytube_live_web"):
+        score += 1
+    return score
+
+
+def merge_candidate_item(existing: dict, incoming: dict) -> dict:
+    existing_score = candidate_metadata_signal_score(existing)
+    incoming_score = candidate_metadata_signal_score(incoming)
+    winner = existing if existing_score >= incoming_score else incoming
+    loser = incoming if winner is existing else existing
+
+    merged = {
+        **winner,
+        **loser,
+    }
+    merged["snippet"] = merge_non_empty_mapping(
+        winner.get("snippet", {}) or {},
+        loser.get("snippet", {}) or {},
+    )
+    merged["statistics"] = merge_non_empty_mapping(
+        winner.get("statistics", {}) or {},
+        loser.get("statistics", {}) or {},
+    )
+    if merged.get("_waytube_duration_seconds") is None:
+        merged["_waytube_duration_seconds"] = (
+            winner.get("_waytube_duration_seconds")
+            if winner.get("_waytube_duration_seconds") is not None
+            else loser.get("_waytube_duration_seconds")
+        )
+    merged["_waytube_source"] = winner.get("_waytube_source") or loser.get("_waytube_source")
+    merged["_waytube_live_web"] = bool(winner.get("_waytube_live_web") or loser.get("_waytube_live_web"))
+    if winner.get("_waytube_local_channel_id") is not None or loser.get("_waytube_local_channel_id") is not None:
+        merged["_waytube_local_channel_id"] = (
+            winner.get("_waytube_local_channel_id")
+            if winner.get("_waytube_local_channel_id") is not None
+            else loser.get("_waytube_local_channel_id")
+        )
+    if winner.get("_waytube_checked_youtube_channel_id") or loser.get("_waytube_checked_youtube_channel_id"):
+        merged["_waytube_checked_youtube_channel_id"] = (
+            winner.get("_waytube_checked_youtube_channel_id")
+            or loser.get("_waytube_checked_youtube_channel_id")
+        )
+    return merged
+
+
 async def fetch_google_dork_video_ids(
     client: httpx.AsyncClient,
     queries: list[str],
@@ -3562,60 +3732,25 @@ async def hydrate_candidate_from_watch_page(
     )
     if not hydrated:
         return item
-    def merge_non_empty(base: dict | None, incoming: dict | None) -> dict:
-        merged = dict(base or {})
-        for key, value in (incoming or {}).items():
-            if value is None:
-                continue
-            if isinstance(value, str) and not value.strip():
-                continue
-            if isinstance(value, list) and not value:
-                continue
-            if isinstance(value, dict):
-                if not value:
-                    continue
-                existing = merged.get(key)
-                if isinstance(existing, dict):
-                    nested = dict(existing)
-                    for nested_key, nested_value in value.items():
-                        if nested_value is None:
-                            continue
-                        if isinstance(nested_value, str) and not nested_value.strip():
-                            continue
-                        if isinstance(nested_value, list) and not nested_value:
-                            continue
-                        if isinstance(nested_value, dict) and not nested_value:
-                            continue
-                        nested[nested_key] = nested_value
-                    merged[key] = nested
-                    continue
-            merged[key] = value
-        return merged
-    merged = {
-        **item,
-        **hydrated,
-    }
-    merged_snippet = merge_non_empty(item.get("snippet", {}) or {}, hydrated.get("snippet", {}) or {})
-    merged_statistics = merge_non_empty(item.get("statistics", {}) or {}, hydrated.get("statistics", {}) or {})
-    merged["snippet"] = merged_snippet
-    merged["statistics"] = merged_statistics
-    merged["_waytube_duration_seconds"] = hydrated.get("_waytube_duration_seconds") or item.get("_waytube_duration_seconds")
-    merged["_waytube_source"] = hydrated.get("_waytube_source") or item.get("_waytube_source")
-    return merged
+    return merge_candidate_item(item, hydrated)
 
 
 def merge_candidate_items(existing: list[dict], incoming: list[dict]) -> list[dict]:
-    seen_ids = {
-        item.get("id")
-        for item in existing
-        if item.get("id")
+    index_by_id = {
+        str(item.get("id") or "").strip(): index
+        for index, item in enumerate(existing)
+        if str(item.get("id") or "").strip()
     }
     for item in incoming:
-        youtube_video_id = item.get("id")
-        if not youtube_video_id or youtube_video_id in seen_ids:
+        youtube_video_id = str(item.get("id") or "").strip()
+        if not youtube_video_id:
             continue
-        existing.append(item)
-        seen_ids.add(youtube_video_id)
+        existing_index = index_by_id.get(youtube_video_id)
+        if existing_index is None:
+            existing.append(item)
+            index_by_id[youtube_video_id] = len(existing) - 1
+            continue
+        existing[existing_index] = merge_candidate_item(existing[existing_index], item)
     return existing
 
 
