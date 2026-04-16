@@ -2005,17 +2005,17 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                 <div className="settings-copy">
                   <div className="settings-label-row">
                     <strong
-                      className={settingLabelClass("Generate AI subtitles for newly onboarded videos in the background. Existing caption files are always preferred over generated ones.")}
-                      data-tooltip="Generate AI subtitles for newly onboarded videos in the background. Existing caption files are always preferred over generated ones."
+                      className={settingLabelClass("Generate AI subtitles for newly onboarded videos and continuously backfill older videos that still lack captions. Existing caption files are always preferred over generated ones.")}
+                      data-tooltip="Generate AI subtitles for newly onboarded videos and continuously backfill older videos that still lack captions. Existing caption files are always preferred over generated ones."
                       tabIndex={0}
                     >
-                      Generate subtitles during onboarding
+                      Generate subtitles automatically
                     </strong>
                   </div>
                   <small className="muted-copy">
                     {syncState.data?.last_subtitle_sync_at
                       ? `Last subtitle pass ${formatRelativeDate(syncState.data.last_subtitle_sync_at) ?? "recently"}`
-                      : "Uses the bundled Whisper sidecar and writes .vtt files next to videos that do not already have captions. Turning this on also backfills older videos automatically."}
+                      : "Uses the bundled Whisper sidecar and writes .vtt files next to videos that do not already have captions. Newly onboarded videos are picked up automatically, and older videos without captions are backfilled in the background."}
                   </small>
                 </div>
                   <button
@@ -2023,7 +2023,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                     className={`switch switch-button ${syncDraft.subtitle_generation_enabled ? "is-on" : ""}`}
                     role="switch"
                     aria-checked={syncDraft.subtitle_generation_enabled}
-                    aria-label="Toggle subtitle generation during onboarding"
+                    aria-label="Toggle automatic subtitle generation"
                     onClick={() => {
                       setSyncDraft((current) => ({ ...current, subtitle_generation_enabled: !current.subtitle_generation_enabled }));
                       setSyncDirty(true);

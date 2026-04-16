@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 import app.db.init_db as init_db_module
+import app.services.background as background_service
 import app.services.scanner as scanner_service
 import app.services.subtitles as subtitle_service
 import app.services.sync as sync_service
@@ -14,7 +15,7 @@ from app.api import routes as routes_module
 from app.api.routes import _indexed_library_storage_bytes, _scan_library_storage_bytes, _selected_storage_roots, get_sync_settings, library_storage, list_roots, list_selected_folders, list_videos, update_sync_settings
 from app.db.init_db import seed_defaults
 from app.models.base import Base
-from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, SyncSettings, UserProfile, Video, VideoFile, YouTubeChannelSnapshot, YouTubeMatch, YouTubeVideoSnapshot
+from app.models.entities import Channel, LibraryRoot, RetentionItem, RetentionSettings, SelectedFolder, Series, SyncJob, SyncSettings, UserProfile, Video, VideoFile, YouTubeChannelSnapshot, YouTubeMatch, YouTubeVideoSnapshot
 from app.schemas.common import SyncSettingsIn
 from app.services.media import find_caption_tracks
 from app.services.scanner import scan_selected_folders
@@ -491,6 +492,78 @@ def test_subtitle_backfill_job_counts_failed_result_without_exception(tmp_path: 
 
         assert result.status == "failed"
         assert result.details["failed"] == 1
+
+
+def test_background_subtitles_processes_new_onboarded_video_without_waiting_for_interval(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="CoolCreator", slug="coolcreator")
+        db.add(channel)
+        db.add(
+            SyncSettings(
+                automatic_detection_enabled=True,
+                automatic_sync_enabled=False,
+                subtitle_generation_enabled=True,
+                scan_interval_seconds=30,
+                last_subtitle_sync_at=datetime.utcnow(),
+            )
+        )
+        db.flush()
+
+        video_path = tmp_path / "library" / "CoolCreator" / "Episode 5.mp4"
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"video")
+
+        video = Video(
+            title="Episode 5",
+            slug="episode-5",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(video_path),
+                relative_path="CoolCreator/Episode 5.mp4",
+                file_size=video_path.stat().st_size,
+                fingerprint="g" * 64,
+            )
+        )
+        db.commit()
+
+        async def fake_request(source_path: Path, output_path: Path, *, force: bool = False, app_settings=None):
+            del source_path, force, app_settings
+            output_path.write_text("WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\nhello\n", encoding="utf-8")
+            return {"ok": True, "output_path": str(output_path), "segments": 1}
+
+        monkeypatch.setattr(subtitle_service, "request_subtitle_generation", fake_request)
+        monkeypatch.setattr(background_service, "SessionLocal", lambda: db)
+
+        asyncio.run(
+            background_service.background_subtitles_once(
+                routes_module.settings.model_copy(
+                    update={
+                        "subtitle_service_url": "http://whisper:9000",
+                        "subtitle_auto_min_interval_seconds": 300,
+                        "subtitle_auto_batch_size": 1,
+                        "subtitle_manual_batch_size": 5,
+                    }
+                )
+            )
+        )
+
+        generated_path = subtitle_service.generated_subtitle_path(video_path)
+        sync_settings = db.scalar(select(SyncSettings))
+        subtitle_job = db.scalar(select(SyncJob).where(SyncJob.scope == "subtitles"))
+
+        assert generated_path.exists()
+        assert sync_settings is not None
+        assert sync_settings.last_subtitle_sync_at is not None
+        assert subtitle_job is not None
+        assert subtitle_job.status == "completed"
+    assert any(track["label"] == "AI Captions" for track in find_caption_tracks(video_path))
 
 
 def test_list_videos_prefers_uploaded_date_over_added_date(tmp_path: Path):

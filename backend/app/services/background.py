@@ -9,7 +9,13 @@ from app.db.session import SessionLocal
 from app.models.entities import SyncJob, SyncSettings
 from app.services.retention import run_retention_cycle
 from app.services.scanner import scan_selected_folders_if_idle
-from app.services.subtitles import active_subtitle_job, process_subtitle_backfill_job, run_automatic_subtitle_pass, subtitle_service_configured
+from app.services.subtitles import (
+    active_subtitle_job,
+    create_subtitle_backfill_job,
+    missing_subtitle_candidates,
+    process_subtitle_backfill_job,
+    subtitle_service_configured,
+)
 from app.services.sync import normalize_channel_assignments, reconcile_sync_job, refresh_live_streams, sync_scope
 
 LIVE_SYNC_MIN_INTERVAL_SECONDS = 1200
@@ -96,19 +102,45 @@ async def background_subtitles_once(settings: Settings) -> None:
         subtitle_job = active_subtitle_job(db)
         if subtitle_job:
             await process_subtitle_backfill_job(db, subtitle_job, app_settings=settings)
+            sync_settings.last_subtitle_sync_at = datetime.utcnow()
+            db.commit()
             return
         if not sync_settings.subtitle_generation_enabled:
+            return
+        newest_candidates = missing_subtitle_candidates(
+            db,
+            limit=max(1, int(settings.subtitle_auto_batch_size or 1)),
+        )
+        if not newest_candidates:
+            sync_settings.last_subtitle_sync_at = datetime.utcnow()
+            db.commit()
             return
         configured_interval = max(
             max(60, int(settings.subtitle_auto_min_interval_seconds or 300)),
             min(sync_settings.scan_interval_seconds or settings.scan_interval_seconds, 3600),
         )
-        if (
-            sync_settings.last_subtitle_sync_at
-            and datetime.utcnow() - sync_settings.last_subtitle_sync_at < timedelta(seconds=configured_interval)
-        ):
+        newest_candidate_created_at = max(
+            (
+                candidate.video.created_at
+                for candidate in newest_candidates
+                if candidate.video.created_at is not None
+            ),
+            default=None,
+        )
+        should_run_now = bool(
+            sync_settings.last_subtitle_sync_at is None
+            or (
+                newest_candidate_created_at is not None
+                and newest_candidate_created_at > sync_settings.last_subtitle_sync_at
+            )
+            or datetime.utcnow() - sync_settings.last_subtitle_sync_at >= timedelta(seconds=configured_interval)
+        )
+        if not should_run_now:
             return
-        await run_automatic_subtitle_pass(db, sync_settings, app_settings=settings)
+        job = create_subtitle_backfill_job(db)
+        await process_subtitle_backfill_job(db, job, app_settings=settings)
+        sync_settings.last_subtitle_sync_at = datetime.utcnow()
+        db.commit()
 
 
 async def run_background_cycle_once(settings: Settings) -> None:
