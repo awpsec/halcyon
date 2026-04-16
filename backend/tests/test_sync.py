@@ -1924,6 +1924,100 @@ def test_sync_video_matches_ohnepixel_video_without_api(tmp_path: Path, monkeypa
         assert captured_queries[0].startswith("ohnePixel ")
 
 
+def test_sync_video_matches_ohnepixel_raw_video_without_api(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="ohnePixel Raw", slug="ohnepixel-raw")
+        db.add(channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "ohnepixel-raw.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target")
+        target_video = Video(
+            title="CS2 Sticker Capsule Opening Goes Wrong",
+            slug="cs2-sticker-capsule-opening-goes-wrong-raw",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=17 * 60 + 52,
+            published_at=datetime(2026, 4, 14),
+            is_available=True,
+        )
+        db.add(target_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=target_video.id,
+                absolute_path=str(target_path),
+                relative_path="ohnepixel-raw.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="ohnepixelraw" * 5 + "abcd",
+            )
+        )
+        db.commit()
+
+        captured_queries: list[str] = []
+
+        async def fake_fetch_fallback_candidates(client, queries, requests_per_second, status_callback=None):
+            del client, requests_per_second, status_callback
+            captured_queries.extend(queries)
+            return [
+                {
+                    "id": "ohne123abcd",
+                    "snippet": {
+                        "title": "CS2 Sticker Capsule Opening Goes Wrong",
+                        "channelTitle": "ohnePixel",
+                        "channelId": "channel-ohnepixel",
+                        "publishedAt": "2026-04-14T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 17 * 60 + 52,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert result.youtube_channel_id == "channel-ohnepixel"
+        assert captured_queries
+        assert captured_queries[0].startswith("ohnePixel Raw ")
+        assert any(query.startswith("ohnePixel ") for query in captured_queries[1:])
+
+
 def test_sync_video_accepts_verified_known_channel_candidate_with_sparse_channel_title(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="LVNDMARK", slug="lvndmark")
@@ -3290,7 +3384,7 @@ def test_sync_video_ignores_review_rejections_during_automatic_matching(tmp_path
         assert result.rejected_youtube_video_ids == []
 
 
-def test_sync_video_disables_api_after_fatal_search_and_uses_fallback_match(tmp_path: Path, monkeypatch):
+def test_sync_video_prefers_fallback_match_before_api_search(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
         db.add(channel)
@@ -3321,11 +3415,11 @@ def test_sync_video_disables_api_after_fatal_search_and_uses_fallback_match(tmp_
         )
         db.commit()
 
-        async def fake_fetch_search_candidates(*args, **kwargs):
-            raise sync_service.YouTubeSyncError("YouTube search failed: quotaExceeded", fatal=True)
+        async def fail_fetch_search_candidates(*args, **kwargs):
+            raise AssertionError("video API search should not run when fallback already matched confidently")
 
-        async def fake_fetch_channel_candidates(*args, **kwargs):
-            return []
+        async def fail_fetch_channel_candidates(*args, **kwargs):
+            raise AssertionError("channel API lookup should not run when fallback already matched confidently")
 
         async def fake_fetch_fallback_candidates(*args, **kwargs):
             return [
@@ -3349,7 +3443,7 @@ def test_sync_video_disables_api_after_fatal_search_and_uses_fallback_match(tmp_
             item: dict,
             **kwargs,
         ) -> YouTubeMatch:
-            assert kwargs["api_key"] is None
+            assert kwargs["api_key"] == "test-api-key"
             match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
             if not match:
                 match = YouTubeMatch(video_id=video.id)
@@ -3364,8 +3458,8 @@ def test_sync_video_disables_api_after_fatal_search_and_uses_fallback_match(tmp_
             db.refresh(match)
             return match
 
-        monkeypatch.setattr(sync_service, "fetch_channel_candidates", fake_fetch_channel_candidates)
-        monkeypatch.setattr(sync_service, "fetch_search_candidates", fake_fetch_search_candidates)
+        monkeypatch.setattr(sync_service, "fetch_channel_candidates", fail_fetch_channel_candidates)
+        monkeypatch.setattr(sync_service, "fetch_search_candidates", fail_fetch_search_candidates)
         monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
         monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
 
@@ -3514,6 +3608,102 @@ def test_sync_video_uses_channel_lookup_ids_and_broadens_api_search(tmp_path: Pa
         assert result.status == "matched"
         assert result.youtube_video_id == "jre2483abc1"
         assert result.youtube_channel_id == "channel-jre"
+
+
+def test_sync_video_prefers_fallback_before_api_search_and_channel_lookup(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="UFD Tech", slug="ufd-tech")
+        db.add(channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "ufd-fallback-first.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target")
+        video = Video(
+            title="The Nvidia Warranty Situation is Crazy",
+            slug="the-nvidia-warranty-situation-is-crazy-fallback-first",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=19 * 60 + 3,
+            published_at=datetime(2026, 4, 14),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(target_path),
+                relative_path="ufd-fallback-first.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="ufd-fallback-first" * 4,
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return [
+                {
+                    "id": "ufd123abc45",
+                    "snippet": {
+                        "title": "The Nvidia Warranty Situation is Crazy",
+                        "channelTitle": "UFD Tech",
+                        "channelId": "channel-ufd-tech",
+                        "publishedAt": "2026-04-14T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 19 * 60 + 3,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fail_fetch_channel_candidates(*args, **kwargs):
+            raise AssertionError("channel API lookup should not run when fallback already matched confidently")
+
+        async def fail_fetch_search_candidates(*args, **kwargs):
+            raise AssertionError("video API search should not run when fallback already matched confidently")
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "fetch_channel_candidates", fail_fetch_channel_candidates)
+        monkeypatch.setattr(sync_service, "fetch_search_candidates", fail_fetch_search_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    video,
+                    api_key="test-api-key",
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert result.youtube_video_id == "ufd123abc45"
+        assert result.youtube_channel_id == "channel-ufd-tech"
 
 
 def test_sync_video_uses_web_recent_channel_uploads_without_api_for_known_channel(tmp_path: Path, monkeypatch):
@@ -3692,6 +3882,8 @@ def test_channel_names_confidently_match_rejects_clip_variants():
     assert sync_service.channel_names_confidently_match("Austin Evans", "Austin Evans") is True
     assert sync_service.channel_names_confidently_match("Asmongold TV", "Asmongold") is True
     assert sync_service.channel_names_confidently_match("Asmongold", "Asmongold TV") is True
+    assert sync_service.channel_names_confidently_match("ohnePixel Raw", "ohnePixel") is True
+    assert sync_service.channel_names_confidently_match("ohnePixel", "ohnePixel Raw") is False
     assert sync_service.channel_names_confidently_match("Austin Evans", "Austin Evans Clips") is False
     assert sync_service.channel_names_confidently_match("ohnePixel", "ohnePixel Clips") is False
     assert sync_service.channel_names_confidently_match("PGL", "PGL CS2") is False
@@ -3700,6 +3892,7 @@ def test_channel_names_confidently_match_rejects_clip_variants():
 def test_channel_names_search_match_allows_safe_variants_but_rejects_clips():
     assert sync_service.channel_names_search_match("Asmongold", "Asmongold TV") is True
     assert sync_service.channel_names_search_match("PGL", "PGL CS2") is True
+    assert sync_service.channel_names_search_match("ohnePixel Raw", "ohnePixel") is True
     assert sync_service.channel_names_search_match("Austin Evans", "Austin Evans Clips") is False
     assert sync_service.channel_names_search_match("ohnePixel", "ohnePixel Highlights") is False
 
@@ -5755,6 +5948,125 @@ def test_apply_sync_item_enriches_channel_from_about_without_api(tmp_path: Path,
         assert channel_snapshot.view_count == 5_135_286_525
         assert channel_snapshot.canonical_url == "https://www.youtube.com/@AsmonTV"
         assert channel_snapshot.links == [{"title": "X", "url": "https://x.com/asmongold"}]
+
+
+def test_apply_sync_item_skips_channel_detail_api_when_playlist_cache_is_disabled(tmp_path: Path, monkeypatch):
+    source_path = tmp_path / "library" / "ufd-channel-refresh.mp4"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"source")
+
+    def fake_settings() -> Settings:
+        return Settings(
+            mounted_roots=[],
+            config_dir=tmp_path / "config",
+            cache_dir=tmp_path / "cache",
+            background_tasks_enabled=False,
+        )
+
+    async def fake_ryd(*args, **kwargs):
+        return None
+
+    async def fake_channel_about(*args, **kwargs):
+        return {
+            "title": "UFD Tech",
+            "description": "Fallback about description",
+            "avatar_url": "https://example.com/ufd-avatar.jpg",
+            "banner_url": "https://example.com/ufd-banner.jpg",
+            "subscriber_count": 215000,
+            "video_count": 1940,
+            "view_count": 45500000,
+        }
+
+    async def fail_channel_details(*args, **kwargs):
+        raise AssertionError("channel detail API should not run when playlist cache is disabled")
+
+    monkeypatch.setattr(sync_service, "get_settings", fake_settings)
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_about)
+    monkeypatch.setattr(sync_service, "fetch_channel_details", fail_channel_details)
+    monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
+
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="The Nvidia Warranty Situation is Crazy",
+            slug="the-nvidia-warranty-situation-is-crazy-channel-refresh",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=19 * 60 + 3,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(source_path),
+                relative_path="ufd-channel-refresh.mp4",
+                file_size=source_path.stat().st_size,
+                fingerprint="ufdchannelrefresh" * 4,
+            )
+        )
+        db.commit()
+        db.refresh(video)
+
+        item = {
+            "id": "ufd123abc45",
+            "snippet": {
+                "title": "The Nvidia Warranty Situation is Crazy",
+                "channelTitle": "UFD Tech",
+                "channelId": "channel-ufd-tech",
+                "publishedAt": "2026-04-14T12:00:00Z",
+                "description": "Matched metadata",
+                "thumbnails": {},
+            },
+            "statistics": {
+                "viewCount": "4500",
+                "likeCount": "321",
+            },
+            "_waytube_duration_seconds": 19 * 60 + 3,
+            "_waytube_source": "watch-page",
+        }
+
+        async def run() -> None:
+            async with httpx.AsyncClient() as client:
+                await apply_sync_item(
+                    db,
+                    video,
+                    item,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                    api_key="test-api-key",
+                    playlist_cache=None,
+                    allow_fallback_art=True,
+                    confidence=0.94,
+                    reasons=["exact-title", "duration-tight", "channel"],
+                    status="matched",
+                )
+
+        asyncio.run(run())
+
+        refreshed_video = db.get(Video, video.id)
+        refreshed_channel = db.get(Channel, refreshed_video.channel_id) if refreshed_video else None
+        channel_snapshot = db.scalar(
+            select(YouTubeChannelSnapshot).where(YouTubeChannelSnapshot.youtube_channel_id == "channel-ufd-tech")
+        )
+
+        assert refreshed_channel is not None
+        assert refreshed_channel.name == "UFD Tech"
+        assert refreshed_channel.description == "Fallback about description"
+        assert refreshed_channel.avatar_url == "https://example.com/ufd-avatar.jpg"
+        assert refreshed_channel.banner_url == "https://example.com/ufd-banner.jpg"
+
+        assert channel_snapshot is not None
+        assert channel_snapshot.title == "UFD Tech"
+        assert channel_snapshot.description == "Fallback about description"
+        assert channel_snapshot.avatar_url == "https://example.com/ufd-avatar.jpg"
+        assert channel_snapshot.banner_url == "https://example.com/ufd-banner.jpg"
 
 
 def test_apply_sync_item_uses_ryd_without_api_for_like_dislike_counts(tmp_path: Path, monkeypatch):
