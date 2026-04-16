@@ -259,10 +259,6 @@ class MetadataOverrideIn(BaseModel):
     payload: dict
 
 
-class SyncReviewManualIn(BaseModel):
-    youtube_ref: str
-
-
 class SyncSettingsIn(BaseModel):
     automatic_detection_enabled: bool
     automatic_sync_enabled: bool

@@ -77,7 +77,6 @@ export function VideoCard({
   const [hovered, setHovered] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const [reviewing, setReviewing] = useState(false);
   const [playlistsOpen, setPlaylistsOpen] = useState(false);
   const [playlistsLoading, setPlaylistsLoading] = useState(false);
   const [playlists, setPlaylists] = useState<PlaylistSummary[]>([]);
@@ -119,7 +118,6 @@ export function VideoCard({
     item.reason !== "recently-added" &&
     item.published_at != null &&
     Date.now() - new Date(item.published_at).getTime() <= 48 * 60 * 60 * 1000;
-  const isInReview = item.youtube_match_status === "review";
 
   const menuPlacement = useMemo(() => {
     if (!menuAnchor || typeof window === "undefined") return null;
@@ -268,36 +266,6 @@ export function VideoCard({
     } finally {
       setSyncing(false);
       setMenuOpen(false);
-    }
-  }
-
-  async function handleSendToReview() {
-    setReviewing(true);
-    pushToast(
-      "info",
-      "Sending to review",
-      `${displayTitle} is being re-scored for manual review.`,
-    );
-    try {
-      await api.sendVideoToReview(item.id);
-      pushToast(
-        "success",
-        "Sent to review",
-        "Open the sync review queue to approve or manually re-match it.",
-        { href: "/sync-review" },
-      );
-      await onRefresh?.();
-    } catch (error) {
-      pushToast(
-        "error",
-        "Unable to send to review",
-        error instanceof Error ? error.message : "Unknown review error",
-      );
-    } finally {
-      setReviewing(false);
-      setMenuOpen(false);
-      setMenuAnchor(null);
-      setPlaylistsOpen(false);
     }
   }
 
@@ -470,9 +438,8 @@ export function VideoCard({
       }}
     >
       <div className="tile-thumb media-thumb">
-        {isInReview || isWatched || isNew ? (
+        {isWatched || isNew ? (
           <div className="tile-status-overlay-stack">
-            {isInReview ? <span className="review-badge-overlay">In review</span> : null}
             {isWatched ? <span className="watched-badge-overlay">Watched</span> : null}
             {isNew ? <span className="fresh-badge-overlay">New</span> : null}
           </div>
@@ -708,23 +675,16 @@ export function VideoCard({
                       <button
                         className="menu-item"
                         onClick={() => void handleSync()}
-                        disabled={syncing || reviewing}
+                        disabled={syncing}
                       >
                         {syncing ? "Syncing..." : "Sync"}
                       </button>
                       <button
                         className="menu-item"
                         onClick={() => void handleSync(true)}
-                        disabled={syncing || reviewing}
+                        disabled={syncing}
                       >
                         {syncing ? "Syncing..." : "Force sync"}
-                      </button>
-                      <button
-                        className="menu-item"
-                        onClick={() => void handleSendToReview()}
-                        disabled={syncing || reviewing}
-                      >
-                        {reviewing ? "Sending..." : "Send to review"}
                       </button>
                       <button
                         className="menu-item"

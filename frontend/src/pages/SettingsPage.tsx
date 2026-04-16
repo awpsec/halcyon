@@ -15,7 +15,6 @@ import {
 import { AvatarImage } from "../components/AvatarImage";
 import { Modal } from "../components/Modal";
 import { SettingsPageSkeleton } from "../components/PageSkeletons";
-import { SyncReviewPanel } from "../components/SyncReviewPanel";
 import { useAsyncData } from "../hooks/useAsyncData";
 import { formatAbsoluteDateTime, formatRelativeDate, parseApiDate } from "../lib/format";
 import { pushToast } from "../lib/notifications";
@@ -585,7 +584,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
   const syncFollowRef = useRef(true);
   const [uploadsHasMore, setUploadsHasMore] = useState(true);
   const [uploadsLoadingMore, setUploadsLoadingMore] = useState(false);
-  const [uploadSyncPending, setUploadSyncPending] = useState<Record<number, "sync" | "force" | "review" | undefined>>({});
+  const [uploadSyncPending, setUploadSyncPending] = useState<Record<number, "sync" | "force" | undefined>>({});
   const [retentionLookupQuery, setRetentionLookupQuery] = useState("");
   const [liveMonitorQuery, setLiveMonitorQuery] = useState("");
   const [retentionLookupResults, setRetentionLookupResults] = useState<{
@@ -947,13 +946,13 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
             score: confidence ? formatSyncScore(Number(confidence)) : null,
           };
         }
-        if (body.startsWith("Sync unmatched")) return { timestamp, title: "No match found", detail: title ?? "This item still needs review.", tone: "warning" };
+        if (body.startsWith("Sync unmatched")) return { timestamp, title: "No match found", detail: title ?? "This item still needs another pass.", tone: "warning" };
         if (body.startsWith("Sync warning")) return { timestamp, title: "Sync warning", detail: warning ?? "A recoverable warning occurred.", tone: "warning" };
         if (body.startsWith("Sync finished")) {
           return {
             timestamp,
             title: status === "partial" ? "Sync finished with issues" : "Sync finished",
-            detail: status === "partial" ? "Some items still need review or a retry." : "Metadata refresh completed.",
+            detail: status === "partial" ? "Some items still need another retry." : "Metadata refresh completed.",
             tone: status === "partial" ? "warning" : "success",
           };
         }
@@ -1122,28 +1121,6 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
         "error",
         force ? "Forced video sync failed" : "Video sync failed",
         error instanceof Error ? error.message : "Unknown sync error",
-      );
-    } finally {
-      setUploadSyncPending((current) => ({ ...current, [videoId]: undefined }));
-    }
-  }
-
-  async function triggerVideoReview(videoId: number) {
-    setUploadSyncPending((current) => ({ ...current, [videoId]: "review" }));
-    try {
-      await api.sendVideoToReview(videoId);
-      await refreshServerState();
-      pushToast(
-        "success",
-        "Sent to review",
-        "Open the sync review queue to approve or manually re-match it.",
-        { href: "/sync-review" },
-      );
-    } catch (error) {
-      pushToast(
-        "error",
-        "Unable to send to review",
-        error instanceof Error ? error.message : "Unknown review error",
       );
     } finally {
       setUploadSyncPending((current) => ({ ...current, [videoId]: undefined }));
@@ -2428,14 +2405,6 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                         >
                           {uploadSyncPending[video.id] === "force" ? "Syncing..." : "Force sync"}
                         </button>
-                        <button
-                          className="ghost-button settings-utility-button"
-                          type="button"
-                          disabled={uploadSyncPending[video.id] != null}
-                          onClick={() => void triggerVideoReview(video.id)}
-                        >
-                          {uploadSyncPending[video.id] === "review" ? "Sending..." : "Send to review"}
-                        </button>
                       </div>
                       <div className="new-upload-progress-row">
                         <span className="new-upload-progress-label">Sync {status.percent}%</span>
@@ -3060,13 +3029,6 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                     : "Permissions saved"}
               </small>
             </div>
-          </section>
-
-          <section className="settings-section">
-            <SyncReviewPanel
-              title="Sync review"
-              note="When the scanner lands in the middle, approve the current candidate, reject it, or paste the exact YouTube URL/ID you want halcyon to use."
-            />
           </section>
         </div>
       ) : null}

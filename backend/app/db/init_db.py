@@ -122,6 +122,11 @@ def init_db() -> None:
         if "rejected_youtube_video_ids" not in youtube_match_columns:
             connection.execute(text("ALTER TABLE youtube_matches ADD COLUMN rejected_youtube_video_ids JSON"))
             connection.execute(text("UPDATE youtube_matches SET rejected_youtube_video_ids = '[]' WHERE rejected_youtube_video_ids IS NULL"))
+        connection.execute(text("UPDATE youtube_matches SET status = 'unmatched' WHERE status = 'review'"))
+        if "review_candidates" in youtube_match_columns:
+            connection.execute(text("UPDATE youtube_matches SET review_candidates = '[]' WHERE review_candidates IS NULL OR review_candidates != '[]'"))
+        if "rejected_youtube_video_ids" in youtube_match_columns:
+            connection.execute(text("UPDATE youtube_matches SET rejected_youtube_video_ids = '[]' WHERE rejected_youtube_video_ids IS NULL OR rejected_youtube_video_ids != '[]'"))
         youtube_snapshot_columns = {column["name"] for column in inspector.get_columns("youtube_video_snapshots")}
         if "published_at_source" not in youtube_snapshot_columns:
             connection.execute(text("ALTER TABLE youtube_video_snapshots ADD COLUMN published_at_source VARCHAR(32)"))

@@ -19,7 +19,6 @@ import { SeriesDetailPage } from "./pages/SeriesDetailPage";
 import { SearchPage } from "./pages/SearchPage";
 import { SavedVideosPage } from "./pages/SavedVideosPage";
 import { SettingsPage } from "./pages/SettingsPage";
-import { SyncReviewPage } from "./pages/SyncReviewPage";
 import { VideoPage } from "./pages/VideoPage";
 
 type StoredSession = {
@@ -357,7 +356,6 @@ function AppRoutes() {
             path="/settings"
             element={<SettingsPage profile={profile} preferences={preferences} onPreferencesChange={setPreferences} onProfileChange={handleProfileChange} />}
           />
-          <Route path="/sync-review" element={profile?.is_admin ? <SyncReviewPage /> : <Navigate to="/" replace />} />
           <Route
             path="/video/:videoId"
             element={

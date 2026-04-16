@@ -2499,7 +2499,7 @@ def test_sync_video_ignores_review_rejections_during_automatic_matching(tmp_path
             match.status = kwargs["status"]
             match.confidence = kwargs["confidence"]
             match.reasons = kwargs["reasons"]
-            match.rejected_youtube_video_ids = kwargs["rejected_youtube_video_ids"]
+            match.rejected_youtube_video_ids = []
             db.commit()
             db.refresh(match)
             return match
@@ -3630,48 +3630,6 @@ def test_video_thumbnail_ignores_review_snapshot_remote_art(tmp_path: Path, monk
         assert refreshed_video is not None
         assert refreshed_video.thumbnail_path == str(generated_thumb)
         assert response.path == str(generated_thumb)
-
-
-def test_build_review_candidate_queue_rejects_implausible_duration_mismatch(monkeypatch):
-    async def fail_hydrate(*args, **kwargs):
-        raise AssertionError("watch-page hydration should not run for watch-page candidates")
-
-    monkeypatch.setattr(sync_service, "hydrate_candidate_from_watch_page", fail_hydrate)
-
-    video = Video(
-        title="This is so fucking stupid...",
-        slug="this-is-so-fucking-stupid",
-        duration_seconds=22 * 60 + 43,
-        published_at=datetime(2026, 4, 14),
-        is_available=True,
-    )
-    candidates = [
-        {
-            "id": "wronghasan01",
-            "snippet": {
-                "title": "Hillary Clinton is so Fucking Stupid",
-                "channelTitle": "HasanAbi",
-                "channelId": "channel-hasan",
-                "publishedAt": "2026-04-14T12:00:00Z",
-            },
-            "statistics": {},
-            "_waytube_duration_seconds": 59 * 60 + 11,
-            "_waytube_source": "watch-page",
-        }
-    ]
-
-    async def run():
-        async with httpx.AsyncClient() as client:
-            return await sync_service.build_review_candidate_queue(
-                client,
-                video,
-                candidates,
-                requests_per_second=3,
-            )
-
-    queue = asyncio.run(run())
-
-    assert queue == []
 
 
 def test_sync_video_rejects_implausible_review_only_candidate_without_api(tmp_path: Path, monkeypatch):
