@@ -1475,6 +1475,99 @@ def test_sync_video_prioritizes_known_local_channel_queries_without_api(tmp_path
         assert "The Nvidia Warranty Situation is Crazy" in captured_queries[0]
 
 
+def test_sync_video_matches_ohnepixel_video_without_api(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="ohnePixel", slug="ohnepixel")
+        db.add(channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "ohnepixel.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target")
+        target_video = Video(
+            title="CS2 Sticker Capsule Opening Goes Wrong",
+            slug="cs2-sticker-capsule-opening-goes-wrong",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=17 * 60 + 52,
+            published_at=datetime(2026, 4, 14),
+            is_available=True,
+        )
+        db.add(target_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=target_video.id,
+                absolute_path=str(target_path),
+                relative_path="ohnepixel.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="ohnepixel" * 8,
+            )
+        )
+        db.commit()
+
+        captured_queries: list[str] = []
+
+        async def fake_fetch_fallback_candidates(client, queries, requests_per_second, status_callback=None):
+            del client, requests_per_second, status_callback
+            captured_queries.extend(queries)
+            return [
+                {
+                    "id": "ohne123abcd",
+                    "snippet": {
+                        "title": "CS2 Sticker Capsule Opening Goes Wrong",
+                        "channelTitle": "ohnePixel",
+                        "channelId": "channel-ohnepixel",
+                        "publishedAt": "2026-04-14T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 17 * 60 + 52,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert result.youtube_channel_id == "channel-ohnepixel"
+        assert captured_queries
+        assert captured_queries[0].startswith("ohnePixel ")
+
+
 def test_sync_video_keeps_searching_later_fallback_batches_after_noisy_first_hit(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="Asmongold TV", slug="asmongold-tv")
@@ -3222,6 +3315,41 @@ def test_build_home_feed_ignores_mismatched_matched_channel_snapshot(tmp_path: P
         target_card = next(card for card in cards if card.id == video.id)
 
         assert target_card.channel == "PGL"
+        assert target_card.watch_ref == str(video.id)
+
+
+def test_video_ref_for_ignores_mismatched_matched_channel(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="PGL", slug="pgl")
+        video = Video(
+            title="Quarterfinal recap",
+            slug="quarterfinal-recap-route",
+            channel=channel,
+            duration_seconds=600,
+            is_available=True,
+        )
+        db.add_all([channel, video])
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="wrongmatched-route",
+                youtube_channel_id="channel-esl",
+                status="matched",
+                confidence=0.92,
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-esl",
+                title="ESL Counter-Strike",
+            )
+        )
+        db.commit()
+
+        refreshed_video = db.get(Video, video.id)
+        assert refreshed_video is not None
+        assert routes_service._video_ref_for(db, refreshed_video) == str(video.id)
 
 
 def test_summarize_video_ignores_review_snapshot_metadata(tmp_path: Path):

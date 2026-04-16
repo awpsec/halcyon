@@ -898,9 +898,24 @@ def _resume_point_for(progress: WatchProgress | None, duration_seconds: int | No
     return 0 if completed else normalized_position
 
 
-def _video_ref_for(video: Video) -> str:
-    if video.youtube_match and video.youtube_match.status == "matched" and video.youtube_match.youtube_video_id:
-        return video.youtube_match.youtube_video_id
+def _video_ref_for(db: Session, video: Video) -> str:
+    match = video.youtube_match
+    if (
+        match
+        and match.status == "matched"
+        and match.youtube_video_id
+        and (
+            not video.channel
+            or is_generic_channel_name(video.channel.name)
+            or not match.youtube_channel_id
+            or youtube_channel_matches_local_channel(
+                db,
+                local_channel=video.channel,
+                youtube_channel_id=match.youtube_channel_id,
+            )
+        )
+    ):
+        return match.youtube_video_id
     return str(video.id)
 
 
@@ -2194,7 +2209,7 @@ def get_video(
                 }
             )
         )(_with_channel_display(summarize_video(video, progress, db=db), channel_display_name)),
-        "watch_ref": _video_ref_for(video),
+        "watch_ref": _video_ref_for(db, video),
         "playback": playback,
         "media_info": {
             **media_info,
