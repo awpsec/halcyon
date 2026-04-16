@@ -96,6 +96,53 @@ TEMP_DOWNLOAD_MARKERS = (
     ".opdownload",
     ".unconfirmed",
 )
+LOW_SIGNAL_TITLE_TOKENS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "at",
+    "be",
+    "but",
+    "can",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "how",
+    "into",
+    "its",
+    "just",
+    "more",
+    "not",
+    "now",
+    "off",
+    "one",
+    "out",
+    "our",
+    "over",
+    "really",
+    "so",
+    "that",
+    "the",
+    "their",
+    "there",
+    "they",
+    "this",
+    "too",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "with",
+    "you",
+    "your",
+}
 YTDLP_FRAGMENT_PATTERN = re.compile(r"\.f\d{2,5}$", re.IGNORECASE)
 
 try:
@@ -1415,6 +1462,35 @@ def _candidate_meets_primary_match_threshold(score: float, reasons: list[str]) -
     return score >= threshold
 
 
+def _candidate_meets_refresh_by_id_threshold(
+    score: float,
+    reasons: list[str],
+    *,
+    existing_match_plausible: bool,
+) -> bool:
+    if _candidate_meets_primary_match_threshold(score, reasons):
+        return True
+    if not existing_match_plausible:
+        return False
+
+    reason_set = set(reasons)
+    if {"channel-mismatch", "duration-mismatch", "duration-far", "episode-mismatch"} & reason_set:
+        return False
+    return score >= 0.64 and bool(
+        reason_set
+        & {
+            "channel",
+            "duration-tight",
+            "duration",
+            "duration-loose",
+            "duration-longform",
+            "exact-title",
+            "title-overlap-high",
+            "title-overlap",
+        }
+    )
+
+
 def _candidate_is_review_worthy(score: float, reasons: list[str]) -> bool:
     reason_set = set(reasons)
     if {"duration-mismatch", "duration-far", "episode-mismatch"} & reason_set:
@@ -1493,9 +1569,23 @@ def _existing_match_snapshot_is_plausible(
     return _candidate_meets_primary_match_threshold(score, reasons)
 
 
+def _channel_inference_tokens(value: str) -> set[str]:
+    tokens: set[str] = set()
+    for token in tokenize_text(clean_display_title(value) or value):
+        if token in LOW_SIGNAL_TITLE_TOKENS:
+            continue
+        if token.isdigit():
+            if len(token) >= 2:
+                tokens.add(token)
+            continue
+        if len(token) >= 3:
+            tokens.add(token)
+    return tokens
+
+
 def infer_channel_ids_from_neighbor_titles(db: Session, video: Video, *, limit: int = 3) -> list[str]:
-    video_tokens = set(tokenize_text(clean_display_title(video.title) or video.title))
-    if len(video_tokens) < 2:
+    video_tokens = _channel_inference_tokens(video.title)
+    if len(video_tokens) < 3:
         return []
 
     rows = db.execute(
@@ -1508,24 +1598,33 @@ def infer_channel_ids_from_neighbor_titles(db: Session, video: Video, *, limit: 
         )
     ).all()
 
-    scored: dict[str, float] = {}
+    scored: dict[str, dict[str, float | int]] = {}
     for candidate_title, youtube_channel_id in rows:
         if not youtube_channel_id or not candidate_title:
             continue
-        candidate_tokens = set(tokenize_text(clean_display_title(candidate_title) or candidate_title))
+        candidate_tokens = _channel_inference_tokens(candidate_title)
         if not candidate_tokens:
             continue
         shared_tokens = video_tokens & candidate_tokens
         shared_count = len(shared_tokens)
         overlap = shared_count / max(1, len(video_tokens))
-        if shared_count < 2 and overlap < 0.34:
+        if shared_count < 3 or overlap < 0.5:
             continue
-        score = max(overlap, shared_count / max(1, min(len(video_tokens), len(candidate_tokens))))
-        scored[youtube_channel_id] = max(scored.get(youtube_channel_id, 0.0), score)
+        score = overlap + min(0.25, shared_count * 0.05)
+        stats = scored.setdefault(youtube_channel_id, {"best_score": 0.0, "support": 0})
+        stats["best_score"] = max(float(stats["best_score"]), score)
+        stats["support"] = int(stats["support"]) + 1
 
     return [
         channel_id
-        for channel_id, _score in sorted(scored.items(), key=lambda item: item[1], reverse=True)[:limit]
+        for channel_id, _stats in sorted(
+            [
+                (channel_id, stats)
+                for channel_id, stats in scored.items()
+                if int(stats["support"]) >= 2 or float(stats["best_score"]) >= 0.9
+            ],
+            key=lambda item: (-int(item[1]["support"]), -float(item[1]["best_score"]), item[0]),
+        )[:limit]
     ]
 
 
@@ -1592,7 +1691,10 @@ def channel_name_hints_for_ids(db: Session, channel_ids: list[str]) -> list[str]
             select(Channel.name)
             .join(Video, Video.channel_id == Channel.id)
             .join(YouTubeMatch, YouTubeMatch.video_id == Video.id)
-            .where(YouTubeMatch.youtube_channel_id == channel_id)
+            .where(
+                YouTubeMatch.status == "matched",
+                YouTubeMatch.youtube_channel_id == channel_id,
+            )
             .order_by(Video.id.desc())
             .limit(1)
         )
@@ -1601,6 +1703,35 @@ def channel_name_hints_for_ids(db: Session, channel_ids: list[str]) -> list[str]
             if resolved and resolved not in hints:
                 hints.append(resolved)
     return hints
+
+
+def youtube_channel_title_hint(db: Session, youtube_channel_id: str | None) -> str | None:
+    normalized_channel_id = str(youtube_channel_id or "").strip()
+    if not normalized_channel_id:
+        return None
+
+    snapshot = db.scalar(
+        select(YouTubeChannelSnapshot).where(
+            YouTubeChannelSnapshot.youtube_channel_id == normalized_channel_id
+        )
+    )
+    if snapshot and snapshot.title:
+        return clean_display_title(snapshot.title)
+    return None
+
+
+def youtube_channel_matches_local_channel(
+    db: Session,
+    *,
+    local_channel: Channel | None,
+    youtube_channel_id: str | None,
+) -> bool:
+    if not local_channel or is_generic_channel_name(local_channel.name):
+        return False
+    title_hint = youtube_channel_title_hint(db, youtube_channel_id)
+    if not title_hint:
+        return False
+    return resolve_display_name(local_channel.name, title_hint) == title_hint
 
 
 def video_requires_discovery(video: Video) -> bool:
@@ -2232,10 +2363,21 @@ def matched_youtube_channels_by_local_channel(db: Session) -> dict[int, str]:
 
     resolved: dict[int, str] = {}
     for channel_id, channel_counts in channel_id_map.items():
+        local_channel = db.get(Channel, channel_id)
         ordered = sorted(
             channel_counts.items(),
             key=lambda item: (-item[1], item[0]),
         )
+        if local_channel and not is_generic_channel_name(local_channel.name):
+            ordered = [
+                (youtube_channel_id, count)
+                for youtube_channel_id, count in ordered
+                if youtube_channel_matches_local_channel(
+                    db,
+                    local_channel=local_channel,
+                    youtube_channel_id=youtube_channel_id,
+                )
+            ]
         if not ordered:
             continue
         if len(ordered) == 1:
@@ -3786,7 +3928,11 @@ async def sync_video(
             )
             if refresh_item:
                 refresh_score, refresh_candidate_reasons = score_match(video, refresh_item)
-                if _candidate_meets_primary_match_threshold(refresh_score, refresh_candidate_reasons):
+                if _candidate_meets_refresh_by_id_threshold(
+                    refresh_score,
+                    refresh_candidate_reasons,
+                    existing_match_plausible=existing_match_plausible,
+                ):
                     refresh_reasons = list(
                         dict.fromkeys((existing_match.reasons or []) + refresh_candidate_reasons + ["refresh-by-id"])
                     )
@@ -3853,7 +3999,11 @@ async def sync_video(
                 refresh_item = None
             if refresh_item:
                 refresh_score, refresh_candidate_reasons = score_match(video, refresh_item)
-                if _candidate_meets_primary_match_threshold(refresh_score, refresh_candidate_reasons):
+                if _candidate_meets_refresh_by_id_threshold(
+                    refresh_score,
+                    refresh_candidate_reasons,
+                    existing_match_plausible=existing_match_plausible,
+                ):
                     refresh_reasons = list(
                         dict.fromkeys((existing_match.reasons or []) + refresh_candidate_reasons + ["refresh-by-id"])
                     )
@@ -3896,6 +4046,8 @@ async def sync_video(
             return existing_match
 
     channel_ids: list[str] = []
+    name_verified_channel_ids: list[str] = []
+    name_verified_channel_ids: list[str] = []
     use_local_channel_bucket = bool(
         video.channel_id
         and video.channel
@@ -3931,7 +4083,10 @@ async def sync_video(
                     snippet = candidate.get("snippet", {})
                     resolved_name = resolve_display_name(video.channel.name, snippet.get("channelTitle"))
                     if resolved_name == snippet.get("channelTitle") and candidate.get("id", {}).get("channelId"):
-                        deduped_channel_ids.append(candidate["id"]["channelId"])
+                        youtube_channel_id = candidate["id"]["channelId"]
+                        deduped_channel_ids.append(youtube_channel_id)
+                        if youtube_channel_id not in name_verified_channel_ids:
+                            name_verified_channel_ids.append(youtube_channel_id)
             except YouTubeSyncError as exc:
                 logger.warning("Sync channel fallback video_id=%s channel=%s error=%s", video.id, video.channel.name, exc)
                 api_error = exc
@@ -3945,16 +4100,36 @@ async def sync_video(
                     channel_id = channel_snapshot.get("id") if channel_snapshot else None
                     if title and channel_id and resolve_display_name(video.channel.name, title) == title:
                         deduped_channel_ids.append(channel_id)
+                        if channel_id not in name_verified_channel_ids:
+                            name_verified_channel_ids.append(channel_id)
             deduped_channel_ids = list(dict.fromkeys(deduped_channel_ids))
     if not deduped_channel_ids and (not video.channel or is_generic_channel_name(video.channel.name)):
         for channel_id in infer_channel_ids_from_neighbor_titles(db, video):
             if channel_id not in deduped_channel_ids:
                 deduped_channel_ids.append(channel_id)
 
-    channel_hints = channel_name_hints_for_ids(db, deduped_channel_ids)
+    trusted_channel_ids = deduped_channel_ids
+    if use_local_channel_bucket and video.channel:
+        trusted_channel_ids = [
+            channel_id
+            for channel_id in deduped_channel_ids
+            if channel_id in name_verified_channel_ids
+            or youtube_channel_matches_local_channel(
+                db,
+                local_channel=video.channel,
+                youtube_channel_id=channel_id,
+            )
+        ]
+
+    include_local_channel_queries = bool(
+        not force
+        and video.channel
+        and not is_generic_channel_name(video.channel.name)
+    )
+    channel_hints = channel_name_hints_for_ids(db, trusted_channel_ids)
     scoped_queries = build_search_queries(
         video,
-        include_channel=not force and not deduped_channel_ids,
+        include_channel=include_local_channel_queries or not trusted_channel_ids,
         channel_hints=channel_hints,
     )
     candidates: list[dict] = []
@@ -3965,14 +4140,18 @@ async def sync_video(
                 effective_api_key,
                 scoped_queries,
                 requests_per_second,
-                channel_ids=deduped_channel_ids[:2] or None,
+                channel_ids=trusted_channel_ids[:2] or None,
                 status_callback=status_callback,
             )
-            if deduped_channel_ids:
+            if trusted_channel_ids:
                 broader_candidates = await fetch_search_candidates(
                     client,
                     effective_api_key,
-                    build_search_queries(video, include_channel=not force, channel_hints=channel_hints),
+                    build_search_queries(
+                        video,
+                        include_channel=include_local_channel_queries or not trusted_channel_ids,
+                        channel_hints=channel_hints,
+                    ),
                     requests_per_second,
                     channel_ids=None,
                     status_callback=status_callback,
@@ -3988,11 +4167,11 @@ async def sync_video(
                         for candidate in broader_candidates
                         if candidate.get("id") and candidate.get("id") not in seen_candidate_ids
                     )
-            if deduped_channel_ids:
+            if trusted_channel_ids:
                 recent_candidates = await fetch_recent_channel_upload_candidates(
                     client,
                     effective_api_key,
-                    deduped_channel_ids,
+                    trusted_channel_ids,
                     requests_per_second,
                     status_callback=status_callback,
                 )
@@ -4014,12 +4193,12 @@ async def sync_video(
             logger.warning("Sync api fallback video_id=%s title=%s error=%s", video.id, video.title, exc)
             if status_callback:
                 status_callback(phase="fallback", title=video.title, source="google-dork", warning=str(exc))
-    if deduped_channel_ids and not effective_api_key:
+    if trusted_channel_ids and not effective_api_key:
         merge_candidate_items(
             candidates,
             await fetch_recent_channel_upload_candidates_web(
                 client,
-                deduped_channel_ids,
+                trusted_channel_ids,
                 requests_per_second,
                 status_callback=status_callback,
             ),
@@ -4031,7 +4210,11 @@ async def sync_video(
             candidates,
             await fetch_fallback_candidates(
                 client,
-                build_search_queries(video, include_channel=not force, channel_hints=channel_hints),
+                build_search_queries(
+                    video,
+                    include_channel=include_local_channel_queries or not trusted_channel_ids,
+                    channel_hints=channel_hints,
+                ),
                 requests_per_second,
                 status_callback=status_callback,
             ),
@@ -4039,7 +4222,11 @@ async def sync_video(
     elif not candidates:
         candidates = await fetch_fallback_candidates(
             client,
-            build_search_queries(video, include_channel=not force, channel_hints=channel_hints),
+            build_search_queries(
+                video,
+                include_channel=include_local_channel_queries or not trusted_channel_ids,
+                channel_hints=channel_hints,
+            ),
             requests_per_second,
             status_callback=status_callback,
         )
@@ -4066,7 +4253,7 @@ async def sync_video(
             )
             best_score, reasons = score_match(video, best_item, channel_hints=channel_hints)
         channel_id = best_item.get("snippet", {}).get("channelId")
-        known_channel_match = bool(channel_id and channel_id in deduped_channel_ids)
+        known_channel_match = bool(channel_id and channel_id in trusted_channel_ids)
         local_channel_locked = bool(
             video.channel
             and not is_generic_channel_name(video.channel.name)
@@ -4210,7 +4397,10 @@ async def send_video_to_review(
                     snippet = candidate.get("snippet", {})
                     resolved_name = resolve_display_name(video.channel.name, snippet.get("channelTitle"))
                     if resolved_name == snippet.get("channelTitle") and candidate.get("id", {}).get("channelId"):
-                        deduped_channel_ids.append(candidate["id"]["channelId"])
+                        youtube_channel_id = candidate["id"]["channelId"]
+                        deduped_channel_ids.append(youtube_channel_id)
+                        if youtube_channel_id not in name_verified_channel_ids:
+                            name_verified_channel_ids.append(youtube_channel_id)
             except YouTubeSyncError as exc:
                 logger.warning("Sync review channel fallback video_id=%s channel=%s error=%s", video.id, video.channel.name, exc)
                 api_error = exc
@@ -4224,6 +4414,8 @@ async def send_video_to_review(
                     channel_id = channel_snapshot.get("id") if channel_snapshot else None
                     if title and channel_id and resolve_display_name(video.channel.name, title) == title:
                         deduped_channel_ids.append(channel_id)
+                        if channel_id not in name_verified_channel_ids:
+                            name_verified_channel_ids.append(channel_id)
             deduped_channel_ids = list(dict.fromkeys(deduped_channel_ids))
 
     if not deduped_channel_ids and (not video.channel or is_generic_channel_name(video.channel.name)):
@@ -4231,10 +4423,27 @@ async def send_video_to_review(
             if channel_id not in deduped_channel_ids:
                 deduped_channel_ids.append(channel_id)
 
-    channel_hints = channel_name_hints_for_ids(db, deduped_channel_ids)
+    trusted_channel_ids = deduped_channel_ids
+    if use_local_channel_bucket and video.channel:
+        trusted_channel_ids = [
+            channel_id
+            for channel_id in deduped_channel_ids
+            if channel_id in name_verified_channel_ids
+            or youtube_channel_matches_local_channel(
+                db,
+                local_channel=video.channel,
+                youtube_channel_id=channel_id,
+            )
+        ]
+
+    include_local_channel_queries = bool(
+        video.channel
+        and not is_generic_channel_name(video.channel.name)
+    )
+    channel_hints = channel_name_hints_for_ids(db, trusted_channel_ids)
     scoped_queries = build_search_queries(
         video,
-        include_channel=not deduped_channel_ids,
+        include_channel=include_local_channel_queries or not trusted_channel_ids,
         channel_hints=channel_hints,
     )
     candidates: list[dict] = []
@@ -4245,14 +4454,18 @@ async def send_video_to_review(
                 effective_api_key,
                 scoped_queries,
                 requests_per_second,
-                channel_ids=deduped_channel_ids[:2] or None,
+                channel_ids=trusted_channel_ids[:2] or None,
                 status_callback=status_callback,
             )
-            if deduped_channel_ids:
+            if trusted_channel_ids:
                 broader_candidates = await fetch_search_candidates(
                     client,
                     effective_api_key,
-                    build_search_queries(video, include_channel=True, channel_hints=channel_hints),
+                    build_search_queries(
+                        video,
+                        include_channel=include_local_channel_queries or not trusted_channel_ids,
+                        channel_hints=channel_hints,
+                    ),
                     requests_per_second,
                     channel_ids=None,
                     status_callback=status_callback,
@@ -4268,11 +4481,11 @@ async def send_video_to_review(
                         for candidate in broader_candidates
                         if candidate.get("id") and candidate.get("id") not in seen_candidate_ids
                     )
-            if deduped_channel_ids:
+            if trusted_channel_ids:
                 recent_candidates = await fetch_recent_channel_upload_candidates(
                     client,
                     effective_api_key,
-                    deduped_channel_ids,
+                    trusted_channel_ids,
                     requests_per_second,
                     status_callback=status_callback,
                 )
@@ -4294,12 +4507,12 @@ async def send_video_to_review(
             logger.warning("Sync review api fallback video_id=%s title=%s error=%s", video.id, video.title, exc)
             if status_callback:
                 status_callback(phase="fallback", title=video.title, source="google-dork", warning=str(exc))
-    if deduped_channel_ids and not effective_api_key:
+    if trusted_channel_ids and not effective_api_key:
         merge_candidate_items(
             candidates,
             await fetch_recent_channel_upload_candidates_web(
                 client,
-                deduped_channel_ids,
+                trusted_channel_ids,
                 requests_per_second,
                 status_callback=status_callback,
             ),
@@ -4311,7 +4524,11 @@ async def send_video_to_review(
             candidates,
             await fetch_fallback_candidates(
                 client,
-                build_search_queries(video, include_channel=True, channel_hints=channel_hints),
+                build_search_queries(
+                    video,
+                    include_channel=include_local_channel_queries or not trusted_channel_ids,
+                    channel_hints=channel_hints,
+                ),
                 requests_per_second,
                 status_callback=status_callback,
             ),
@@ -4319,7 +4536,11 @@ async def send_video_to_review(
     elif not candidates:
         candidates = await fetch_fallback_candidates(
             client,
-            build_search_queries(video, include_channel=True, channel_hints=channel_hints),
+            build_search_queries(
+                video,
+                include_channel=include_local_channel_queries or not trusted_channel_ids,
+                channel_hints=channel_hints,
+            ),
             requests_per_second,
             status_callback=status_callback,
         )

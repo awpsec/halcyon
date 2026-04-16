@@ -72,6 +72,45 @@ def test_fetch_channel_about_details_parses_counts_without_api(monkeypatch):
     assert result["video_count"] == 6_945
 
 
+def test_infer_channel_ids_from_neighbor_titles_rejects_low_signal_overlap(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        generic_channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        politics_channel = Channel(name="HasanAbi", slug="hasanabi")
+        db.add_all([generic_channel, politics_channel])
+        db.flush()
+
+        matched_video = Video(
+            title="Hillary Clinton is so Fucking Stupid",
+            slug="hillary-clinton-is-so-fucking-stupid",
+            channel_id=politics_channel.id,
+            created_at=datetime.utcnow() - timedelta(days=1),
+            duration_seconds=1200,
+            is_available=True,
+        )
+        target_video = Video(
+            title="This is so fucking stupid...",
+            slug="this-is-so-fucking-stupid",
+            channel_id=generic_channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=900,
+            is_available=True,
+        )
+        db.add_all([matched_video, target_video])
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=matched_video.id,
+                youtube_video_id="hasan1234567",
+                youtube_channel_id="channel-hasan",
+                status="matched",
+                confidence=0.95,
+            )
+        )
+        db.commit()
+
+        assert sync_service.infer_channel_ids_from_neighbor_titles(db, target_video) == []
+
+
 def test_fetch_youtube_web_candidates_parses_video_renderers(monkeypatch):
     html = """
     <html>
@@ -992,7 +1031,7 @@ def test_sync_video_uses_recent_channel_uploads_when_title_search_misses(tmp_pat
         assert "duration-tight" in (result.reasons or [])
 
 
-def test_sync_video_uses_neighbor_title_channel_hints_for_orphans_without_api(tmp_path: Path, monkeypatch):
+def test_sync_video_rejects_weak_neighbor_title_channel_hints_for_orphans_without_api(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="Asmongold TV", slug="asmongold-tv")
         db.add(channel)
@@ -1110,10 +1149,10 @@ def test_sync_video_uses_neighbor_title_channel_hints_for_orphans_without_api(tm
 
         result = asyncio.run(run())
 
-        assert result.status == "review"
-        assert result.youtube_channel_id == "channel-asmongold"
+        assert result.status == "unmatched"
+        assert result.youtube_channel_id is None
         assert captured_queries[0] == "Britain Navy is a joke now"
-        assert any("Asmongold TV" in query for query in captured_queries)
+        assert all("Asmongold TV" not in query for query in captured_queries)
 
 
 def test_sync_video_skips_generic_channel_name_in_fallback_queries_without_api(tmp_path: Path, monkeypatch):
@@ -1546,6 +1585,141 @@ def test_sync_video_reviews_weak_neighbor_channel_hint_matches_for_generic_chann
         assert result.youtube_video_id == "wrongshroud001"
         assert result.status == "review"
         assert "channel-hint" in (result.reasons or [])
+
+
+def test_sync_video_ignores_mismatched_known_channel_ids_without_api(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        local_channel = Channel(name="PGL", slug="pgl")
+        db.add(local_channel)
+        db.flush()
+
+        matched_path = tmp_path / "library" / "pgl-existing.mp4"
+        target_path = tmp_path / "library" / "pgl-target.mp4"
+        matched_path.parent.mkdir(parents=True, exist_ok=True)
+        matched_path.write_bytes(b"existing")
+        target_path.write_bytes(b"target")
+
+        matched_video = Video(
+            title="[PGL Bucharest 2026] Quarterfinal Recap",
+            slug="pgl-quarterfinal-recap",
+            channel_id=local_channel.id,
+            created_at=datetime.utcnow() - timedelta(days=1),
+            duration_seconds=600,
+            is_available=True,
+        )
+        target_video = Video(
+            title="[PGL Bucharest 2026] Wingman Interview with FUT LauNX",
+            slug="pgl-wingman-laux",
+            channel_id=local_channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=484,
+            is_available=True,
+        )
+        db.add_all([matched_video, target_video])
+        db.flush()
+        db.add_all(
+            [
+                VideoFile(
+                    video_id=matched_video.id,
+                    absolute_path=str(matched_path),
+                    relative_path="pgl-existing.mp4",
+                    file_size=matched_path.stat().st_size,
+                    fingerprint="m" * 64,
+                ),
+                VideoFile(
+                    video_id=target_video.id,
+                    absolute_path=str(target_path),
+                    relative_path="pgl-target.mp4",
+                    file_size=target_path.stat().st_size,
+                    fingerprint="n" * 64,
+                ),
+            ]
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=matched_video.id,
+                youtube_video_id="esl-wrong-1",
+                youtube_channel_id="channel-esl",
+                status="matched",
+                confidence=0.92,
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-esl",
+                title="ESL Counter-Strike",
+            )
+        )
+        db.commit()
+
+        web_recent_called = False
+        captured_queries: list[str] = []
+
+        async def fake_fetch_recent_channel_upload_candidates_web(*args, **kwargs):
+            nonlocal web_recent_called
+            web_recent_called = True
+            return []
+
+        async def fake_fetch_fallback_candidates(client, queries, requests_per_second, status_callback=None):
+            del client, requests_per_second, status_callback
+            captured_queries.extend(queries)
+            return [
+                {
+                    "id": "pgl-correct-1",
+                    "snippet": {
+                        "title": "[PGL Bucharest 2026] Wingman Interview with FUT LauNX",
+                        "channelTitle": "PGL",
+                        "channelId": "channel-pgl",
+                        "publishedAt": "2026-04-14T12:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 484,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates_web", fake_fetch_recent_channel_upload_candidates_web)
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert web_recent_called is False
+        assert result.status == "matched"
+        assert result.youtube_channel_id == "channel-pgl"
+        assert any("PGL" in query for query in captured_queries)
+        assert all("ESL Counter-Strike" not in query for query in captured_queries)
 
 
 def test_sync_video_uses_series_neighbor_channel_hints_for_new_episode_without_api(tmp_path: Path, monkeypatch):
@@ -2049,6 +2223,12 @@ def test_sync_video_uses_web_recent_channel_uploads_without_api_for_known_channe
                 confidence=0.95,
             )
         )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-frankie",
+                title="FRANKIEonPCin1080p",
+            )
+        )
         db.commit()
 
         web_recent_called = False
@@ -2118,6 +2298,44 @@ def test_sync_video_uses_web_recent_channel_uploads_without_api_for_known_channe
         assert result.youtube_channel_id == "channel-frankie"
 
 
+def test_matched_youtube_channels_by_local_channel_skips_name_mismatches(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="PGL", slug="pgl")
+        db.add(channel)
+        db.flush()
+
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-esl",
+                title="ESL Counter-Strike",
+            )
+        )
+
+        for index in range(2):
+            video = Video(
+                title=f"PGL upload {index}",
+                slug=f"pgl-upload-{index}",
+                channel_id=channel.id,
+                created_at=datetime.utcnow() - timedelta(minutes=index),
+                duration_seconds=300,
+                is_available=True,
+            )
+            db.add(video)
+            db.flush()
+            db.add(
+                YouTubeMatch(
+                    video_id=video.id,
+                    youtube_video_id=f"wrong-esl-{index}",
+                    youtube_channel_id="channel-esl",
+                    status="matched",
+                    confidence=0.9,
+                )
+            )
+        db.commit()
+
+        assert sync_service.matched_youtube_channels_by_local_channel(db) == {}
+
+
 def test_refresh_live_streams_reuses_existing_live_channel_without_playlist_lookup(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="PGL", slug="pgl")
@@ -2140,6 +2358,12 @@ def test_refresh_live_streams_reuses_existing_live_channel_without_playlist_look
                 youtube_channel_id="channel-pgl",
                 youtube_video_id="vod123",
                 status="matched",
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-pgl",
+                title="PGL",
             )
         )
         db.add(
@@ -2216,6 +2440,12 @@ def test_refresh_live_streams_marks_reused_live_row_stale_when_detail_channel_mi
             )
         )
         db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-pgl",
+                title="PGL",
+            )
+        )
+        db.add(
             YouTubeLiveStreamSnapshot(
                 youtube_video_id="live123",
                 youtube_channel_id="channel-pgl",
@@ -2289,6 +2519,12 @@ def test_refresh_live_streams_uses_web_fallback_without_api_key(tmp_path: Path, 
                 youtube_channel_id="channel-lvndmark",
                 youtube_video_id="vod456",
                 status="matched",
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-lvndmark",
+                title="LVNDMARK",
             )
         )
         db.commit()
