@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 
 from app.core.config import Settings
+from app.core.logging import get_logger
 from app.db.session import SessionLocal
 from app.models.entities import SyncJob, SyncSettings
 from app.services.retention import run_retention_cycle
@@ -19,6 +20,7 @@ from app.services.subtitles import (
 from app.services.sync import normalize_channel_assignments, reconcile_sync_job, refresh_live_streams, sync_scope
 
 LIVE_SYNC_MIN_INTERVAL_SECONDS = 1200
+logger = get_logger()
 
 
 def current_scan_interval_seconds(settings: Settings) -> int:
@@ -101,6 +103,15 @@ async def background_subtitles_once(settings: Settings) -> None:
             return
         subtitle_job = active_subtitle_job(db)
         if subtitle_job:
+            job_details = dict(subtitle_job.details or {})
+            logger.info(
+                "Subtitle background continuing job id=%s status=%s processed=%s total=%s remaining=%s",
+                subtitle_job.id,
+                subtitle_job.status,
+                job_details.get("processed"),
+                job_details.get("total"),
+                job_details.get("remaining"),
+            )
             await process_subtitle_backfill_job(db, subtitle_job, app_settings=settings)
             sync_settings.last_subtitle_sync_at = datetime.utcnow()
             db.commit()
@@ -136,8 +147,26 @@ async def background_subtitles_once(settings: Settings) -> None:
             or datetime.utcnow() - sync_settings.last_subtitle_sync_at >= timedelta(seconds=configured_interval)
         )
         if not should_run_now:
+            seconds_since_last_pass = (
+                int((datetime.utcnow() - sync_settings.last_subtitle_sync_at).total_seconds())
+                if sync_settings.last_subtitle_sync_at
+                else None
+            )
+            logger.info(
+                "Subtitle background deferred candidates=%s last_pass_age_seconds=%s interval_seconds=%s newest_candidate_created_at=%s",
+                len(newest_candidates),
+                seconds_since_last_pass,
+                configured_interval,
+                newest_candidate_created_at.isoformat() if newest_candidate_created_at else None,
+            )
             return
         job = create_subtitle_backfill_job(db)
+        logger.info(
+            "Subtitle background starting job id=%s candidates=%s trigger=%s",
+            job.id,
+            len(newest_candidates),
+            "new-onboarded-video" if sync_settings.last_subtitle_sync_at and newest_candidate_created_at and newest_candidate_created_at > sync_settings.last_subtitle_sync_at else "interval",
+        )
         await process_subtitle_backfill_job(db, job, app_settings=settings)
         sync_settings.last_subtitle_sync_at = datetime.utcnow()
         db.commit()

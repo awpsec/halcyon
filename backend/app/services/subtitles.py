@@ -76,6 +76,15 @@ def active_subtitle_job(db: Session) -> SyncJob | None:
 def create_subtitle_backfill_job(db: Session) -> SyncJob:
     existing = active_subtitle_job(db)
     if existing:
+        details = dict(existing.details or {})
+        logger.info(
+            "Subtitle job reuse id=%s status=%s processed=%s total=%s remaining=%s",
+            existing.id,
+            existing.status,
+            details.get("processed"),
+            details.get("total"),
+            details.get("remaining"),
+        )
         return existing
     total = count_missing_subtitle_candidates(db)
     job = SyncJob(
@@ -95,6 +104,7 @@ def create_subtitle_backfill_job(db: Session) -> SyncJob:
     db.add(job)
     db.commit()
     db.refresh(job)
+    logger.info("Subtitle job created id=%s total_candidates=%s", job.id, total)
     return job
 
 
@@ -218,9 +228,23 @@ async def process_subtitle_backfill_job(
         job.details = details
         db.commit()
         db.refresh(job)
+        logger.info(
+            "Subtitle job started id=%s total=%s batch_size=%s",
+            job.id,
+            details.get("total"),
+            max(1, int(resolved_settings.subtitle_manual_batch_size or 5)),
+        )
 
     details = dict(job.details or {})
     candidates = missing_subtitle_candidates(db, limit=max(1, int(resolved_settings.subtitle_manual_batch_size or 5)))
+    logger.info(
+        "Subtitle job batch id=%s candidates=%s processed=%s total=%s remaining=%s",
+        job.id,
+        len(candidates),
+        details.get("processed"),
+        details.get("total"),
+        details.get("remaining"),
+    )
     if not candidates:
         details["remaining"] = 0
         details["percent"] = 100
@@ -387,6 +411,11 @@ async def run_automatic_subtitle_pass(
 ) -> bool:
     resolved_settings = app_settings or settings
     candidates = missing_subtitle_candidates(db, limit=max(1, int(resolved_settings.subtitle_auto_batch_size or 1)))
+    logger.info(
+        "Subtitle automatic pass candidates=%s batch_size=%s",
+        len(candidates),
+        max(1, int(resolved_settings.subtitle_auto_batch_size or 1)),
+    )
     if not candidates:
         sync_settings.last_subtitle_sync_at = datetime.utcnow()
         db.commit()

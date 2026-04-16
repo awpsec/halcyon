@@ -1811,6 +1811,25 @@ def candidate_requires_api_gap_fill(item: dict[str, Any]) -> bool:
     )
 
 
+def candidate_api_gap_fill_fields(item: dict[str, Any]) -> list[str]:
+    snippet = item.get("snippet", {}) or {}
+    statistics = item.get("statistics", {}) or {}
+    missing: list[str] = []
+    if not snippet.get("description"):
+        missing.append("description")
+    if not snippet.get("publishedAt"):
+        missing.append("published-at")
+    if not snippet.get("channelId"):
+        missing.append("channel-id")
+    if item.get("_waytube_duration_seconds") is None:
+        missing.append("duration")
+    if parse_maybe_int(statistics.get("viewCount")) is None:
+        missing.append("views")
+    if parse_maybe_int(statistics.get("likeCount")) is None:
+        missing.append("likes")
+    return missing
+
+
 def _existing_match_snapshot_is_plausible(
     db: Session,
     video: Video,
@@ -4484,6 +4503,17 @@ async def sync_video(
         )
         if not needs_refresh and not existing_match_plausible:
             needs_refresh = True
+        logger.info(
+            "Sync refresh assessment video_id=%s youtube_video_id=%s force=%s plausible=%s metadata_gap_fill=%s channel_art_refresh=%s engagement_refresh=%s needs_refresh=%s",
+            video.id,
+            existing_match.youtube_video_id,
+            force,
+            existing_match_plausible,
+            metadata_gap_fill_needed,
+            channel_art_refresh_needed,
+            engagement_refresh_due,
+            needs_refresh,
+        )
         if not needs_refresh:
             organization_moves: list[tuple[Path, Path]] = []
             if video_requires_organization(db, video) and video.channel:
@@ -4509,6 +4539,14 @@ async def sync_video(
         ):
             if status_callback:
                 status_callback(phase="refresh", source="youtube-api", youtube_video_id=existing_match.youtube_video_id)
+            logger.info(
+                "Sync engagement refresh due video_id=%s youtube_video_id=%s window_hours=%s refresh_limit=%s comments=%s",
+                video.id,
+                existing_match.youtube_video_id,
+                int(MATCH_REFRESH_AFTER.total_seconds() // 3600),
+                MATCH_PERIODIC_STATS_REFRESH_LIMIT,
+                comment_limit > 0,
+            )
             try:
                 refresh_item = await fetch_video_details_by_id(
                     client,
@@ -4791,6 +4829,13 @@ async def sync_video(
             and (channel_cache is not None or playlist_cache is not None)
             and candidate_requires_api_gap_fill(best_item)
         ):
+            logger.info(
+                "Sync api gap-fill candidate video_id=%s youtube_video_id=%s source=%s fields=%s",
+                video.id,
+                best_item.get("id"),
+                best_item.get("_waytube_source"),
+                ",".join(candidate_api_gap_fill_fields(best_item)),
+            )
             try:
                 api_gap_fill_item = await fetch_video_details_by_id(
                     client,
@@ -4925,6 +4970,13 @@ async def sync_video(
                     and (channel_cache is not None or playlist_cache is not None)
                     and candidate_requires_api_gap_fill(best_item)
                 ):
+                    logger.info(
+                        "Sync api gap-fill candidate video_id=%s youtube_video_id=%s source=%s fields=%s",
+                        video.id,
+                        best_item.get("id"),
+                        best_item.get("_waytube_source"),
+                        ",".join(candidate_api_gap_fill_fields(best_item)),
+                    )
                     try:
                         api_gap_fill_item = await fetch_video_details_by_id(
                             client,
