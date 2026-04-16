@@ -963,7 +963,7 @@ def test_resolve_synced_channel_target_ignores_review_rows_when_reusing_channels
         assert target_video.channel_id == resolved.id
 
 
-def test_resolve_synced_channel_target_keeps_locked_known_channel_when_incoming_creator_mismatches(tmp_path: Path):
+def test_resolve_synced_channel_target_reuses_matching_creator_when_locked_channel_mismatches(tmp_path: Path):
     with make_session(tmp_path) as db:
         frankie_channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
         wrong_channel = Channel(name="Bizim Kanal", slug="bizim-kanal")
@@ -1015,8 +1015,76 @@ def test_resolve_synced_channel_target_keeps_locked_known_channel_when_incoming_
         db.flush()
 
         assert resolved is not None
-        assert resolved.id == frankie_channel.id
-        assert target_video.channel_id == frankie_channel.id
+        assert resolved.id == wrong_channel.id
+        assert target_video.channel_id == wrong_channel.id
+
+
+def test_normalize_channel_assignments_splits_mixed_channel_before_refreshing_snapshot(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        shroud_channel = Channel(name="shroud", slug="shroud")
+        db.add(shroud_channel)
+        db.flush()
+
+        shroud_video = Video(
+            title="The best pirate game is finally out..",
+            slug="best-pirate-game-finally-out",
+            channel_id=shroud_channel.id,
+            duration_seconds=2 * 3600 + 35 * 60 + 16,
+            is_available=True,
+        )
+        asmongold_video = Video(
+            title="This is so f***ing stupid..",
+            slug="this-is-so-fing-stupid",
+            channel_id=shroud_channel.id,
+            duration_seconds=17 * 60 + 52,
+            is_available=True,
+        )
+        db.add_all([shroud_video, asmongold_video])
+        db.flush()
+        db.add_all(
+            [
+                YouTubeMatch(
+                    video_id=shroud_video.id,
+                    youtube_video_id="shroudpirate1",
+                    youtube_channel_id="channel-shroud",
+                    status="matched",
+                    confidence=0.97,
+                ),
+                YouTubeMatch(
+                    video_id=asmongold_video.id,
+                    youtube_video_id="asmonstupid1",
+                    youtube_channel_id="channel-asmongold",
+                    status="matched",
+                    confidence=0.97,
+                ),
+                YouTubeChannelSnapshot(
+                    youtube_channel_id="channel-shroud",
+                    title="shroud",
+                    description="shroud channel",
+                ),
+                YouTubeChannelSnapshot(
+                    youtube_channel_id="channel-asmongold",
+                    title="Asmongold TV",
+                    description="Asmongold channel",
+                ),
+            ]
+        )
+        db.commit()
+
+        sync_service.normalize_channel_assignments(db)
+
+        db.refresh(shroud_video)
+        db.refresh(asmongold_video)
+        db.refresh(shroud_channel)
+        asmongold_channel = db.get(Channel, asmongold_video.channel_id)
+
+        assert shroud_video.channel_id == shroud_channel.id
+        assert shroud_channel.name == "shroud"
+        assert asmongold_channel is not None
+        assert asmongold_channel.id != shroud_channel.id
+        assert asmongold_channel.slug == "asmongold-tv"
+        assert asmongold_channel.name == "Asmongold TV"
+        assert asmongold_channel.description == "Asmongold channel"
 
 
 def test_apply_sync_item_preserves_existing_snapshot_metadata_when_refresh_is_sparse(tmp_path: Path, monkeypatch):
@@ -5258,7 +5326,7 @@ def test_sync_scope_prioritizes_discovery_before_background_refresh(tmp_path: Pa
 
         asyncio.run(sync_scope(db, scope="library", target_id=None, api_key=None, quiet_if_idle=False))
 
-        assert seen_titles[:2] == ["Brand new discovery", "Older matched"]
+        assert seen_titles == ["Brand new discovery"]
 
 
 def test_background_auto_sync_clears_stale_running_jobs_before_library_sync(tmp_path: Path, monkeypatch):
@@ -6485,6 +6553,206 @@ def test_apply_sync_item_skips_comment_enrichment_until_engagement_refresh_is_du
         ).all()
 
         assert stored_comments == []
+
+
+def test_video_requires_refresh_ignores_periodic_engagement_window_without_api_key(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="PowerfulJRE", slug="powerfuljre")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="Joe Rogan Experience #2484 - David Cross",
+            slug="joe-rogan-experience-2484-david-cross",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            published_at=datetime.utcnow() - timedelta(hours=8),
+            duration_seconds=2 * 3600 + 23 * 60 + 4,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="jre2484abc1",
+                youtube_channel_id="channel-jre",
+                status="matched",
+                confidence=0.96,
+            )
+        )
+        db.add(
+            YouTubeVideoSnapshot(
+                youtube_video_id="jre2484abc1",
+                youtube_channel_id="channel-jre",
+                title="Joe Rogan Experience #2484 - David Cross",
+                duration_seconds=2 * 3600 + 23 * 60 + 4,
+                thumbnail_url="https://i.ytimg.com/vi/jre2484abc1/hqdefault.jpg",
+                published_at=datetime.utcnow() - timedelta(hours=8),
+                published_at_source="youtube-api",
+                view_count=32000,
+                like_count=1200,
+                fetched_at=datetime.utcnow() - timedelta(hours=7),
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-jre",
+                title="PowerfulJRE",
+            )
+        )
+        db.commit()
+
+        assert sync_service.video_requires_refresh(db, video, api_key_available=False) is False
+
+
+def test_sync_video_uses_api_refresh_for_periodic_engagement_window(tmp_path: Path, monkeypatch):
+    def fake_settings() -> Settings:
+        return Settings(
+            mounted_roots=[],
+            config_dir=tmp_path / "config",
+            cache_dir=tmp_path / "cache",
+            background_tasks_enabled=False,
+        )
+
+    async def fail_watch_page(*args, **kwargs):
+        raise AssertionError("watch-page refresh should not run for engagement-only refresh")
+
+    async def fake_video_details(*args, **kwargs):
+        return {
+            "id": "jre2484abc1",
+            "snippet": {
+                "title": "Joe Rogan Experience #2484 - David Cross",
+                "channelTitle": "PowerfulJRE",
+                "channelId": "channel-jre",
+                "publishedAt": "2026-04-16T01:00:00Z",
+                "description": "Updated metadata",
+                "thumbnails": {},
+            },
+            "statistics": {
+                "viewCount": "33000",
+                "likeCount": "1300",
+            },
+            "_waytube_duration_seconds": 2 * 3600 + 23 * 60 + 4,
+            "_waytube_source": "youtube-api",
+        }
+
+    async def fake_top_comments(*args, **kwargs):
+        return [
+            {
+                "snippet": {
+                    "topLevelComment": {
+                        "id": "comment-1",
+                        "snippet": {
+                            "authorDisplayName": "Commenter",
+                            "textDisplay": "Fresh comment",
+                            "likeCount": 5,
+                            "publishedAt": "2026-04-16T07:00:00Z",
+                        },
+                    },
+                    "totalReplyCount": 0,
+                }
+            }
+        ]
+
+    async def fake_ryd(*args, **kwargs):
+        return None
+
+    async def fail_channel_enrichment(*args, **kwargs):
+        raise AssertionError("channel metadata should stay settled during engagement refresh")
+
+    monkeypatch.setattr(sync_service, "get_settings", fake_settings)
+    monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fail_watch_page)
+    monkeypatch.setattr(sync_service, "fetch_video_details_by_id", fake_video_details)
+    monkeypatch.setattr(sync_service, "fetch_top_comments", fake_top_comments)
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
+    monkeypatch.setattr(sync_service, "fetch_channel_details", fail_channel_enrichment)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fail_channel_enrichment)
+    monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
+
+    with make_session(tmp_path) as db:
+        channel = Channel(name="PowerfulJRE", slug="powerfuljre")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="Joe Rogan Experience #2484 - David Cross",
+            slug="joe-rogan-experience-2484-david-cross-refresh",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            published_at=datetime.utcnow() - timedelta(hours=8),
+            duration_seconds=2 * 3600 + 23 * 60 + 4,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(tmp_path / "jre-refresh.mp4"),
+                relative_path="jre-refresh.mp4",
+                file_size=123,
+                fingerprint="e" * 64,
+            )
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="jre2484abc1",
+                youtube_channel_id="channel-jre",
+                status="matched",
+                confidence=0.96,
+                reasons=["exact-title", "duration-tight", "channel"],
+            )
+        )
+        db.add(
+            YouTubeVideoSnapshot(
+                youtube_video_id="jre2484abc1",
+                youtube_channel_id="channel-jre",
+                title="Joe Rogan Experience #2484 - David Cross",
+                description="Existing metadata",
+                duration_seconds=2 * 3600 + 23 * 60 + 4,
+                thumbnail_url="https://i.ytimg.com/vi/jre2484abc1/hqdefault.jpg",
+                published_at=datetime.utcnow() - timedelta(hours=8),
+                published_at_source="youtube-api",
+                view_count=32000,
+                like_count=1200,
+                fetched_at=datetime.utcnow() - timedelta(hours=7),
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-jre",
+                title="PowerfulJRE",
+            )
+        )
+        db.commit()
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    video,
+                    api_key="test-api-key",
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+        stored_comments = db.scalars(
+            select(YouTubeCommentSnapshot).where(YouTubeCommentSnapshot.youtube_video_id == "jre2484abc1")
+        ).all()
+        refreshed_snapshot = db.scalar(
+            select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == "jre2484abc1")
+        )
+
+        assert result.status == "matched"
+        assert refreshed_snapshot is not None
+        assert refreshed_snapshot.view_count == 33000
+        assert refreshed_snapshot.like_count == 1300
+        assert len(stored_comments) == 1
+        assert stored_comments[0].body == "Fresh comment"
 
 
 def test_apply_sync_item_fetches_replies_beyond_inline_batch(tmp_path: Path, monkeypatch):

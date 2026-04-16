@@ -494,6 +494,35 @@ def channel_maps_cleanly_to_youtube(db: Session, channel_id: int | None) -> str 
     return None
 
 
+def _channel_matches_incoming_identity(
+    db: Session,
+    channel: Channel | None,
+    *,
+    youtube_channel_id: str | None,
+    youtube_channel_title: str | None,
+) -> bool:
+    if not channel or channel.slug == "unknown-channel" or is_generic_channel_name(channel.name):
+        return False
+    if youtube_channel_id and youtube_channel_matches_local_channel(
+        db,
+        local_channel=channel,
+        youtube_channel_id=youtube_channel_id,
+    ):
+        return True
+    return bool(youtube_channel_title and channel_names_confidently_match(channel.name, youtube_channel_title))
+
+
+def _channel_maps_to_incoming_youtube_id(
+    db: Session,
+    channel: Channel | None,
+    *,
+    youtube_channel_id: str | None,
+) -> bool:
+    if not channel or not youtube_channel_id:
+        return False
+    return channel_maps_cleanly_to_youtube(db, channel.id) == youtube_channel_id
+
+
 def resolve_synced_channel_target(
     db: Session,
     video: Video,
@@ -515,20 +544,19 @@ def resolve_synced_channel_target(
         and current_channel.slug != "unknown-channel"
         and not is_generic_channel_name(current_channel.name)
     )
-    current_channel_matches_incoming = bool(
-        current_channel_locked
-        and (
-            youtube_channel_id in current_channel_ids
-            or youtube_channel_matches_local_channel(
-                db,
-                local_channel=current_channel,
-                youtube_channel_id=youtube_channel_id,
-            )
-            or channel_names_confidently_match(current_channel.name, youtube_channel_title)
-        )
+    current_channel_matches_incoming = _channel_matches_incoming_identity(
+        db,
+        current_channel,
+        youtube_channel_id=youtube_channel_id,
+        youtube_channel_title=youtube_channel_title,
+    )
+    current_channel_cleanly_maps_incoming = _channel_maps_to_incoming_youtube_id(
+        db,
+        current_channel,
+        youtube_channel_id=youtube_channel_id,
     )
 
-    if current_channel_locked and not current_channel_matches_incoming:
+    if current_channel and (current_channel_matches_incoming or current_channel_cleanly_maps_incoming):
         return current_channel
 
     existing_channel_ids = db.scalars(
@@ -542,6 +570,8 @@ def resolve_synced_channel_target(
         )
         .order_by(YouTubeMatch.last_synced_at.desc().nullslast(), Video.id.desc())
     ).all()
+    preferred_existing_channels: list[Channel] = []
+    fallback_existing_channels: list[Channel] = []
     for existing_channel_id in existing_channel_ids:
         if not existing_channel_id:
             continue
@@ -550,8 +580,23 @@ def resolve_synced_channel_target(
             continue
         if existing_channel.slug == "unknown-channel" or is_generic_channel_name(existing_channel.name):
             continue
-        video.channel = existing_channel
-        return existing_channel
+        if _channel_matches_incoming_identity(
+            db,
+            existing_channel,
+            youtube_channel_id=youtube_channel_id,
+            youtube_channel_title=youtube_channel_title,
+        ):
+            preferred_existing_channels.append(existing_channel)
+            continue
+        if _channel_maps_to_incoming_youtube_id(
+            db,
+            existing_channel,
+            youtube_channel_id=youtube_channel_id,
+        ):
+            fallback_existing_channels.append(existing_channel)
+    if preferred_existing_channels:
+        video.channel = preferred_existing_channels[0]
+        return preferred_existing_channels[0]
 
     if current_channel:
         current_is_generic = current_channel.slug == "unknown-channel" or is_generic_channel_name(current_channel.name)
@@ -559,10 +604,18 @@ def resolve_synced_channel_target(
             current_is_generic
             or len(current_channel_ids) > 1
             or (current_channel_ids and youtube_channel_id not in current_channel_ids)
+            or (current_channel_locked and not current_channel_matches_incoming and not current_channel_cleanly_maps_incoming)
         )
         if not needs_split:
             return current_channel
-        if current_channel_video_count <= 1 and not current_is_generic:
+        if current_channel_video_count <= 1 and (
+            (not current_is_generic)
+            and (
+                not current_channel_locked
+                or current_channel_matches_incoming
+                or current_channel_cleanly_maps_incoming
+            )
+        ):
             return current_channel
 
     desired_name = youtube_channel_title or (current_channel.name if current_channel else None) or "Unknown Channel"
@@ -573,6 +626,10 @@ def resolve_synced_channel_target(
         if not existing_slug_channel_ids or youtube_channel_id in existing_slug_channel_ids:
             video.channel = existing_slug_channel
             return existing_slug_channel
+
+    if fallback_existing_channels:
+        video.channel = fallback_existing_channels[0]
+        return fallback_existing_channels[0]
 
     new_channel = Channel(
         name=desired_name,
@@ -585,11 +642,26 @@ def resolve_synced_channel_target(
     return new_channel
 
 
-def refresh_channel_from_snapshot(channel: Channel, channel_snapshot: YouTubeChannelSnapshot | None) -> None:
+def refresh_channel_from_snapshot(
+    db: Session,
+    channel: Channel,
+    channel_snapshot: YouTubeChannelSnapshot | None,
+) -> None:
     if not channel_snapshot or channel.slug == "unknown-channel":
         return
     if channel_snapshot.title:
-        channel.name = resolve_display_name(channel.name, channel_snapshot.title) or channel_snapshot.title or channel.name
+        if (
+            channel_snapshot.youtube_channel_id
+            and _channel_maps_to_incoming_youtube_id(
+                db,
+                channel,
+                youtube_channel_id=channel_snapshot.youtube_channel_id,
+            )
+            and not channel_names_confidently_match(channel.name, channel_snapshot.title)
+        ):
+            channel.name = channel_snapshot.title
+        else:
+            channel.name = resolve_display_name(channel.name, channel_snapshot.title) or channel_snapshot.title or channel.name
     if channel_snapshot.description:
         channel.description = channel_snapshot.description
     if channel_snapshot.avatar_url:
@@ -641,7 +713,7 @@ def normalize_channel_assignments(db: Session) -> None:
             channel_snapshot.title if channel_snapshot else (video.channel.name if video.channel else None),
         )
         if target_channel:
-            refresh_channel_from_snapshot(target_channel, channel_snapshot)
+            refresh_channel_from_snapshot(db, target_channel, channel_snapshot)
             changed = True
 
     if changed:
@@ -2076,7 +2148,7 @@ def video_requires_refresh(
         prefer_high_res_banners=prefer_high_res_banners,
     ):
         return True
-    if periodic_engagement_refresh_due(db, video, snapshot, match=match):
+    if api_key_available and periodic_engagement_refresh_due(db, video, snapshot, match=match):
         return True
     return False
 
@@ -4000,7 +4072,7 @@ async def apply_sync_item(
         channel_snapshot.fetched_at = datetime.utcnow()
 
         if target_channel:
-            refresh_channel_from_snapshot(target_channel, channel_snapshot)
+            refresh_channel_from_snapshot(db, target_channel, channel_snapshot)
 
         channel_snapshot.fetched_at = datetime.utcnow()
 
@@ -4231,6 +4303,32 @@ async def sync_video(
         )
         existing_match_plausible = _existing_match_snapshot_is_plausible(db, video, refresh_snapshot)
         refresh_rejected = False
+        metadata_gap_fill_needed = bool(
+            refresh_snapshot
+            and (
+                refresh_snapshot.published_at is None
+                or refresh_snapshot.published_at_source not in TRUSTED_PUBLISHED_AT_SOURCES
+                or refresh_snapshot.duration_seconds is None
+                or not refresh_snapshot.thumbnail_url
+            )
+        )
+        channel_art_refresh_needed = channel_art_requires_refresh(
+            db,
+            video,
+            api_key_available=bool(api_key),
+            allow_fallback_art=allow_fallback_art,
+            prefer_high_res_banners=prefer_high_res_banners,
+        )
+        engagement_refresh_due = bool(
+            effective_api_key
+            and refresh_snapshot
+            and periodic_engagement_refresh_due(
+                db,
+                video,
+                refresh_snapshot,
+                match=existing_match,
+            )
+        )
         needs_refresh = force or video_requires_refresh(
             db,
             video,
@@ -4256,6 +4354,65 @@ async def sync_video(
                 raise
             db.refresh(existing_match)
             return existing_match
+        if (
+            not force
+            and engagement_refresh_due
+            and existing_match_plausible
+            and not metadata_gap_fill_needed
+            and not channel_art_refresh_needed
+        ):
+            if status_callback:
+                status_callback(phase="refresh", source="youtube-api", youtube_video_id=existing_match.youtube_video_id)
+            try:
+                refresh_item = await fetch_video_details_by_id(
+                    client,
+                    effective_api_key,
+                    existing_match.youtube_video_id,
+                    requests_per_second,
+                )
+            except YouTubeSyncError as exc:
+                logger.warning(
+                    "Sync engagement refresh skipped video_id=%s youtube_video_id=%s error=%s",
+                    video.id,
+                    existing_match.youtube_video_id,
+                    exc,
+                )
+                api_error = exc
+                if exc.fatal:
+                    effective_api_key = None
+            else:
+                if refresh_item:
+                    refresh_score, refresh_candidate_reasons = score_match(video, refresh_item)
+                    if _candidate_meets_refresh_by_id_threshold(
+                        refresh_score,
+                        refresh_candidate_reasons,
+                        existing_match_plausible=existing_match_plausible,
+                    ):
+                        refresh_reasons = list(
+                            dict.fromkeys((existing_match.reasons or []) + refresh_candidate_reasons + ["engagement-refresh"])
+                        )
+                        return await apply_sync_item(
+                            db,
+                            video,
+                            refresh_item,
+                            comment_limit=comment_limit,
+                            max_replies_per_comment=max_replies_per_comment,
+                            requests_per_second=requests_per_second,
+                            client=client,
+                            api_key=effective_api_key,
+                            channel_cache=channel_cache,
+                            playlist_cache=playlist_cache,
+                            allow_fallback_art=allow_fallback_art,
+                            prefer_high_res_banners=prefer_high_res_banners,
+                            confidence=max(existing_match.confidence or 0.0, refresh_score),
+                            reasons=refresh_reasons,
+                            status="matched",
+                        )
+            if not force and existing_match_plausible:
+                existing_match.last_synced_at = datetime.utcnow()
+                db.commit()
+                db.refresh(existing_match)
+                return existing_match
         if not force:
             if status_callback:
                 status_callback(phase="refresh", source="watch-page", youtube_video_id=existing_match.youtube_video_id)
@@ -4300,16 +4457,7 @@ async def sync_video(
                     refresh_score,
                 )
                 refresh_rejected = True
-            needs_api_gap_fill = bool(
-                refresh_snapshot
-                and (
-                    refresh_snapshot.published_at is None
-                    or refresh_snapshot.published_at_source not in TRUSTED_PUBLISHED_AT_SOURCES
-                    or refresh_snapshot.duration_seconds is None
-                    or not refresh_snapshot.thumbnail_url
-                )
-            )
-            if not refresh_rejected and existing_match_plausible and not (effective_api_key and needs_api_gap_fill):
+            if not refresh_rejected and existing_match_plausible and not (effective_api_key and metadata_gap_fill_needed):
                 existing_match.last_synced_at = datetime.utcnow()
                 db.commit()
                 db.refresh(existing_match)
