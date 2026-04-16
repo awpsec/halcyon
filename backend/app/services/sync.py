@@ -144,6 +144,31 @@ LOW_SIGNAL_TITLE_TOKENS = {
     "your",
 }
 YTDLP_FRAGMENT_PATTERN = re.compile(r"\.f\d{2,5}$", re.IGNORECASE)
+CHANNEL_AUTHORITY_NEUTRAL_TOKENS = {
+    "channel",
+    "official",
+    "the",
+    "youtube",
+}
+CHANNEL_AUTHORITY_OPTIONAL_TOKENS = {
+    "tv",
+}
+CHANNEL_AUTHORITY_REJECT_TOKENS = {
+    "archive",
+    "archives",
+    "clip",
+    "clips",
+    "fan",
+    "highlights",
+    "highlight",
+    "live",
+    "short",
+    "shorts",
+    "stream",
+    "streams",
+    "vod",
+    "vods",
+}
 
 try:
     YOUTUBE_API_QUOTA_TZ = ZoneInfo("America/Los_Angeles")
@@ -1400,15 +1425,15 @@ def score_match(video: Video, item: dict, *, channel_hints: list[str] | None = N
         reasons.append("title-partial-longform")
 
     if video.channel and not is_generic_channel_name(video.channel.name):
-        resolved_name = resolve_display_name(video.channel.name, item.get("snippet", {}).get("channelTitle"))
-        if channel and resolved_name == item.get("snippet", {}).get("channelTitle"):
+        candidate_channel_title = item.get("snippet", {}).get("channelTitle")
+        if channel and channel_names_confidently_match(video.channel.name, candidate_channel_title):
             score += 0.24
             reasons.append("channel")
         elif channel:
             score -= 0.18
             reasons.append("channel-mismatch")
     elif channel_hints:
-        if any(resolve_display_name(hint, item.get("snippet", {}).get("channelTitle")) == item.get("snippet", {}).get("channelTitle") for hint in channel_hints):
+        if any(channel_names_confidently_match(hint, item.get("snippet", {}).get("channelTitle")) for hint in channel_hints):
             score += 0.24
             reasons.append("channel-hint")
     duration = item.get("_waytube_duration_seconds")
@@ -1720,6 +1745,47 @@ def youtube_channel_title_hint(db: Session, youtube_channel_id: str | None) -> s
     return None
 
 
+def channel_names_confidently_match(local_name: str | None, synced_name: str | None) -> bool:
+    if not local_name or not synced_name:
+        return False
+    if is_generic_channel_name(local_name) or is_generic_channel_name(synced_name):
+        return False
+
+    local_norm = normalize_text(local_name)
+    synced_norm = normalize_text(synced_name)
+    if not local_norm or not synced_norm:
+        return False
+    if local_norm == synced_norm:
+        return True
+
+    local_tokens = {
+        token
+        for token in tokenize_text(local_name)
+        if token not in CHANNEL_AUTHORITY_NEUTRAL_TOKENS
+    }
+    synced_tokens = {
+        token
+        for token in tokenize_text(synced_name)
+        if token not in CHANNEL_AUTHORITY_NEUTRAL_TOKENS
+    }
+    if not local_tokens or not synced_tokens:
+        return False
+    if local_tokens == synced_tokens:
+        return True
+
+    extra_in_synced = synced_tokens - local_tokens
+    extra_in_local = local_tokens - synced_tokens
+    if extra_in_synced & CHANNEL_AUTHORITY_REJECT_TOKENS:
+        return False
+    if extra_in_local & CHANNEL_AUTHORITY_REJECT_TOKENS:
+        return False
+
+    return (
+        extra_in_synced <= CHANNEL_AUTHORITY_OPTIONAL_TOKENS
+        and extra_in_local <= CHANNEL_AUTHORITY_OPTIONAL_TOKENS
+    )
+
+
 def youtube_channel_matches_local_channel(
     db: Session,
     *,
@@ -1731,7 +1797,7 @@ def youtube_channel_matches_local_channel(
     title_hint = youtube_channel_title_hint(db, youtube_channel_id)
     if not title_hint:
         return False
-    return resolve_display_name(local_channel.name, title_hint) == title_hint
+    return channel_names_confidently_match(local_channel.name, title_hint)
 
 
 def video_requires_discovery(video: Video) -> bool:
@@ -2744,7 +2810,7 @@ def _live_candidate_matches_monitored_channel(
 
     candidate_channel_title = clean_display_title(snippet.get("channelTitle") or "")
     if candidate_channel_title and channel_name:
-        return resolve_display_name(channel_name, candidate_channel_title) == candidate_channel_title
+        return channel_names_confidently_match(channel_name, candidate_channel_title)
     return False
 
 
@@ -4144,7 +4210,6 @@ async def sync_video(
 
     channel_ids: list[str] = []
     name_verified_channel_ids: list[str] = []
-    name_verified_channel_ids: list[str] = []
     use_local_channel_bucket = bool(
         video.channel_id
         and video.channel
@@ -4178,8 +4243,7 @@ async def sync_video(
             try:
                 for candidate in await fetch_channel_candidates(client, effective_api_key, video.channel.name, requests_per_second):
                     snippet = candidate.get("snippet", {})
-                    resolved_name = resolve_display_name(video.channel.name, snippet.get("channelTitle"))
-                    if resolved_name == snippet.get("channelTitle") and candidate.get("id", {}).get("channelId"):
+                    if channel_names_confidently_match(video.channel.name, snippet.get("channelTitle")) and candidate.get("id", {}).get("channelId"):
                         youtube_channel_id = candidate["id"]["channelId"]
                         deduped_channel_ids.append(youtube_channel_id)
                         if youtube_channel_id not in name_verified_channel_ids:
@@ -4195,7 +4259,7 @@ async def sync_video(
                 for channel_snapshot in channel_cache.values():
                     title = channel_snapshot.get("snippet", {}).get("title") if channel_snapshot else None
                     channel_id = channel_snapshot.get("id") if channel_snapshot else None
-                    if title and channel_id and resolve_display_name(video.channel.name, title) == title:
+                    if title and channel_id and channel_names_confidently_match(video.channel.name, title):
                         deduped_channel_ids.append(channel_id)
                         if channel_id not in name_verified_channel_ids:
                             name_verified_channel_ids.append(channel_id)
@@ -4455,6 +4519,7 @@ async def send_video_to_review(
     rejected_video_ids = normalized_rejected_video_ids(existing_match)
     api_error: YouTubeSyncError | None = None
     channel_ids: list[str] = []
+    name_verified_channel_ids: list[str] = []
     use_local_channel_bucket = bool(
         video.channel_id
         and video.channel
@@ -4492,8 +4557,7 @@ async def send_video_to_review(
             try:
                 for candidate in await fetch_channel_candidates(client, effective_api_key, video.channel.name, requests_per_second):
                     snippet = candidate.get("snippet", {})
-                    resolved_name = resolve_display_name(video.channel.name, snippet.get("channelTitle"))
-                    if resolved_name == snippet.get("channelTitle") and candidate.get("id", {}).get("channelId"):
+                    if channel_names_confidently_match(video.channel.name, snippet.get("channelTitle")) and candidate.get("id", {}).get("channelId"):
                         youtube_channel_id = candidate["id"]["channelId"]
                         deduped_channel_ids.append(youtube_channel_id)
                         if youtube_channel_id not in name_verified_channel_ids:
@@ -4509,7 +4573,7 @@ async def send_video_to_review(
                 for channel_snapshot in channel_cache.values():
                     title = channel_snapshot.get("snippet", {}).get("title") if channel_snapshot else None
                     channel_id = channel_snapshot.get("id") if channel_snapshot else None
-                    if title and channel_id and resolve_display_name(video.channel.name, title) == title:
+                    if title and channel_id and channel_names_confidently_match(video.channel.name, title):
                         deduped_channel_ids.append(channel_id)
                         if channel_id not in name_verified_channel_ids:
                             name_verified_channel_ids.append(channel_id)

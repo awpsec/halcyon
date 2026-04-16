@@ -470,6 +470,50 @@ def test_fetch_live_stream_candidates_web_accepts_matching_channel_title_when_id
     )
 
 
+def test_fetch_live_stream_candidates_web_rejects_variant_channel_title_when_id_is_sparse(monkeypatch):
+    class DummyResponse:
+        def __init__(self, url: str):
+            self.text = ""
+            self.is_error = False
+            self.url = url
+
+    async def fake_throttled_get(*args, **kwargs):
+        return DummyResponse("https://www.youtube.com/watch?v=abc123def45")
+
+    async def fake_fetch_watch_page_candidate(*args, **kwargs):
+        return {
+            "id": "abc123def45",
+            "snippet": {
+                "title": "Current stream",
+                "channelTitle": "PGL CS2",
+                "channelId": None,
+                "description": None,
+                "publishedAt": None,
+                "thumbnails": {},
+            },
+            "statistics": {},
+            "_waytube_duration_seconds": None,
+            "_waytube_source": "watch-page",
+        }
+
+    monkeypatch.setattr(sync_service, "throttled_get", fake_throttled_get)
+    monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_live_stream_candidates_web(
+                client,
+                "channel-pgl",
+                3,
+                channel_name="PGL",
+            )
+
+    checked, items = asyncio.run(run())
+
+    assert checked is True
+    assert items == []
+
+
 def test_fetch_fallback_candidates_stops_after_first_non_empty_query_batch(monkeypatch):
     seen_google_batches: list[list[str]] = []
     seen_web_id_batches: list[list[str]] = []
@@ -2329,6 +2373,53 @@ def test_matched_youtube_channels_by_local_channel_skips_name_mismatches(tmp_pat
                     youtube_channel_id="channel-esl",
                     status="matched",
                     confidence=0.9,
+                )
+            )
+        db.commit()
+
+        assert sync_service.matched_youtube_channels_by_local_channel(db) == {}
+
+
+def test_channel_names_confidently_match_rejects_clip_variants():
+    assert sync_service.channel_names_confidently_match("Austin Evans", "Austin Evans") is True
+    assert sync_service.channel_names_confidently_match("Asmongold TV", "Asmongold") is True
+    assert sync_service.channel_names_confidently_match("Asmongold", "Asmongold TV") is True
+    assert sync_service.channel_names_confidently_match("Austin Evans", "Austin Evans Clips") is False
+    assert sync_service.channel_names_confidently_match("ohnePixel", "ohnePixel Clips") is False
+    assert sync_service.channel_names_confidently_match("PGL", "PGL CS2") is False
+
+
+def test_matched_youtube_channels_by_local_channel_skips_clip_variants(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Austin Evans", slug="austin-evans")
+        db.add(channel)
+        db.flush()
+
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-austin-clips",
+                title="Austin Evans Clips",
+            )
+        )
+
+        for index in range(2):
+            video = Video(
+                title=f"Austin upload {index}",
+                slug=f"austin-upload-{index}",
+                channel_id=channel.id,
+                created_at=datetime.utcnow() - timedelta(minutes=index),
+                duration_seconds=600,
+                is_available=True,
+            )
+            db.add(video)
+            db.flush()
+            db.add(
+                YouTubeMatch(
+                    video_id=video.id,
+                    youtube_video_id=f"wrong-clips-{index}",
+                    youtube_channel_id="channel-austin-clips",
+                    status="matched",
+                    confidence=0.92,
                 )
             )
         db.commit()
