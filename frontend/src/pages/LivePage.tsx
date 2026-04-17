@@ -184,7 +184,7 @@ export function LivePage() {
         </section>
       ) : (
         <p className="muted-copy live-page-status">
-          Nothing is live right now from the channels Halcyon can match.
+          Nothing is live right now from the channels halcyon can match.
         </p>
       )}
     </div>

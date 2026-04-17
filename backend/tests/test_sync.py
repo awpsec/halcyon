@@ -134,7 +134,7 @@ def test_resolve_live_playback_uses_cookies_only_for_blocked_embeds(tmp_path: Pa
 
     assert result["playback_mode"] == "direct"
     assert result["playback_url"] == "https://example.com/live.m3u8"
-    assert result["embed_blocked_reason"] == "This live stream needs an age-verified YouTube session."
+    assert result["embed_blocked_reason"] is None
 
 
 def test_resolve_live_playback_does_not_switch_when_no_cookies(tmp_path: Path, monkeypatch):
@@ -167,6 +167,31 @@ def test_resolve_live_playback_does_not_switch_when_no_cookies(tmp_path: Path, m
     assert result["playback_mode"] == "youtube-embed"
     assert result["playback_url"] is None
     assert result["embed_blocked_reason"] == "This live stream needs an age-verified YouTube session."
+
+
+def test_pick_live_playback_url_prefers_requested_downloads():
+    info = {
+        "formats": [
+            {
+                "url": "https://example.com/fallback.mp4",
+                "protocol": "https",
+                "height": 720,
+                "vcodec": "avc1",
+                "acodec": "mp4a",
+            }
+        ],
+        "requested_downloads": [
+            {
+                "manifest_url": "https://example.com/live.m3u8",
+                "protocol": "m3u8_native",
+                "height": 1080,
+                "vcodec": "avc1",
+                "acodec": "mp4a",
+            }
+        ],
+    }
+
+    assert routes_service._pick_live_playback_url(info) == "https://example.com/live.m3u8"
 
 
 def test_infer_channel_ids_from_neighbor_titles_rejects_low_signal_overlap(tmp_path: Path):

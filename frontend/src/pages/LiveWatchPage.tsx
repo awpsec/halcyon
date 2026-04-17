@@ -273,7 +273,7 @@ export function LiveWatchPage({ preferences }: LiveWatchPageProps) {
                     >
                       <p>{data.embed_blocked_reason}</p>
                       <p className="muted-copy">
-                        Upload a YouTube cookies file in Settings, or re-export it after confirming your age on youtube.com, to let Halcyon try authenticated live playback for blocked streams.
+                        Upload a YouTube cookies file in Settings, or re-export it after confirming your age on youtube.com, to let halcyon try authenticated live playback for blocked streams.
                       </p>
                       <a
                         className="ghost-button"

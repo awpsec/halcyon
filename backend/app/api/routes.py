@@ -554,36 +554,58 @@ async def _fetch_live_embed_page_html(youtube_video_id: str) -> str | None:
     return response.text
 
 
+def _score_live_playback_candidate(candidate: dict[str, Any]) -> tuple[float, str | None]:
+    url = candidate.get("manifest_url") or candidate.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return -1.0, None
+    protocol = str(candidate.get("protocol") or "").lower()
+    score = 0.0
+    if "m3u8" in protocol or ".m3u8" in url.lower():
+        score += 10_000
+    if candidate.get("vcodec") not in {None, "", "none"}:
+        score += 500
+    if candidate.get("acodec") not in {None, "", "none"}:
+        score += 250
+    try:
+        score += float(candidate.get("height") or 0)
+    except (TypeError, ValueError):
+        pass
+    try:
+        score += float(candidate.get("tbr") or 0) / 10.0
+    except (TypeError, ValueError):
+        pass
+    return score, url
+
+
 def _pick_live_playback_url(info: dict[str, Any]) -> str | None:
     best_url: str | None = None
     best_score = -1.0
-    for fmt in info.get("formats") or []:
+    candidates: list[dict[str, Any]] = []
+    for key in ("requested_downloads", "requested_formats", "formats"):
+        value = info.get(key)
+        if isinstance(value, list):
+            candidates.extend(item for item in value if isinstance(item, dict))
+        elif isinstance(value, dict):
+            candidates.append(value)
+    candidates.append(info)
+    for fmt in candidates:
         if not isinstance(fmt, dict):
             continue
-        url = fmt.get("manifest_url") or fmt.get("url")
-        if not isinstance(url, str) or not url.strip():
+        score, url = _score_live_playback_candidate(fmt)
+        if not url:
             continue
-        protocol = str(fmt.get("protocol") or "").lower()
-        score = 0.0
-        if "m3u8" in protocol or ".m3u8" in url.lower():
-            score += 10_000
-        if fmt.get("vcodec") not in {None, "", "none"}:
-            score += 500
-        if fmt.get("acodec") not in {None, "", "none"}:
-            score += 250
-        try:
-            score += float(fmt.get("height") or 0)
-        except (TypeError, ValueError):
-            pass
-        try:
-            score += float(fmt.get("tbr") or 0) / 10.0
-        except (TypeError, ValueError):
-            pass
         if score > best_score:
             best_score = score
             best_url = url
     if best_url:
         return best_url
+    entries = info.get("entries")
+    if isinstance(entries, list):
+        for entry in entries:
+            if isinstance(entry, dict):
+                nested_url = _pick_live_playback_url(entry)
+                if nested_url:
+                    return nested_url
     for key in ("manifest_url", "url"):
         direct = info.get(key)
         if isinstance(direct, str) and direct.strip():
@@ -598,23 +620,66 @@ def _extract_live_playback_url_sync(youtube_video_id: str, cookie_path: Path) ->
         logger.warning("Live playback fallback unavailable because yt-dlp is missing: %s", exc)
         return None
     watch_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
-    options = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "cookiefile": str(cookie_path),
-        "noplaylist": True,
-        "format": "best",
-    }
-    try:
-        with YoutubeDL(options) as ydl:
-            info = ydl.extract_info(watch_url, download=False)
-    except Exception as exc:
-        logger.warning("Live playback fallback extraction failed for %s: %s", youtube_video_id, exc)
-        return None
-    if not isinstance(info, dict):
-        return None
-    return _pick_live_playback_url(info)
+    attempt_options = [
+        {
+            "label": "authenticated-live",
+            "options": {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "cookiefile": str(cookie_path),
+                "noplaylist": True,
+                "format": "best/bestvideo+bestaudio",
+                "http_headers": {
+                    **REQUEST_HEADERS,
+                    "Referer": "https://www.youtube.com/",
+                    "Origin": "https://www.youtube.com",
+                },
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["web", "ios", "tv_embedded", "web_embedded"],
+                    }
+                },
+            },
+        },
+        {
+            "label": "baseline",
+            "options": {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "cookiefile": str(cookie_path),
+                "noplaylist": True,
+                "format": "best",
+            },
+        },
+    ]
+    last_error: str | None = None
+    for attempt in attempt_options:
+        try:
+            with YoutubeDL(attempt["options"]) as ydl:
+                info = ydl.extract_info(watch_url, download=False)
+        except Exception as exc:
+            last_error = str(exc)
+            logger.warning(
+                "Live playback fallback extraction failed for %s attempt=%s error=%s",
+                youtube_video_id,
+                attempt["label"],
+                exc,
+            )
+            continue
+        if not isinstance(info, dict):
+            continue
+        playback_url = _pick_live_playback_url(info)
+        if playback_url:
+            return playback_url
+    if last_error:
+        logger.warning(
+            "Live playback fallback exhausted for %s last_error=%s",
+            youtube_video_id,
+            last_error,
+        )
+    return None
 
 
 async def _resolve_live_playback(youtube_video_id: str) -> dict[str, Any]:
@@ -652,6 +717,7 @@ async def _resolve_live_playback(youtube_video_id: str) -> dict[str, Any]:
     if playback_url:
         payload["playback_mode"] = "direct"
         payload["playback_url"] = playback_url
+        payload["embed_blocked_reason"] = None
         logger.info(
             "Live playback direct fallback enabled video_id=%s",
             youtube_video_id,
@@ -660,6 +726,9 @@ async def _resolve_live_playback(youtube_video_id: str) -> dict[str, Any]:
         logger.warning(
             "Live playback direct fallback failed video_id=%s cookies_configured=true",
             youtube_video_id,
+        )
+        payload["embed_blocked_reason"] = (
+            "YouTube blocked the embedded player, and the uploaded cookies did not produce an authenticated live playback session."
         )
     return payload
 
