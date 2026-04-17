@@ -93,7 +93,14 @@ async def background_auto_sync_once(settings: Settings) -> None:
         sync_interval = max(configured_interval, 900)
         if sync_settings.last_library_sync_at and datetime.utcnow() - sync_settings.last_library_sync_at < timedelta(seconds=sync_interval):
             return
-        await sync_scope(db, scope="library", target_id=None, api_key=api_key, quiet_if_idle=True)
+        await sync_scope(
+            db,
+            scope="library",
+            target_id=None,
+            api_key=api_key,
+            allow_api_discovery=False,
+            quiet_if_idle=True,
+        )
 
 
 def background_retention_once() -> None:

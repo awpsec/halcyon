@@ -1848,6 +1848,23 @@ def unmatched_api_discovery_allowed(
     return datetime.utcnow() - match.last_synced_at >= UNMATCHED_API_DISCOVERY_RETRY_AFTER
 
 
+def unmatched_retry_due(
+    match: YouTubeMatch | None,
+    *,
+    force: bool,
+    allow_api_discovery: bool,
+) -> bool:
+    if force:
+        return True
+    if allow_api_discovery:
+        return True
+    if not match or match.status == "matched":
+        return True
+    if not match.last_synced_at:
+        return True
+    return datetime.utcnow() - match.last_synced_at >= UNMATCHED_API_DISCOVERY_RETRY_AFTER
+
+
 def _existing_match_snapshot_is_plausible(
     db: Session,
     video: Video,
@@ -5102,6 +5119,12 @@ async def sync_scope(
             candidates: list[tuple[int, float, Video]] = []
             for candidate_video in source_videos:
                 needs_discovery = video_requires_discovery(candidate_video)
+                if needs_discovery and not unmatched_retry_due(
+                    candidate_video.youtube_match,
+                    force=force,
+                    allow_api_discovery=allow_api_discovery,
+                ):
+                    continue
                 needs_organization = video_requires_organization(db, candidate_video)
                 needs_refresh = video_requires_refresh(
                     db,
@@ -5132,6 +5155,12 @@ async def sync_scope(
                     video.channel and (video.channel.slug == "unknown-channel" or is_generic_channel_name(video.channel.name))
                 )
                 needs_discovery = video_requires_discovery(video) or needs_generic_channel
+                if needs_discovery and not unmatched_retry_due(
+                    video.youtube_match,
+                    force=force,
+                    allow_api_discovery=allow_api_discovery,
+                ):
+                    continue
                 needs_organization = video_requires_organization(db, video)
                 needs_channel_art = channel_art_requires_refresh(
                     db,
