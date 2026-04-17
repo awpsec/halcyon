@@ -99,7 +99,10 @@ def test_resolve_live_playback_uses_cookies_only_for_blocked_embeds(tmp_path: Pa
     cookie_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
     monkeypatch.setattr(routes_service.settings, "config_dir", tmp_path)
 
-    async def fake_fetch(_youtube_video_id: str):
+    async def fake_watch_fetch(_youtube_video_id: str):
+        return "<html><body>watch page is fine</body></html>"
+
+    async def fake_embed_fetch(_youtube_video_id: str):
         return """
         <html>
           <body>
@@ -115,7 +118,8 @@ def test_resolve_live_playback_uses_cookies_only_for_blocked_embeds(tmp_path: Pa
         </html>
         """
 
-    monkeypatch.setattr(routes_service, "_fetch_live_watch_page_html", fake_fetch)
+    monkeypatch.setattr(routes_service, "_fetch_live_watch_page_html", fake_watch_fetch)
+    monkeypatch.setattr(routes_service, "_fetch_live_embed_page_html", fake_embed_fetch)
     monkeypatch.setattr(
         routes_service,
         "_extract_live_playback_url_sync",
@@ -136,7 +140,10 @@ def test_resolve_live_playback_uses_cookies_only_for_blocked_embeds(tmp_path: Pa
 def test_resolve_live_playback_does_not_switch_when_no_cookies(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(routes_service.settings, "config_dir", tmp_path)
 
-    async def fake_fetch(_youtube_video_id: str):
+    async def fake_watch_fetch(_youtube_video_id: str):
+        return "<html><body>watch page is fine</body></html>"
+
+    async def fake_embed_fetch(_youtube_video_id: str):
         return """
         <html>
           <body>
@@ -152,7 +159,8 @@ def test_resolve_live_playback_does_not_switch_when_no_cookies(tmp_path: Path, m
         </html>
         """
 
-    monkeypatch.setattr(routes_service, "_fetch_live_watch_page_html", fake_fetch)
+    monkeypatch.setattr(routes_service, "_fetch_live_watch_page_html", fake_watch_fetch)
+    monkeypatch.setattr(routes_service, "_fetch_live_embed_page_html", fake_embed_fetch)
 
     result = asyncio.run(routes_service._resolve_live_playback("abc123def45"))
 

@@ -536,6 +536,24 @@ async def _fetch_live_watch_page_html(youtube_video_id: str) -> str | None:
     return response.text
 
 
+async def _fetch_live_embed_page_html(youtube_video_id: str) -> str | None:
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            headers=REQUEST_HEADERS,
+            timeout=10.0,
+        ) as client:
+            response = await client.get(
+                f"https://www.youtube.com/embed/{youtube_video_id}",
+                params={"hl": "en", "playsinline": "1", "rel": "0"},
+            )
+    except httpx.HTTPError:
+        return None
+    if response.is_error:
+        return None
+    return response.text
+
+
 def _pick_live_playback_url(info: dict[str, Any]) -> str | None:
     best_url: str | None = None
     best_score = -1.0
@@ -585,6 +603,7 @@ def _extract_live_playback_url_sync(youtube_video_id: str, cookie_path: Path) ->
         "no_warnings": True,
         "skip_download": True,
         "cookiefile": str(cookie_path),
+        "noplaylist": True,
         "format": "best",
     }
     try:
@@ -599,8 +618,13 @@ def _extract_live_playback_url_sync(youtube_video_id: str, cookie_path: Path) ->
 
 
 async def _resolve_live_playback(youtube_video_id: str) -> dict[str, Any]:
-    html = await _fetch_live_watch_page_html(youtube_video_id)
-    embed_blocked_reason = _live_embed_blocked_reason_from_html(html)
+    watch_html, embed_html = await asyncio.gather(
+        _fetch_live_watch_page_html(youtube_video_id),
+        _fetch_live_embed_page_html(youtube_video_id),
+    )
+    embed_blocked_reason = _live_embed_blocked_reason_from_html(embed_html)
+    if not embed_blocked_reason:
+        embed_blocked_reason = _live_embed_blocked_reason_from_html(watch_html)
     payload: dict[str, Any] = {
         "playback_mode": "youtube-embed",
         "playback_url": None,
@@ -608,8 +632,17 @@ async def _resolve_live_playback(youtube_video_id: str) -> dict[str, Any]:
     }
     if not embed_blocked_reason:
         return payload
+    logger.info(
+        "Live playback embed blocked video_id=%s reason=%s",
+        youtube_video_id,
+        embed_blocked_reason,
+    )
     cookie_path = _youtube_cookies_path()
     if not cookie_path.is_file():
+        logger.info(
+            "Live playback embed blocked without cookies video_id=%s",
+            youtube_video_id,
+        )
         return payload
     playback_url = await asyncio.to_thread(
         _extract_live_playback_url_sync,
@@ -619,6 +652,15 @@ async def _resolve_live_playback(youtube_video_id: str) -> dict[str, Any]:
     if playback_url:
         payload["playback_mode"] = "direct"
         payload["playback_url"] = playback_url
+        logger.info(
+            "Live playback direct fallback enabled video_id=%s",
+            youtube_video_id,
+        )
+    else:
+        logger.warning(
+            "Live playback direct fallback failed video_id=%s cookies_configured=true",
+            youtube_video_id,
+        )
     return payload
 
 

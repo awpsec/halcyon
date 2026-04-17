@@ -40,7 +40,7 @@ export function AdminSetupPage({ profile, onComplete }: Props) {
       return;
     }
     const body = [
-      "halcyon admin recovery phrase",
+      "Halcyon admin recovery phrase",
       "",
       `username: ${profile.name}`,
       `recovery phrase: ${recoveryPhrase.join(" ")}`,

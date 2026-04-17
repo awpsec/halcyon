@@ -1610,8 +1610,8 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
         "info",
         "Update command copied",
         isManualUpdateCommand
-          ? `From the halcyon root, run "${updateCommand}".`
-          : `Run "${updateCommand}" in a terminal on the machine hosting halcyon.`,
+          ? `From the Halcyon root, run "${updateCommand}".`
+          : `Run "${updateCommand}" in a terminal on the machine hosting Halcyon.`,
       );
     } catch (error) {
       pushToast("error", "Unable to copy update command", error instanceof Error ? error.message : "Unknown clipboard error");
@@ -1888,7 +1888,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                           />
                         </div>
                         <div className="library-storage-legend">
-                          <span><i className="library-storage-dot is-halcyon" />halcyon {formatBytes(libraryStorageSegments.libraryBytes)}</span>
+                          <span><i className="library-storage-dot is-halcyon" />Halcyon {formatBytes(libraryStorageSegments.libraryBytes)}</span>
                           <span><i className="library-storage-dot is-other" />Other {formatBytes(libraryStorageSegments.otherBytes)}</span>
                           <span><i className="library-storage-dot is-free" />Free {formatBytes(libraryStorageSegments.availableBytes)}</span>
                         </div>
@@ -2059,8 +2059,8 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                   </button>
                 </div>
                 <label className="settings-field settings-subfield-block">
-                  <span className={settingLabelClass("How often halcyon polls selected folders for new, changed, or removed files. Lower values increase disk activity. Default is 30 seconds.")} data-tooltip="How often halcyon polls selected folders for new, changed, or removed files. Lower values increase disk activity. Default is 30 seconds." tabIndex={0}>
-                    halcyon scan interval
+                  <span className={settingLabelClass("How often Halcyon polls selected folders for new, changed, or removed files. Lower values increase disk activity. Default is 30 seconds.")} data-tooltip="How often Halcyon polls selected folders for new, changed, or removed files. Lower values increase disk activity. Default is 30 seconds." tabIndex={0}>
+                    Halcyon scan interval
                   </span>
                   <input
                     type="number"
@@ -2286,9 +2286,15 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                 ) : null}
                 <div className="settings-field-hint-row">
                   <span className="settings-field-hint">
-                    {syncState.data?.youtube_cookies_configured
-                      ? `YouTube live cookies are configured${youtubeCookiesUpdatedLabel ? ` • updated ${youtubeCookiesUpdatedLabel}` : ""}. Halcyon only uses them when YouTube blocks an embedded livestream.`
-                      : "Optional live-only fallback. Upload YouTube cookies to let Halcyon try authenticated playback when YouTube blocks an embedded livestream."}
+                    {syncState.data?.youtube_cookies_configured ? (
+                      <>
+                        YouTube live cookies are configured
+                        {youtubeCookiesUpdatedLabel ? <> • updated <strong>{youtubeCookiesUpdatedLabel}</strong></> : null}
+                        . Halcyon only uses them when YouTube blocks an embedded livestream.
+                      </>
+                    ) : (
+                      "Optional live-only fallback. Upload YouTube cookies to let Halcyon try authenticated playback when YouTube blocks an embedded livestream."
+                    )}
                   </span>
                   <div className="settings-actions-row">
                     <button
@@ -2329,7 +2335,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                   <div className="settings-quota-meter-meta">
                     <span>
                       {youtubeQuotaSummary.usedUnits.toLocaleString()} used today --{" "}
-                      {youtubeQuotaSummary.estimated ? "estimated from halcyon requests. Resets daily." : "live quota usage."}
+                      {youtubeQuotaSummary.estimated ? "estimated from Halcyon requests. Resets daily." : "live quota usage."}
                     </span>
                   </div>
                 </div>
@@ -3112,8 +3118,8 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
           <div className="update-modal">
             <p className="update-modal-copy">
               {updateStatus?.update_available
-                ? "A newer halcyon build is available for this server."
-                : "halcyon is already on the newest known build."}
+                ? "A newer Halcyon build is available for this server."
+                : "Halcyon is already on the newest known build."}
             </p>
             <div className="update-modal-status">
               <div>
@@ -3131,13 +3137,13 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
               <p className="update-modal-note">
                 {isManualUpdateCommand ? (
                   <>
-                    From the halcyon root, run <code>{updateCommand}</code>.
+                    From the Halcyon root, run <code>{updateCommand}</code>.
                     {" "}This install updates from the checked-out source, not a prebuilt app image.
                     {" "}If you want simpler updates later, run <code>./halcyon status</code> once to bootstrap the reusable <code>halcyon</code> command.
                   </>
                 ) : (
                   <>
-                    Run <code>{updateCommand}</code> on the machine hosting halcyon.
+                    Run <code>{updateCommand}</code> on the machine hosting Halcyon.
                     {" "}The app does not control Docker directly from inside the container.
                   </>
                 )}
