@@ -3430,6 +3430,7 @@ async def fetch_live_stream_candidates_web(
 
     for url in (
         f"https://www.youtube.com/channel/{youtube_channel_id}/live",
+        f"https://www.youtube.com/channel/{youtube_channel_id}/featured",
         f"https://www.youtube.com/channel/{youtube_channel_id}/streams",
     ):
         response = await throttled_get(
@@ -3594,7 +3595,7 @@ async def fetch_live_stream_candidates_feed(
     *,
     local_channel_id: int | None = None,
     channel_name: str | None = None,
-    limit: int = 6,
+    limit: int = 15,
 ) -> tuple[bool, list[dict]]:
     response = await throttled_get(
         client,

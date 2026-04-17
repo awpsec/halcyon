@@ -19,7 +19,7 @@ from app.services.subtitles import (
 )
 from app.services.sync import normalize_channel_assignments, reconcile_sync_job, refresh_live_streams, sync_scope
 
-LIVE_SYNC_MIN_INTERVAL_SECONDS = 1200
+LIVE_SYNC_MIN_INTERVAL_SECONDS = 120
 BACKGROUND_ORPHAN_SYNC_BATCH_SIZE = 8
 BACKGROUND_LIBRARY_SYNC_BATCH_SIZE = 6
 logger = get_logger()
