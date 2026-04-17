@@ -5026,6 +5026,80 @@ def test_refresh_live_streams_resolves_monitored_channel_via_web_search_without_
         assert rows[0].is_live is True
 
 
+def test_refresh_live_streams_uses_dominant_matched_channel_for_monitored_alias_name(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="ESLCS", slug="eslcs")
+        db.add(channel)
+        db.flush()
+        db.add(SyncSettings(live_tab_enabled=True))
+        db.add(LiveMonitoredChannel(channel_id=channel.id))
+
+        video = Video(
+            title="Alias channel video",
+            slug="alias-channel-video",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=1200,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="matched-live-source",
+                youtube_channel_id="channel-esl",
+                status="matched",
+                confidence=0.95,
+                reasons=["exact-title"],
+            )
+        )
+        db.commit()
+
+        async def fake_resolve_youtube_channel_ids_web(*args, **kwargs):
+            return []
+
+        async def fake_fetch_live_stream_candidates_web(*args, **kwargs):
+            return (
+                True,
+                [
+                    {
+                        "id": "live-web-alias",
+                        "snippet": {
+                            "title": "Quarterfinals live",
+                            "channelTitle": "ESL Counter-Strike",
+                            "channelId": "channel-esl",
+                            "thumbnails": {},
+                            "liveBroadcastContent": "live",
+                        },
+                        "statistics": {},
+                        "liveStreamingDetails": {
+                            "scheduledStartTime": None,
+                            "actualStartTime": "2026-04-17T17:00:00+00:00",
+                            "actualEndTime": None,
+                        },
+                        "_waytube_live_web": True,
+                        "_waytube_local_channel_id": channel.id,
+                        "_waytube_checked_youtube_channel_id": "channel-esl",
+                    }
+                ],
+            )
+
+        monkeypatch.setattr(sync_service, "resolve_youtube_channel_ids_web", fake_resolve_youtube_channel_ids_web)
+        monkeypatch.setattr(sync_service, "fetch_live_stream_candidates_web", fake_fetch_live_stream_candidates_web)
+
+        async def run():
+            return await refresh_live_streams(db, api_key=None, requests_per_second=3)
+
+        rows = asyncio.run(run())
+
+        assert len(rows) == 1
+        assert rows[0].youtube_video_id == "live-web-alias"
+        assert rows[0].youtube_channel_id == "channel-esl"
+        assert rows[0].channel_id == channel.id
+        assert rows[0].is_live is True
+
+
 def test_apply_sync_item_review_keeps_existing_channel_assignment(tmp_path: Path, monkeypatch):
     async def fake_ryd(*args, **kwargs):
         return None

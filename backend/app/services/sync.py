@@ -2969,7 +2969,11 @@ def youtube_default_thumbnail_url(youtube_video_id: str | None) -> str | None:
     return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
 
 
-def matched_youtube_channels_by_local_channel(db: Session) -> dict[int, str]:
+def matched_youtube_channels_by_local_channel(
+    db: Session,
+    *,
+    require_name_match: bool = True,
+) -> dict[int, str]:
     channel_id_map: dict[int, dict[str, int]] = {}
     rows = db.execute(
         select(Video.channel_id, YouTubeMatch.youtube_channel_id)
@@ -2993,7 +2997,7 @@ def matched_youtube_channels_by_local_channel(db: Session) -> dict[int, str]:
             channel_counts.items(),
             key=lambda item: (-item[1], item[0]),
         )
-        if local_channel and not is_generic_channel_name(local_channel.name):
+        if require_name_match and local_channel and not is_generic_channel_name(local_channel.name):
             ordered = [
                 (youtube_channel_id, count)
                 for youtube_channel_id, count in ordered
@@ -3732,6 +3736,14 @@ async def refresh_live_streams(
         for channel_id, youtube_channel_id in matched_youtube_channels_by_local_channel(db).items()
         if channel_id in monitored_ids
     }
+    relaxed_monitored_map = {
+        channel_id: youtube_channel_id
+        for channel_id, youtube_channel_id in matched_youtube_channels_by_local_channel(
+            db,
+            require_name_match=False,
+        ).items()
+        if channel_id in monitored_ids
+    }
     now = datetime.utcnow()
 
     candidate_meta: dict[str, dict[str, Any]] = {}
@@ -3749,6 +3761,17 @@ async def refresh_live_streams(
             if channel_id not in channel_map
         ]
         for channel_id in unresolved_monitored_ids:
+            relaxed_channel_id = relaxed_monitored_map.get(channel_id)
+            if relaxed_channel_id:
+                channel_map[channel_id] = relaxed_channel_id
+                local_channel = db.get(Channel, channel_id)
+                logger.info(
+                    "Live matched-channel fallback resolved monitored channel_id=%s name=%s youtube_channel_id=%s",
+                    channel_id,
+                    local_channel.name if local_channel else None,
+                    relaxed_channel_id,
+                )
+                continue
             local_channel = db.get(Channel, channel_id)
             if not local_channel or is_generic_channel_name(local_channel.name):
                 continue
