@@ -122,6 +122,11 @@ def init_db() -> None:
         if "rejected_youtube_video_ids" not in youtube_match_columns:
             connection.execute(text("ALTER TABLE youtube_matches ADD COLUMN rejected_youtube_video_ids JSON"))
             connection.execute(text("UPDATE youtube_matches SET rejected_youtube_video_ids = '[]' WHERE rejected_youtube_video_ids IS NULL"))
+        if "api_discovery_attempt_count" not in youtube_match_columns:
+            connection.execute(text("ALTER TABLE youtube_matches ADD COLUMN api_discovery_attempt_count INTEGER DEFAULT 0"))
+            connection.execute(text("UPDATE youtube_matches SET api_discovery_attempt_count = 0 WHERE api_discovery_attempt_count IS NULL"))
+        if "api_discovery_blocked_until" not in youtube_match_columns:
+            connection.execute(text(f"ALTER TABLE youtube_matches ADD COLUMN api_discovery_blocked_until {datetime_sql_type}"))
         connection.execute(text("UPDATE youtube_matches SET status = 'unmatched' WHERE status = 'review'"))
         if "review_candidates" in youtube_match_columns:
             connection.execute(text("UPDATE youtube_matches SET review_candidates = '[]'"))

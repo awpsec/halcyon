@@ -33,6 +33,10 @@ type NavItem = {
   end?: boolean;
 };
 
+export type AppShellOutletContext = {
+  liveOverview: LiveOverview | null;
+};
+
 const baseNavItems: NavItem[] = [
   { to: "/", label: "Home", end: true },
   { to: "/channels", label: "Subscriptions", end: true },
@@ -749,7 +753,7 @@ export function AppShell({
         </div>
       </header>
       <main className="content">
-        <Outlet />
+        <Outlet context={{ liveOverview } satisfies AppShellOutletContext} />
       </main>
     </div>
   );

@@ -3528,9 +3528,10 @@ def test_sync_video_uses_channel_lookup_ids_and_broadens_api_search(tmp_path: Pa
             queries,
             requests_per_second,
             channel_ids=None,
+            max_search_requests=None,
             status_callback=None,
         ):
-            del client, api_key, queries, requests_per_second, status_callback
+            del client, api_key, queries, requests_per_second, max_search_requests, status_callback
             seen_channel_ids.append(list(channel_ids) if channel_ids else None)
             if channel_ids:
                 return [
@@ -3829,21 +3830,21 @@ def test_sync_video_uses_api_by_id_to_fill_missing_fallback_stats(tmp_path: Path
         assert result.youtube_channel_id == "channel-ufd-tech"
 
 
-def test_sync_video_defers_api_search_for_recent_unmatched_video(tmp_path: Path, monkeypatch):
+def test_sync_video_cools_down_background_api_discovery_after_repeated_misses(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
-        channel = Channel(name="Made The Cut", slug="made-the-cut")
+        channel = Channel(name="Unknown Channel", slug="unknown-channel")
         db.add(channel)
         db.flush()
 
-        target_path = tmp_path / "library" / "made-the-cut-unmatched.mp4"
+        target_path = tmp_path / "library" / "background-api-miss.mp4"
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(b"target")
         video = Video(
-            title="Made The Cut Yankees Update",
-            slug="made-the-cut-yankees-update",
+            title="Could The Snapdragon X2 Elite Extreme Power The NEXT Gaming Handheld?!",
+            slug="background-api-miss",
             channel_id=channel.id,
             created_at=datetime.utcnow(),
-            duration_seconds=11 * 60,
+            duration_seconds=10 * 60,
             published_at=datetime(2026, 4, 17),
             is_available=True,
         )
@@ -3853,9 +3854,9 @@ def test_sync_video_defers_api_search_for_recent_unmatched_video(tmp_path: Path,
             VideoFile(
                 video_id=video.id,
                 absolute_path=str(target_path),
-                relative_path="made-the-cut-unmatched.mp4",
+                relative_path="background-api-miss.mp4",
                 file_size=target_path.stat().st_size,
-                fingerprint="made-the-cut-unmatched" * 3,
+                fingerprint="background-api-miss" * 3,
             )
         )
         db.add(
@@ -3865,25 +3866,23 @@ def test_sync_video_defers_api_search_for_recent_unmatched_video(tmp_path: Path,
                 confidence=0.0,
                 reasons=[],
                 stale=True,
-                last_synced_at=datetime.utcnow(),
             )
         )
         db.commit()
 
+        api_search_calls: list[list[str]] = []
+
         async def fake_fetch_fallback_candidates(*args, **kwargs):
             return []
 
-        async def fail_fetch_channel_candidates(*args, **kwargs):
-            raise AssertionError("channel API lookup should not run for recent unmatched retries")
-
-        async def fail_fetch_search_candidates(*args, **kwargs):
-            raise AssertionError("video API search should not run for recent unmatched retries")
+        async def fake_fetch_search_candidates(*args, **kwargs):
+            api_search_calls.append(list(kwargs.get("queries") or args[2]))
+            return []
 
         monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
-        monkeypatch.setattr(sync_service, "fetch_channel_candidates", fail_fetch_channel_candidates)
-        monkeypatch.setattr(sync_service, "fetch_search_candidates", fail_fetch_search_candidates)
+        monkeypatch.setattr(sync_service, "fetch_search_candidates", fake_fetch_search_candidates)
 
-        async def run() -> YouTubeMatch:
+        async def run_once() -> YouTubeMatch:
             async with httpx.AsyncClient() as client:
                 return await sync_video(
                     db,
@@ -3892,11 +3891,26 @@ def test_sync_video_defers_api_search_for_recent_unmatched_video(tmp_path: Path,
                     comment_limit=25,
                     requests_per_second=3,
                     client=client,
+                    background_api_discovery=True,
                 )
 
-        result = asyncio.run(run())
+        first = asyncio.run(run_once())
+        second = asyncio.run(run_once())
+        third = asyncio.run(run_once())
 
-        assert result.status == "unmatched"
+        db.refresh(first)
+        db.refresh(second)
+        db.refresh(third)
+
+        refreshed_match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+
+        assert first.status == "unmatched"
+        assert second.status == "unmatched"
+        assert third.status == "unmatched"
+        assert len(api_search_calls) == 2
+        assert refreshed_match is not None
+        assert refreshed_match.api_discovery_attempt_count == sync_service.BACKGROUND_API_DISCOVERY_MAX_ATTEMPTS
+        assert refreshed_match.api_discovery_blocked_until is not None
 
 
 def test_sync_scope_skips_recent_unmatched_auto_retry_without_api_discovery(tmp_path: Path, monkeypatch):
@@ -5849,6 +5863,8 @@ def test_background_auto_sync_runs_orphans_without_api_discovery(tmp_path: Path,
                 "scope": scope,
                 "api_key": api_key,
                 "allow_api_discovery": kwargs.get("allow_api_discovery"),
+                "background_api_discovery": kwargs.get("background_api_discovery"),
+                "max_videos": kwargs.get("max_videos"),
             }
         )
         return SyncJob(scope=scope, status="completed", details={})
@@ -5861,7 +5877,9 @@ def test_background_auto_sync_runs_orphans_without_api_discovery(tmp_path: Path,
         {
             "scope": "orphans",
             "api_key": "configured-key",
-            "allow_api_discovery": False,
+            "allow_api_discovery": True,
+            "background_api_discovery": True,
+            "max_videos": background_service.BACKGROUND_ORPHAN_SYNC_BATCH_SIZE,
         }
     ]
 
@@ -5892,6 +5910,8 @@ def test_background_auto_sync_runs_library_without_api_discovery(tmp_path: Path,
                 "scope": scope,
                 "api_key": api_key,
                 "allow_api_discovery": kwargs.get("allow_api_discovery"),
+                "background_api_discovery": kwargs.get("background_api_discovery"),
+                "max_videos": kwargs.get("max_videos"),
             }
         )
         return SyncJob(scope=scope, status="completed", details={})
@@ -5904,7 +5924,9 @@ def test_background_auto_sync_runs_library_without_api_discovery(tmp_path: Path,
         {
             "scope": "library",
             "api_key": "configured-key",
-            "allow_api_discovery": False,
+            "allow_api_discovery": True,
+            "background_api_discovery": True,
+            "max_videos": background_service.BACKGROUND_LIBRARY_SYNC_BATCH_SIZE,
         }
     ]
 

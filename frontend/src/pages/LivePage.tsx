@@ -1,8 +1,8 @@
-import { useEffect } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useOutletContext } from "react-router-dom";
 import { api } from "../api/client";
+import { type AppShellOutletContext } from "../components/AppShell";
 import { EmptyState } from "../components/EmptyState";
-import { useAsyncData } from "../hooks/useAsyncData";
 import {
   formatCount,
   formatRelativeDate,
@@ -17,31 +17,55 @@ function liveTimestampLabel(value: string | null) {
 }
 
 export function LivePage() {
-  const { data, loading, error, setData } = useAsyncData(() => api.liveOverview(), []);
+  const { liveOverview: cachedOverview } = useOutletContext<AppShellOutletContext>();
+  const [data, setData] = useState(cachedOverview);
+  const [loading, setLoading] = useState(!cachedOverview);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (cachedOverview) {
+      setData((current) => current ?? cachedOverview);
+      setLoading(false);
+    }
+  }, [cachedOverview]);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function refreshLive() {
+    async function refreshLive(initial = false) {
       try {
         const next = await api.liveOverview();
         if (!cancelled) {
           setData(next);
+          setError(null);
         }
-      } catch {
-        // Keep the last successful payload visible.
+      } catch (nextError) {
+        if (!cancelled && !cachedOverview) {
+          const message =
+            nextError instanceof Error && nextError.message.trim()
+              ? nextError.message
+              : "Oops! Having trouble loading that page right now. Try again!";
+          setError(message);
+        }
+      } finally {
+        if (!cancelled && (initial || !cachedOverview)) {
+          setLoading(false);
+        }
       }
     }
 
+    if (!cachedOverview) {
+      void refreshLive(true);
+    }
     const interval = window.setInterval(() => {
-      void refreshLive();
+      void refreshLive(false);
     }, LIVE_POLL_MS);
 
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [setData]);
+  }, [cachedOverview]);
 
   const overview = data;
   const streamCount = overview?.items.length ?? 0;

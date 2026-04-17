@@ -71,6 +71,8 @@ SYNC_STALE_AFTER = timedelta(minutes=5)
 MATCH_REFRESH_AFTER = timedelta(hours=6)
 MATCH_PERIODIC_STATS_REFRESH_LIMIT = 5
 UNMATCHED_API_DISCOVERY_RETRY_AFTER = timedelta(hours=6)
+BACKGROUND_API_DISCOVERY_RETRY_AFTER = timedelta(hours=12)
+BACKGROUND_API_DISCOVERY_MAX_ATTEMPTS = 2
 CHANNEL_ART_RETRY_AFTER = timedelta(minutes=15)
 RYD_RATE_LIMIT_PER_MINUTE = 100
 RYD_RATE_LIMIT_PER_DAY = 10_000
@@ -1836,6 +1838,7 @@ def unmatched_api_discovery_allowed(
     *,
     force: bool,
     allow_api_discovery: bool,
+    background_api_discovery: bool = False,
 ) -> bool:
     if force:
         return True
@@ -1843,9 +1846,11 @@ def unmatched_api_discovery_allowed(
         return False
     if not match or match.status == "matched":
         return True
-    if not match.last_synced_at:
+    if not background_api_discovery:
         return True
-    return datetime.utcnow() - match.last_synced_at >= UNMATCHED_API_DISCOVERY_RETRY_AFTER
+    if not match.api_discovery_blocked_until:
+        return True
+    return datetime.utcnow() >= match.api_discovery_blocked_until
 
 
 def unmatched_retry_due(
@@ -1863,6 +1868,20 @@ def unmatched_retry_due(
     if not match.last_synced_at:
         return True
     return datetime.utcnow() - match.last_synced_at >= UNMATCHED_API_DISCOVERY_RETRY_AFTER
+
+
+def reset_background_api_discovery_state(match: YouTubeMatch) -> None:
+    match.api_discovery_attempt_count = 0
+    match.api_discovery_blocked_until = None
+
+
+def record_background_api_discovery_attempt(match: YouTubeMatch) -> None:
+    attempt_count = int(match.api_discovery_attempt_count or 0) + 1
+    match.api_discovery_attempt_count = attempt_count
+    if attempt_count >= BACKGROUND_API_DISCOVERY_MAX_ATTEMPTS:
+        match.api_discovery_blocked_until = datetime.utcnow() + BACKGROUND_API_DISCOVERY_RETRY_AFTER
+    else:
+        match.api_discovery_blocked_until = None
 
 
 def _existing_match_snapshot_is_plausible(
@@ -2463,13 +2482,17 @@ async def fetch_search_candidates(
     queries: list[str],
     requests_per_second: int,
     channel_ids: list[str] | None = None,
+    max_search_requests: int | None = None,
     status_callback=None,
 ) -> list[dict]:
     merged = []
     seen_ids: set[str] = set()
     scoped_channel_ids = channel_ids or [None]
+    search_requests_used = 0
     for channel_id in scoped_channel_ids:
         for index, query in enumerate(queries):
+            if max_search_requests is not None and search_requests_used >= max_search_requests:
+                return merged
             if status_callback:
                 status_callback(phase="search", source="youtube-api", query=query, channel_id=channel_id)
             logger.info("Sync youtube api query=%s channel_id=%s", query, channel_id or "")
@@ -2483,6 +2506,7 @@ async def fetch_search_candidates(
             if channel_id:
                 params["channelId"] = channel_id
             response = await throttled_get(client, f"{YOUTUBE_API_BASE}/search", params=params, requests_per_second=requests_per_second)
+            search_requests_used += 1
             if response.is_error:
                 message = _extract_api_error(response)
                 raise YouTubeSyncError(f"YouTube search failed: {message}", fatal="quotaExceeded" in message or "rateLimitExceeded" in message)
@@ -4088,6 +4112,7 @@ async def apply_sync_item(
     match.status = status
     match.review_candidates = []
     match.rejected_youtube_video_ids = []
+    reset_background_api_discovery_state(match)
     match.last_synced_at = datetime.utcnow()
     match.stale = False
 
@@ -4488,6 +4513,7 @@ async def sync_video(
     allow_fallback_art: bool = False,
     prefer_high_res_banners: bool = False,
     allow_api_discovery: bool = True,
+    background_api_discovery: bool = False,
     force: bool = False,
     status_callback=None,
 ) -> YouTubeMatch:
@@ -4912,9 +4938,25 @@ async def sync_video(
         existing_match,
         force=force,
         allow_api_discovery=allow_api_discovery,
+        background_api_discovery=background_api_discovery,
     )
+    api_discovery_attempted = False
+    if (
+        background_api_discovery
+        and existing_match
+        and existing_match.api_discovery_blocked_until
+        and datetime.utcnow() < existing_match.api_discovery_blocked_until
+    ):
+        logger.info(
+            "Sync background api discovery deferred video_id=%s title=%s blocked_until=%s attempts=%s",
+            video.id,
+            video.title,
+            existing_match.api_discovery_blocked_until.isoformat(),
+            existing_match.api_discovery_attempt_count or 0,
+        )
     if not authoritative_channel_ids and video.channel and not is_generic_channel_name(video.channel.name) and effective_api_key and api_discovery_allowed:
         try:
+            api_discovery_attempted = True
             for candidate in await fetch_channel_candidates(client, effective_api_key, video.channel.name, requests_per_second):
                 snippet = candidate.get("snippet", {})
                 if channel_names_confidently_match(video.channel.name, snippet.get("channelTitle")) and candidate.get("id", {}).get("channelId"):
@@ -4954,15 +4996,19 @@ async def sync_video(
     if effective_api_key and api_discovery_allowed:
         api_candidates: list[dict[str, Any]] = []
         try:
+            api_discovery_attempted = True
+            scoped_api_channel_ids = authoritative_channel_ids[:1] if background_api_discovery else authoritative_channel_ids[:2] or None
+            max_search_requests = 2 if background_api_discovery else None
             api_candidates = await fetch_search_candidates(
                 client,
                 effective_api_key,
                 scoped_queries,
                 requests_per_second,
-                channel_ids=authoritative_channel_ids[:2] or None,
+                channel_ids=scoped_api_channel_ids,
+                max_search_requests=max_search_requests,
                 status_callback=status_callback,
             )
-            if authoritative_channel_ids:
+            if authoritative_channel_ids and not background_api_discovery:
                 broader_candidates = await fetch_search_candidates(
                     client,
                     effective_api_key,
@@ -5058,11 +5104,16 @@ async def sync_video(
                 rejected_candidate_score = additional_rejected_score
                 rejected_candidate_reasons = additional_rejected_reasons
     elif effective_api_key and not api_discovery_allowed:
+        retry_after_hours = (
+            int(BACKGROUND_API_DISCOVERY_RETRY_AFTER.total_seconds() // 3600)
+            if background_api_discovery
+            else int(UNMATCHED_API_DISCOVERY_RETRY_AFTER.total_seconds() // 3600)
+        )
         logger.info(
             "Sync api discovery deferred video_id=%s title=%s retry_after_hours=%s",
             video.id,
             video.title,
-            int(UNMATCHED_API_DISCOVERY_RETRY_AFTER.total_seconds() // 3600),
+            retry_after_hours,
         )
 
     match = existing_match or ensure_youtube_match_row(db, video.id)
@@ -5070,6 +5121,24 @@ async def sync_video(
     match.confidence = 0.0
     match.reasons = []
     match.stale = True
+    if background_api_discovery and api_discovery_attempted and not force:
+        record_background_api_discovery_attempt(match)
+        if match.api_discovery_blocked_until:
+            logger.info(
+                "Sync background api discovery cooling down video_id=%s title=%s attempts=%s blocked_until=%s",
+                video.id,
+                video.title,
+                match.api_discovery_attempt_count,
+                match.api_discovery_blocked_until.isoformat(),
+            )
+        else:
+            logger.info(
+                "Sync background api discovery miss video_id=%s title=%s attempts=%s remaining=%s",
+                video.id,
+                video.title,
+                match.api_discovery_attempt_count,
+                max(0, BACKGROUND_API_DISCOVERY_MAX_ATTEMPTS - int(match.api_discovery_attempt_count or 0)),
+            )
     match.last_synced_at = datetime.utcnow()
     if rejected_candidate_score > 0:
         match.review_candidates = []
@@ -5096,7 +5165,9 @@ async def sync_scope(
     api_key: str | None,
     *,
     allow_api_discovery: bool = True,
+    background_api_discovery: bool = False,
     force: bool = False,
+    max_videos: int | None = None,
     prefer_high_res_banners_override: bool | None = None,
     quiet_if_idle: bool = False,
 ) -> SyncJob:
@@ -5199,6 +5270,9 @@ async def sync_scope(
         else:
             videos = []
 
+        if max_videos is not None and max_videos > 0:
+            videos = videos[:max_videos]
+
         matched = 0
         processed = 0
         errors = 0
@@ -5212,6 +5286,8 @@ async def sync_scope(
                 "percent": 0,
                 "requests_per_second": requests_per_second,
                 "force": force,
+                "background_api_discovery": background_api_discovery,
+                "max_videos": max_videos,
                 "prefer_high_res_banners": prefer_high_res_banners,
             }
             db.commit()
@@ -5252,6 +5328,7 @@ async def sync_scope(
                             allow_fallback_art=allow_fallback_art,
                             prefer_high_res_banners=prefer_high_res_banners,
                             allow_api_discovery=allow_api_discovery,
+                            background_api_discovery=background_api_discovery,
                             force=force,
                             status_callback=report_status,
                         )
@@ -5269,6 +5346,8 @@ async def sync_scope(
                             "title": video.title,
                             "requests_per_second": requests_per_second,
                             "force": force,
+                            "background_api_discovery": background_api_discovery,
+                            "max_videos": max_videos,
                             "prefer_high_res_banners": prefer_high_res_banners,
                         }
                         db.commit()
@@ -5289,6 +5368,8 @@ async def sync_scope(
                         "title": video.title,
                         "requests_per_second": requests_per_second,
                         "force": force,
+                        "background_api_discovery": background_api_discovery,
+                        "max_videos": max_videos,
                         "prefer_high_res_banners": prefer_high_res_banners,
                     }
                     db.commit()
@@ -5306,6 +5387,8 @@ async def sync_scope(
                 "errors": errors,
                 "warning": None if not errors else "Some items could not be refreshed from YouTube",
                 "force": force,
+                "background_api_discovery": background_api_discovery,
+                "max_videos": max_videos,
                 "prefer_high_res_banners": prefer_high_res_banners,
             }
             db.commit()

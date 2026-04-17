@@ -20,6 +20,8 @@ from app.services.subtitles import (
 from app.services.sync import normalize_channel_assignments, reconcile_sync_job, refresh_live_streams, sync_scope
 
 LIVE_SYNC_MIN_INTERVAL_SECONDS = 1200
+BACKGROUND_ORPHAN_SYNC_BATCH_SIZE = 8
+BACKGROUND_LIBRARY_SYNC_BATCH_SIZE = 6
 logger = get_logger()
 
 
@@ -79,7 +81,9 @@ async def background_auto_sync_once(settings: Settings) -> None:
                     scope="orphans",
                     target_id=None,
                     api_key=api_key,
-                    allow_api_discovery=False,
+                    allow_api_discovery=True,
+                    background_api_discovery=True,
+                    max_videos=BACKGROUND_ORPHAN_SYNC_BATCH_SIZE,
                     quiet_if_idle=True,
                 )
         if not sync_settings.automatic_sync_enabled:
@@ -98,7 +102,9 @@ async def background_auto_sync_once(settings: Settings) -> None:
             scope="library",
             target_id=None,
             api_key=api_key,
-            allow_api_discovery=False,
+            allow_api_discovery=True,
+            background_api_discovery=True,
+            max_videos=BACKGROUND_LIBRARY_SYNC_BATCH_SIZE,
             quiet_if_idle=True,
         )
 
