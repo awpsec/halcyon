@@ -451,6 +451,8 @@ def choose_playlist_series_title(
         playlist_title = clean_display_title(playlist.get("title") or "")
         if not playlist_title or is_generic_playlist_title(playlist_title):
             continue
+        if video.channel and channel_names_confidently_match(video.channel.name, playlist_title):
+            continue
 
         playlist_tokens = set(tokenize_text(playlist_title))
         score = 1.0  # exact playlist membership baseline
@@ -1690,6 +1692,35 @@ def _candidate_has_match_authority(
     )
 
 
+def _candidate_is_locked_channel_rename_match(
+    item: dict[str, Any],
+    *,
+    score: float,
+    reasons: list[str],
+    known_channel_match: bool,
+    local_channel_locked: bool,
+) -> bool:
+    if not local_channel_locked or not known_channel_match:
+        return False
+    reason_set = set(reasons or [])
+    if {"channel-mismatch", "duration-mismatch", "duration-far", "episode-mismatch"} & reason_set:
+        return False
+    if "date" not in reason_set:
+        return False
+    if not (reason_set & {"duration-tight", "duration"}):
+        return False
+    source = str(item.get("_waytube_source") or "").strip()
+    if source not in {
+        "youtube-api-channel-recent",
+        "youtube-web-channel-recent",
+        "youtube-web-search",
+        "watch-page",
+        "google-dork",
+    }:
+        return False
+    return score >= 0.62
+
+
 async def _select_best_sync_candidate(
     client: httpx.AsyncClient,
     video: Video,
@@ -1755,12 +1786,22 @@ async def _select_best_sync_candidate(
             authoritative_channel_ids=authoritative_channel_ids,
             local_channel_locked=local_channel_locked,
         )
+        rename_match = _candidate_is_locked_channel_rename_match(
+            best_item,
+            score=best_score,
+            reasons=reasons,
+            known_channel_match=known_channel_match,
+            local_channel_locked=local_channel_locked,
+        )
+        if rename_match and "renamed-title" not in reasons:
+            reasons = [*reasons, "renamed-title"]
         is_confident_match = bool(
             (
                 _candidate_meets_primary_match_threshold(best_score, reasons)
                 and match_has_authority
             )
             or (local_known_channel_match and best_score >= 0.58 and match_has_authority)
+            or rename_match
         )
         if hard_channel_mismatch or not is_confident_match:
             if best_score > rejected_candidate_score:
@@ -2105,6 +2146,20 @@ def youtube_channel_title_hint(db: Session, youtube_channel_id: str | None) -> s
     )
     if snapshot and snapshot.title:
         return clean_display_title(snapshot.title)
+    channel_name = db.scalar(
+        select(Channel.name)
+        .join(Video, Video.channel_id == Channel.id)
+        .join(YouTubeMatch, YouTubeMatch.video_id == Video.id)
+        .where(
+            YouTubeMatch.status == "matched",
+            YouTubeMatch.youtube_channel_id == normalized_channel_id,
+            Channel.slug != "unknown-channel",
+        )
+        .order_by(Video.id.desc())
+        .limit(1)
+    )
+    if channel_name:
+        return clean_display_title(channel_name)
     return None
 
 
@@ -2174,6 +2229,36 @@ def channel_names_search_match(local_name: str | None, synced_name: str | None) 
         return True
 
     return resolve_display_name(local_name, synced_name) == synced_name
+
+
+async def resolve_youtube_channel_ids_web(
+    client: httpx.AsyncClient,
+    local_channel_name: str | None,
+    requests_per_second: int,
+    *,
+    status_callback=None,
+) -> list[str]:
+    if not local_channel_name or is_generic_channel_name(local_channel_name):
+        return []
+    queries = channel_name_query_variants(local_channel_name)
+    if not queries:
+        return []
+    candidates = await fetch_youtube_web_channel_candidates(
+        client,
+        queries,
+        requests_per_second,
+        status_callback=status_callback,
+    )
+    resolved: list[str] = []
+    for candidate in candidates:
+        snippet = candidate.get("snippet", {}) or {}
+        channel_id = str(candidate.get("id") or snippet.get("channelId") or "").strip()
+        channel_title = snippet.get("channelTitle") or snippet.get("title")
+        if not channel_id or not channel_names_confidently_match(local_channel_name, channel_title):
+            continue
+        if channel_id not in resolved:
+            resolved.append(channel_id)
+    return resolved
 
 
 def youtube_channel_matches_local_channel(
@@ -3069,6 +3154,19 @@ def _collect_video_renderers_from_value(value: Any, sink: list[dict[str, Any]]) 
             _collect_video_renderers_from_value(item, sink)
 
 
+def _collect_channel_renderers_from_value(value: Any, sink: list[dict[str, Any]]) -> None:
+    if isinstance(value, dict):
+        renderer = value.get("channelRenderer")
+        if isinstance(renderer, dict):
+            sink.append(renderer)
+        for nested in value.values():
+            _collect_channel_renderers_from_value(nested, sink)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_channel_renderers_from_value(item, sink)
+
+
 def render_video_candidate_from_renderer(renderer: dict[str, Any], *, source: str) -> dict[str, Any] | None:
     video_id = str(renderer.get("videoId") or "").strip()
     if not video_id:
@@ -3123,6 +3221,53 @@ def render_video_candidate_from_renderer(renderer: dict[str, Any], *, source: st
     }
 
 
+def render_channel_candidate_from_renderer(renderer: dict[str, Any], *, source: str) -> dict[str, Any] | None:
+    channel_id = str(renderer.get("channelId") or "").strip()
+    if not channel_id:
+        return None
+    title = extract_text_content(renderer.get("title"))
+    canonical_path = (
+        renderer.get("navigationEndpoint", {})
+        .get("browseEndpoint", {})
+        .get("canonicalBaseUrl")
+        or renderer.get("navigationEndpoint", {})
+        .get("commandMetadata", {})
+        .get("webCommandMetadata", {})
+        .get("url")
+    )
+    thumbnails = (
+        renderer.get("thumbnail", {})
+        .get("thumbnails", [])
+        or renderer.get("thumbnail", {})
+        .get("sources", [])
+        or []
+    )
+    thumbnail_url = thumbnails[-1].get("url") if thumbnails else None
+    subscriber_count = parse_channel_stat_text(renderer.get("subscriberCountText"))
+    canonical_url = None
+    if canonical_path:
+        canonical_path = str(canonical_path).strip()
+        if canonical_path.startswith("/"):
+            canonical_url = f"https://www.youtube.com{canonical_path.rstrip('/')}"
+        elif canonical_path.startswith("http"):
+            canonical_url = canonical_path.rstrip("/")
+    return {
+        "id": channel_id,
+        "snippet": {
+            "title": clean_display_title(title or ""),
+            "channelTitle": clean_display_title(title or ""),
+            "channelId": channel_id,
+            "description": extract_text_content(renderer.get("descriptionSnippet")),
+            "thumbnails": {"high": {"url": thumbnail_url}} if thumbnail_url else {},
+            "customUrl": canonical_url,
+        },
+        "statistics": {
+            "subscriberCount": subscriber_count,
+        },
+        "_waytube_source": source,
+    }
+
+
 def extract_video_candidates_from_html(html: str, *, source: str, limit: int = 12) -> list[dict]:
     initial = extract_json_blob(html, ["var ytInitialData = ", "ytInitialData = "]) or {}
     renderers: list[dict[str, Any]] = []
@@ -3138,6 +3283,27 @@ def extract_video_candidates_from_html(html: str, *, source: str, limit: int = 1
         if not video_id or video_id in seen_ids:
             continue
         seen_ids.add(video_id)
+        candidates.append(candidate)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def extract_channel_candidates_from_html(html: str, *, source: str, limit: int = 8) -> list[dict]:
+    initial = extract_json_blob(html, ["var ytInitialData = ", "ytInitialData = "]) or {}
+    renderers: list[dict[str, Any]] = []
+    if initial:
+        _collect_channel_renderers_from_value(initial, renderers)
+    candidates: list[dict] = []
+    seen_ids: set[str] = set()
+    for renderer in renderers:
+        candidate = render_channel_candidate_from_renderer(renderer, source=source)
+        if not candidate:
+            continue
+        channel_id = str(candidate.get("id") or "").strip()
+        if not channel_id or channel_id in seen_ids:
+            continue
+        seen_ids.add(channel_id)
         candidates.append(candidate)
         if len(candidates) >= limit:
             break
@@ -3294,6 +3460,42 @@ async def fetch_live_stream_candidates_web(
         if video_ids:
             break
 
+    if not video_ids and channel_name:
+        live_query = f"{channel_name} live".strip()
+        logger.info(
+            "Live web search fallback channel_id=%s youtube_channel_id=%s query=%s",
+            local_channel_id,
+            youtube_channel_id,
+            live_query,
+        )
+        response = await throttled_get(
+            client,
+            YOUTUBE_WEB_SEARCH_BASE,
+            params={"search_query": live_query, "hl": "en"},
+            requests_per_second=requests_per_second,
+            headers=REQUEST_HEADERS,
+        )
+        if not response.is_error:
+            checked = True
+            merge_candidate_items(
+                seed_candidates,
+                extract_live_candidates_from_html(
+                    response.text,
+                    source="youtube-live-search",
+                    limit=6,
+                ),
+            )
+            for candidate in list(seed_candidates):
+                if not _live_candidate_matches_monitored_channel(
+                    candidate,
+                    youtube_channel_id=youtube_channel_id,
+                    channel_name=channel_name,
+                ):
+                    continue
+                candidate_id = str(candidate.get("id") or "").strip()
+                if candidate_id and candidate_id not in video_ids:
+                    video_ids.append(candidate_id)
+
     logger.info(
         "Live web lookup channel_id=%s youtube_channel_id=%s candidate_ids=%s",
         local_channel_id,
@@ -3400,15 +3602,6 @@ async def refresh_live_streams(
         if channel_id in monitored_ids
     }
     now = datetime.utcnow()
-    if not channel_map:
-        for row in db.scalars(
-            select(YouTubeLiveStreamSnapshot).where(YouTubeLiveStreamSnapshot.is_live.is_(True))
-        ).all():
-            row.is_live = False
-        if settings_row:
-            settings_row.last_live_sync_at = now
-        db.commit()
-        return []
 
     candidate_meta: dict[str, dict[str, Any]] = {}
     detailed_items: list[dict] = []
@@ -3419,6 +3612,39 @@ async def refresh_live_streams(
     ).all():
         existing_live_rows_by_channel.setdefault(str(row.youtube_channel_id), []).append(row)
     async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=REQUEST_HEADERS) as client:
+        unresolved_monitored_ids = [
+            channel_id
+            for channel_id in monitored_ids
+            if channel_id not in channel_map
+        ]
+        for channel_id in unresolved_monitored_ids:
+            local_channel = db.get(Channel, channel_id)
+            if not local_channel or is_generic_channel_name(local_channel.name):
+                continue
+            resolved_ids = await resolve_youtube_channel_ids_web(
+                client,
+                local_channel.name,
+                requests_per_second,
+            )
+            if resolved_ids:
+                channel_map[channel_id] = resolved_ids[0]
+                logger.info(
+                    "Live web resolved monitored channel_id=%s name=%s youtube_channel_id=%s",
+                    channel_id,
+                    local_channel.name,
+                    resolved_ids[0],
+                )
+
+        if not channel_map:
+            for row in db.scalars(
+                select(YouTubeLiveStreamSnapshot).where(YouTubeLiveStreamSnapshot.is_live.is_(True))
+            ).all():
+                row.is_live = False
+            if settings_row:
+                settings_row.last_live_sync_at = now
+            db.commit()
+            return []
+
         # Keep live detection on the web/watch-page path even when an API key is configured.
         # This preserves quota for library sync and avoids cross-channel live candidate drift.
         use_api = False
@@ -3887,6 +4113,41 @@ async def fetch_youtube_web_candidates(
     return results[:12]
 
 
+async def fetch_youtube_web_channel_candidates(
+    client: httpx.AsyncClient,
+    queries: list[str],
+    requests_per_second: int,
+    status_callback=None,
+) -> list[dict]:
+    results: list[dict] = []
+    seen_ids: set[str] = set()
+    for query in queries:
+        if status_callback:
+            status_callback(phase="search", source="youtube-web-channel", query=query)
+        logger.info("Sync youtube web channel query=%s", query)
+        response = await throttled_get(
+            client,
+            YOUTUBE_WEB_SEARCH_BASE,
+            params={"search_query": query, "hl": "en"},
+            requests_per_second=requests_per_second,
+            headers=REQUEST_HEADERS,
+        )
+        if response.is_error:
+            continue
+        candidates = extract_channel_candidates_from_html(response.text, source="youtube-web-channel-search", limit=8)
+        for candidate in candidates:
+            channel_id = str(candidate.get("id") or "").strip()
+            if not channel_id or channel_id in seen_ids:
+                continue
+            results.append(candidate)
+            seen_ids.add(channel_id)
+            if len(results) >= 8:
+                break
+        if len(results) >= 8:
+            break
+    return results[:8]
+
+
 async def fetch_watch_page_candidate(
     client: httpx.AsyncClient,
     youtube_video_id: str,
@@ -4218,6 +4479,18 @@ async def apply_sync_item(
         target_channel = video.channel
         if status == "matched":
             target_channel = resolve_synced_channel_target(db, video, channel_id, channel_snapshot.title)
+            if (
+                target_channel
+                and video.series
+                and channel_names_confidently_match(video.series.name, target_channel.name)
+            ):
+                logger.info(
+                    "Sync clearing same-name series video_id=%s channel=%s series=%s",
+                    video.id,
+                    target_channel.name,
+                    video.series.name,
+                )
+                video.series_id = None
 
         if channel_cache is not None and channel_id in channel_cache:
             channel_details = channel_cache[channel_id]
@@ -4817,6 +5090,22 @@ async def sync_video(
                 authoritative_channel_ids.append(channel_id)
                 if channel_id not in name_verified_channel_ids:
                     name_verified_channel_ids.append(channel_id)
+        authoritative_channel_ids = _dedupe_non_empty_strings(authoritative_channel_ids)
+    if (
+        not authoritative_channel_ids
+        and video.channel
+        and not is_generic_channel_name(video.channel.name)
+        and not force
+    ):
+        for channel_id in await resolve_youtube_channel_ids_web(
+            client,
+            video.channel.name,
+            requests_per_second,
+            status_callback=status_callback,
+        ):
+            authoritative_channel_ids.append(channel_id)
+            if channel_id not in name_verified_channel_ids:
+                name_verified_channel_ids.append(channel_id)
         authoritative_channel_ids = _dedupe_non_empty_strings(authoritative_channel_ids)
     if use_local_channel_bucket and video.channel:
         authoritative_channel_ids = [

@@ -193,6 +193,79 @@ def test_fetch_youtube_web_candidates_parses_video_renderers(monkeypatch):
     assert results[0]["_waytube_duration_seconds"] == 36 * 60 + 39
 
 
+def test_fetch_youtube_web_channel_candidates_parses_channel_renderers(monkeypatch):
+    html = """
+    <html>
+      <body>
+        <script>
+          var ytInitialData = {
+            "contents": {
+              "twoColumnSearchResultsRenderer": {
+                "primaryContents": {
+                  "sectionListRenderer": {
+                    "contents": [
+                      {
+                        "itemSectionRenderer": {
+                          "contents": [
+                            {
+                              "channelRenderer": {
+                                "channelId": "channel-ufd",
+                                "title": {"simpleText": "UFD Tech"},
+                                "navigationEndpoint": {
+                                  "browseEndpoint": {
+                                    "browseId": "channel-ufd",
+                                    "canonicalBaseUrl": "/@UFDTech"
+                                  }
+                                },
+                                "thumbnail": {
+                                  "thumbnails": [
+                                    {"url": "https://yt3.googleusercontent.com/ytc/channel-ufd=s176"}
+                                  ]
+                                },
+                                "subscriberCountText": {"simpleText": "1.2M subscribers"}
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          };
+        </script>
+      </body>
+    </html>
+    """
+
+    class DummyResponse:
+        def __init__(self, text: str):
+            self.text = text
+            self.is_error = False
+
+    async def fake_throttled_get(*args, **kwargs):
+        return DummyResponse(html)
+
+    monkeypatch.setattr(sync_service, "throttled_get", fake_throttled_get)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_youtube_web_channel_candidates(
+                client,
+                ["UFD Tech"],
+                3,
+            )
+
+    results = asyncio.run(run())
+
+    assert len(results) == 1
+    assert results[0]["id"] == "channel-ufd"
+    assert results[0]["snippet"]["channelTitle"] == "UFD Tech"
+    assert results[0]["snippet"]["customUrl"] == "https://www.youtube.com/@UFDTech"
+    assert results[0]["statistics"]["subscriberCount"] == 1_200_000
+
+
 def test_fetch_google_dork_video_ids_merges_across_queries(monkeypatch):
     html_by_query = {
         'site:youtube.com/watch "Asmongold TV British Navy is a joke now"': """
@@ -625,6 +698,91 @@ def test_fetch_live_stream_candidates_web_preserves_live_renderer_metadata_when_
     assert items[0]["snippet"]["title"] == "PGL Bucharest 2026 - Main Stream"
     assert items[0]["snippet"]["channelTitle"] == "PGL"
     assert items[0]["snippet"]["channelId"] == "channel-pgl"
+
+
+def test_fetch_live_stream_candidates_web_uses_search_fallback_when_channel_pages_are_empty(monkeypatch):
+    class DummyResponse:
+        def __init__(self, url: str, text: str = ""):
+            self.text = text
+            self.is_error = False
+            self.url = url
+
+    empty_channel_html = "<html><body>No live items here</body></html>"
+    search_html = """
+    <html><body><script>
+    var ytInitialData = {
+      "contents": {
+        "twoColumnSearchResultsRenderer": {
+          "primaryContents": {
+            "sectionListRenderer": {
+              "contents": [
+                {
+                  "itemSectionRenderer": {
+                    "contents": [
+                      {
+                        "videoRenderer": {
+                          "videoId": "livepgl1234a",
+                          "title": {"runs": [{"text": "PGL Main Stream"}]},
+                          "ownerText": {
+                            "runs": [
+                              {
+                                "text": "PGL",
+                                "navigationEndpoint": {
+                                  "browseEndpoint": {"browseId": "channel-pgl"}
+                                }
+                              }
+                            ]
+                          },
+                          "thumbnailOverlays": [
+                            {
+                              "thumbnailOverlayTimeStatusRenderer": {
+                                "style": "LIVE",
+                                "text": {"runs": [{"text": "LIVE"}]}
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    };
+    </script></body></html>
+    """
+
+    calls = {"count": 0}
+
+    async def fake_throttled_get(*args, **kwargs):
+        del kwargs
+        calls["count"] += 1
+        url = args[1]
+        if calls["count"] <= 2:
+            return DummyResponse(url, empty_channel_html)
+        return DummyResponse(url, search_html)
+
+    monkeypatch.setattr(sync_service, "throttled_get", fake_throttled_get)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_live_stream_candidates_web(
+                client,
+                "channel-pgl",
+                3,
+                channel_name="PGL",
+            )
+
+    checked, items = asyncio.run(run())
+
+    assert checked is True
+    assert len(items) == 1
+    assert items[0]["id"] == "livepgl1234a"
+    assert items[0]["snippet"]["channelId"] == "channel-pgl"
+    assert items[0]["snippet"]["channelTitle"] == "PGL"
 
 
 def test_fetch_fallback_candidates_merges_across_query_batches(monkeypatch):
@@ -1373,6 +1531,39 @@ def test_choose_playlist_series_title_prefers_exact_membership_and_non_generic_p
         assert position == 47
 
 
+def test_choose_playlist_series_title_skips_same_name_as_channel(tmp_path: Path) -> None:
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Made The Cut", slug="made-the-cut")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="We Just Saw a Team Lose a Game So Painfully",
+            slug="we-just-saw-a-team-lose-a-game-so-painfully",
+            channel_id=channel.id,
+            duration_seconds=243,
+            is_available=True,
+        )
+        db.add(video)
+        db.commit()
+        db.refresh(video)
+
+        title, position = choose_playlist_series_title(
+            video,
+            "madecut1234",
+            [
+                {
+                    "id": "creator-playlist",
+                    "title": "Made The Cut",
+                    "positions": {"madecut1234": 12},
+                }
+            ],
+        )
+
+        assert title is None
+        assert position is None
+
+
 def test_sync_video_uses_recent_channel_uploads_when_title_search_misses(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="Asmongold TV", slug="asmongold-tv")
@@ -1517,6 +1708,184 @@ def test_sync_video_uses_recent_channel_uploads_when_title_search_misses(tmp_pat
         assert result.youtube_channel_id == "channel-asmongold"
         assert result.confidence is not None and result.confidence >= 0.58
         assert "duration-tight" in (result.reasons or [])
+
+
+def test_sync_video_matches_known_channel_renamed_upload_without_old_title(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="UFD Tech", slug="ufd-tech")
+        db.add(channel)
+        db.flush()
+
+        matched_path = tmp_path / "library" / "ufd" / "known.mp4"
+        matched_path.parent.mkdir(parents=True, exist_ok=True)
+        matched_path.write_bytes(b"known")
+        matched_video = Video(
+            title="Known UFD upload",
+            slug="known-ufd-upload",
+            channel_id=channel.id,
+            created_at=datetime.utcnow() - timedelta(days=1),
+            duration_seconds=600,
+            published_at=datetime(2026, 4, 17),
+            is_available=True,
+        )
+        db.add(matched_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=matched_video.id,
+                absolute_path=str(matched_path),
+                relative_path="ufd/known.mp4",
+                file_size=matched_path.stat().st_size,
+                fingerprint="ufdknown" * 8,
+            )
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=matched_video.id,
+                youtube_video_id="knownufd123",
+                youtube_channel_id="channel-ufd",
+                status="matched",
+                confidence=1.0,
+                reasons=["known-channel"],
+            )
+        )
+
+        target_path = tmp_path / "library" / "ufd" / "rename.mp4"
+        target_path.write_bytes(b"target")
+        target_video = Video(
+            title="AMD Bringing Back the GOAT",
+            slug="amd-bringing-back-the-goat",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=601,
+            published_at=datetime(2026, 4, 17),
+            is_available=True,
+        )
+        db.add(target_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=target_video.id,
+                absolute_path=str(target_path),
+                relative_path="ufd/rename.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="ufdrename" * 8,
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return []
+
+        async def fake_fetch_recent_channel_upload_candidates_web(*args, **kwargs):
+            return [
+                {
+                    "id": "ufdrename123",
+                    "snippet": {
+                        "title": "IT'S BACK!",
+                        "channelTitle": "UFD Tech",
+                        "channelId": "channel-ufd",
+                        "publishedAt": "2026-04-17T14:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 601,
+                    "_waytube_source": "youtube-web-channel-recent",
+                }
+            ]
+
+        async def fake_fetch_watch_page_candidate(*args, **kwargs):
+            return {
+                "id": "ufdrename123",
+                "snippet": {
+                    "title": "IT'S BACK!",
+                    "channelTitle": "UFD Tech",
+                    "channelId": "channel-ufd",
+                    "publishedAt": "2026-04-17T14:00:00Z",
+                },
+                "statistics": {},
+                "_waytube_duration_seconds": 601,
+                "_waytube_source": "watch-page",
+            }
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates_web", fake_fetch_recent_channel_upload_candidates_web)
+        monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "matched"
+        assert result.youtube_video_id == "ufdrename123"
+        assert result.youtube_channel_id == "channel-ufd"
+        assert "renamed-title" in (result.reasons or [])
+
+
+def test_youtube_channel_matches_local_channel_uses_prior_matched_channel_name_without_snapshot(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="UFD Tech", slug="ufd-tech")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="Known UFD upload",
+            slug="known-ufd-upload-title-hint",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="knownufd456",
+                youtube_channel_id="channel-ufd",
+                status="matched",
+                confidence=1.0,
+                reasons=["known-channel"],
+            )
+        )
+        db.commit()
+
+        assert (
+            sync_service.youtube_channel_matches_local_channel(
+                db,
+                local_channel=channel,
+                youtube_channel_id="channel-ufd",
+            )
+            is True
+        )
 
 
 def test_sync_video_rejects_weak_neighbor_title_channel_hints_for_orphans_without_api(tmp_path: Path, monkeypatch):
@@ -4489,6 +4858,53 @@ def test_refresh_live_streams_uses_web_fallback_without_api_key(tmp_path: Path, 
 
         assert len(rows) == 1
         assert rows[0].youtube_video_id == "live-web-1"
+        assert rows[0].youtube_channel_id == "channel-lvndmark"
+        assert rows[0].channel_id == channel.id
+        assert rows[0].is_live is True
+
+
+def test_refresh_live_streams_resolves_monitored_channel_via_web_search_without_existing_matches(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="LVNDMARK", slug="lvndmark")
+        db.add(channel)
+        db.flush()
+        db.add(SyncSettings(live_tab_enabled=True))
+        db.add(LiveMonitoredChannel(channel_id=channel.id))
+        db.commit()
+
+        async def fake_resolve_youtube_channel_ids_web(*args, **kwargs):
+            return ["channel-lvndmark"]
+
+        async def fake_fetch_live_stream_candidates_web(*args, **kwargs):
+            return (
+                True,
+                [
+                    {
+                        "id": "live-web-2",
+                        "snippet": {
+                            "title": "LVNDMARK live",
+                            "channelTitle": "LVNDMARK",
+                            "channelId": "channel-lvndmark",
+                            "thumbnails": {},
+                        },
+                        "statistics": {},
+                        "_waytube_live_web": True,
+                        "_waytube_local_channel_id": channel.id,
+                        "_waytube_checked_youtube_channel_id": "channel-lvndmark",
+                    }
+                ],
+            )
+
+        monkeypatch.setattr(sync_service, "resolve_youtube_channel_ids_web", fake_resolve_youtube_channel_ids_web)
+        monkeypatch.setattr(sync_service, "fetch_live_stream_candidates_web", fake_fetch_live_stream_candidates_web)
+
+        async def run():
+            return await refresh_live_streams(db, api_key=None, requests_per_second=3)
+
+        rows = asyncio.run(run())
+
+        assert len(rows) == 1
+        assert rows[0].youtube_video_id == "live-web-2"
         assert rows[0].youtube_channel_id == "channel-lvndmark"
         assert rows[0].channel_id == channel.id
         assert rows[0].is_live is True

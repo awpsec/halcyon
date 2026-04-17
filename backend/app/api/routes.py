@@ -174,6 +174,12 @@ RETENTION_SCAN_DIRNAME = ".halcyon-retention"
 RETENTION_DELETE_BUFFER_DIRNAME = ".pending-delete"
 AUTH_LOGIN_LIMIT = 8
 AUTH_LOGIN_WINDOW_SECONDS = 10 * 60
+
+
+def _series_matches_channel_name(series_name: str | None, channel_name: str | None) -> bool:
+    series_normalized = normalize_text(series_name or "")
+    channel_normalized = normalize_text(channel_name or "")
+    return bool(series_normalized and channel_normalized and series_normalized == channel_normalized)
 AUTH_RESET_LIMIT = 5
 AUTH_RESET_WINDOW_SECONDS = 15 * 60
 AUTH_ADMIN_RECOVERY_LIMIT = 5
@@ -2662,6 +2668,12 @@ def get_channel(channel_ref: str, db: Session = Depends(get_db), current_user: U
         current_user,
         [_with_channel_display(summarize_video(video, db=db), channel_display_name) for video in videos],
     )
+    for video, summary in zip(videos, video_summaries):
+        if not video.series or not summary.series_id:
+            continue
+        if _series_matches_channel_name(video.series.name, video.channel.name if video.channel else None):
+            summary.series_id = None
+            summary.series_name = None
     fresh_cutoff = datetime.utcnow() - timedelta(seconds=LIVE_STALE_AFTER_SECONDS)
     live_stream = db.scalar(
         select(YouTubeLiveStreamSnapshot)
