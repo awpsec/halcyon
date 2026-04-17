@@ -70,6 +70,7 @@ REQUEST_HEADERS = {
 SYNC_STALE_AFTER = timedelta(minutes=5)
 MATCH_REFRESH_AFTER = timedelta(hours=6)
 MATCH_PERIODIC_STATS_REFRESH_LIMIT = 5
+UNMATCHED_API_DISCOVERY_RETRY_AFTER = timedelta(hours=6)
 CHANNEL_ART_RETRY_AFTER = timedelta(minutes=15)
 RYD_RATE_LIMIT_PER_MINUTE = 100
 RYD_RATE_LIMIT_PER_DAY = 10_000
@@ -1828,6 +1829,23 @@ def candidate_api_gap_fill_fields(item: dict[str, Any]) -> list[str]:
     if parse_maybe_int(statistics.get("likeCount")) is None:
         missing.append("likes")
     return missing
+
+
+def unmatched_api_discovery_allowed(
+    match: YouTubeMatch | None,
+    *,
+    force: bool,
+    allow_api_discovery: bool,
+) -> bool:
+    if force:
+        return True
+    if not allow_api_discovery:
+        return False
+    if not match or match.status == "matched":
+        return True
+    if not match.last_synced_at:
+        return True
+    return datetime.utcnow() - match.last_synced_at >= UNMATCHED_API_DISCOVERY_RETRY_AFTER
 
 
 def _existing_match_snapshot_is_plausible(
@@ -4452,6 +4470,7 @@ async def sync_video(
     playlist_cache: dict[str, list[dict]] | None = None,
     allow_fallback_art: bool = False,
     prefer_high_res_banners: bool = False,
+    allow_api_discovery: bool = True,
     force: bool = False,
     status_callback=None,
 ) -> YouTubeMatch:
@@ -4872,7 +4891,12 @@ async def sync_video(
             reasons=reasons,
             status="matched",
         )
-    if not authoritative_channel_ids and video.channel and not is_generic_channel_name(video.channel.name) and effective_api_key:
+    api_discovery_allowed = unmatched_api_discovery_allowed(
+        existing_match,
+        force=force,
+        allow_api_discovery=allow_api_discovery,
+    )
+    if not authoritative_channel_ids and video.channel and not is_generic_channel_name(video.channel.name) and effective_api_key and api_discovery_allowed:
         try:
             for candidate in await fetch_channel_candidates(client, effective_api_key, video.channel.name, requests_per_second):
                 snippet = candidate.get("snippet", {})
@@ -4910,7 +4934,7 @@ async def sync_video(
             channel_hints=channel_hints,
         )
 
-    if effective_api_key:
+    if effective_api_key and api_discovery_allowed:
         api_candidates: list[dict[str, Any]] = []
         try:
             api_candidates = await fetch_search_candidates(
@@ -5016,12 +5040,20 @@ async def sync_video(
             if additional_rejected_score > rejected_candidate_score:
                 rejected_candidate_score = additional_rejected_score
                 rejected_candidate_reasons = additional_rejected_reasons
+    elif effective_api_key and not api_discovery_allowed:
+        logger.info(
+            "Sync api discovery deferred video_id=%s title=%s retry_after_hours=%s",
+            video.id,
+            video.title,
+            int(UNMATCHED_API_DISCOVERY_RETRY_AFTER.total_seconds() // 3600),
+        )
 
     match = existing_match or ensure_youtube_match_row(db, video.id)
     match.status = "unmatched"
     match.confidence = 0.0
     match.reasons = []
     match.stale = True
+    match.last_synced_at = datetime.utcnow()
     if rejected_candidate_score > 0:
         match.review_candidates = []
         match.rejected_youtube_video_ids = []
@@ -5046,6 +5078,7 @@ async def sync_scope(
     target_id: int | None,
     api_key: str | None,
     *,
+    allow_api_discovery: bool = True,
     force: bool = False,
     prefer_high_res_banners_override: bool | None = None,
     quiet_if_idle: bool = False,
@@ -5189,6 +5222,7 @@ async def sync_scope(
                             playlist_cache=playlist_cache,
                             allow_fallback_art=allow_fallback_art,
                             prefer_high_res_banners=prefer_high_res_banners,
+                            allow_api_discovery=allow_api_discovery,
                             force=force,
                             status_callback=report_status,
                         )

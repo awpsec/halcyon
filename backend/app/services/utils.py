@@ -163,6 +163,21 @@ def clean_path_label(value: str) -> str:
     return clean_display_title(value.replace("_", " ").strip())
 
 
+def labels_confidently_match(left: str | None, right: str | None) -> bool:
+    left_normalized = normalize_text(left or "")
+    right_normalized = normalize_text(right or "")
+    if not left_normalized or not right_normalized:
+        return False
+    if left_normalized == right_normalized:
+        return True
+    left_tokens = set(tokenize_text(left_normalized))
+    right_tokens = set(tokenize_text(right_normalized))
+    if not left_tokens or not right_tokens:
+        return False
+    overlap = len(left_tokens & right_tokens) / max(1, min(len(left_tokens), len(right_tokens)))
+    return overlap >= 0.8
+
+
 def infer_series_name(value: str) -> str | None:
     cleaned = clean_path_label(value)
     if not cleaned:
@@ -214,14 +229,16 @@ def infer_folder_hints(path: Path, container_hint: str | None = None) -> tuple[s
         if container_hint:
             container_name = clean_path_label(container_hint)
             container_tokens = set(tokenize_text(container_name))
-            title_tokens = set(tokenize_text(title))
-            overlap = len(container_tokens & title_tokens) / max(1, len(container_tokens)) if container_tokens else 0.0
             playlistish = bool(container_tokens & PLAYLIST_FOLDER_MARKERS)
-            episodic = parse_episode_number(title) is not None
+            folder_series = infer_series_name(container_name)
             title_series = infer_series_name(title)
-            looks_like_series = playlistish or overlap >= 0.2 or (episodic and len(container_tokens) >= 2) or bool(title_series)
-            if looks_like_series:
-                return title, "Unknown Channel", infer_series_name(container_name) or title_series or container_name
+            if playlistish or folder_series:
+                return title, "Unknown Channel", folder_series or title_series or container_name
+            if title_series and container_tokens:
+                series_tokens = set(tokenize_text(title_series))
+                overlap = len(container_tokens & series_tokens) / max(1, len(container_tokens)) if series_tokens else 0.0
+                if overlap >= 0.5:
+                    return title, "Unknown Channel", title_series
             return title, container_name or "Unknown Channel", title_series
         return title, "Unknown Channel", infer_series_name(title)
     if len(folder_parts) >= 2:

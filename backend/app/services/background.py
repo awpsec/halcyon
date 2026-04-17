@@ -74,7 +74,14 @@ async def background_auto_sync_once(settings: Settings) -> None:
                 )
         if sync_settings.automatic_detection_enabled:
             if not active_running_sync_jobs(db):
-                await sync_scope(db, scope="orphans", target_id=None, api_key=api_key, quiet_if_idle=True)
+                await sync_scope(
+                    db,
+                    scope="orphans",
+                    target_id=None,
+                    api_key=api_key,
+                    allow_api_discovery=False,
+                    quiet_if_idle=True,
+                )
         if not sync_settings.automatic_sync_enabled:
             return
         if active_running_sync_jobs(db):

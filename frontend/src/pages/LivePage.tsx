@@ -43,15 +43,24 @@ export function LivePage() {
     };
   }, [setData]);
 
+  const overview = data;
+  const streamCount = overview?.items.length ?? 0;
+  const intro = (
+    <section className="watch-description live-page-intro">
+      <div className="live-page-intro-head">
+        <h1>Live</h1>
+        <span className="live-page-intro-count">
+          {streamCount} {streamCount === 1 ? "stream" : "streams"}
+        </span>
+      </div>
+    </section>
+  );
+
   if (loading && !data) {
     return (
       <div className="page-stack live-page">
-        <section className="panel">
-          <div className="section-heading">
-            <h2>Live</h2>
-          </div>
-          <p className="muted-copy">Loading live streams...</p>
-        </section>
+        {intro}
+        <p className="muted-copy live-page-status">Loading live streams...</p>
       </div>
     );
   }
@@ -59,40 +68,24 @@ export function LivePage() {
   if (error && !data) {
     return (
       <div className="page-stack live-page">
-        <section className="panel">
-          <div className="section-heading">
-            <h2>Live</h2>
-          </div>
-          <p className="muted-copy">{error}</p>
-        </section>
+        {intro}
+        <p className="muted-copy live-page-status">{error}</p>
       </div>
     );
   }
 
-  const overview = data;
   if (!overview?.enabled) {
     return (
       <div className="page-stack live-page">
-        <section className="panel">
-          <div className="section-heading">
-            <h2>Live</h2>
-          </div>
-          <EmptyState message="Live tab is turned off in server settings." />
-        </section>
+        {intro}
+        <EmptyState message="Live tab is turned off in server settings." />
       </div>
     );
   }
 
   return (
     <div className="page-stack live-page">
-      <section className="watch-description live-page-intro">
-        <div className="live-page-intro-head">
-          <h1>Live</h1>
-          <span className="live-page-intro-count">
-            {overview.items.length} {overview.items.length === 1 ? "stream" : "streams"}
-          </span>
-        </div>
-      </section>
+      {intro}
 
       {overview.items.length ? (
         <section className="live-grid">

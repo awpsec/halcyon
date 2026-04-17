@@ -788,6 +788,31 @@ def test_scan_selected_single_folder_playlist_dump_as_series(tmp_path: Path):
         assert video.title == "BATTLE OF THE BRIDGE! - Arma 2 DayZ Mod - Ep. 48"
 
 
+def test_scan_selected_single_creator_folder_does_not_become_same_named_series(tmp_path: Path):
+    library_root = tmp_path / "library"
+    creator_dir = library_root / "Made The Cut"
+    creator_dir.mkdir(parents=True)
+    video_path = creator_dir / "Made The Cut Yankees Update.mp4"
+    video_path.write_bytes(b"fake-video-data")
+    stale_timestamp = datetime(2024, 1, 1).timestamp()
+    os.utime(video_path, (stale_timestamp, stale_timestamp))
+
+    with make_session(tmp_path) as db:
+        seed_defaults(db, [str(library_root)])
+        root = db.scalar(select(LibraryRoot).where(LibraryRoot.path == str(library_root)))
+        db.add(SelectedFolder(root_id=root.id, relative_path="Made The Cut"))
+        db.commit()
+
+        scan_selected_folders(db, [library_root])
+
+        video = db.scalar(select(Video))
+
+        assert video is not None
+        assert video.channel_id is not None
+        assert db.get(Channel, video.channel_id).name == "Made The Cut"
+        assert video.series_id is None
+
+
 def test_scan_selected_folders_preserves_channel_folder_and_infers_series_from_title(tmp_path: Path):
     library_root = tmp_path / "library"
     channel_dir = library_root / "frankieonpcin1080p"

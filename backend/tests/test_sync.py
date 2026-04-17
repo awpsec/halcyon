@@ -3829,6 +3829,76 @@ def test_sync_video_uses_api_by_id_to_fill_missing_fallback_stats(tmp_path: Path
         assert result.youtube_channel_id == "channel-ufd-tech"
 
 
+def test_sync_video_defers_api_search_for_recent_unmatched_video(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="Made The Cut", slug="made-the-cut")
+        db.add(channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "made-the-cut-unmatched.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target")
+        video = Video(
+            title="Made The Cut Yankees Update",
+            slug="made-the-cut-yankees-update",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=11 * 60,
+            published_at=datetime(2026, 4, 17),
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(target_path),
+                relative_path="made-the-cut-unmatched.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="made-the-cut-unmatched" * 3,
+            )
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                status="unmatched",
+                confidence=0.0,
+                reasons=[],
+                stale=True,
+                last_synced_at=datetime.utcnow(),
+            )
+        )
+        db.commit()
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return []
+
+        async def fail_fetch_channel_candidates(*args, **kwargs):
+            raise AssertionError("channel API lookup should not run for recent unmatched retries")
+
+        async def fail_fetch_search_candidates(*args, **kwargs):
+            raise AssertionError("video API search should not run for recent unmatched retries")
+
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "fetch_channel_candidates", fail_fetch_channel_candidates)
+        monkeypatch.setattr(sync_service, "fetch_search_candidates", fail_fetch_search_candidates)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    video,
+                    api_key="test-api-key",
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert result.status == "unmatched"
+
+
 def test_sync_video_uses_web_recent_channel_uploads_without_api_for_known_channel(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="FRANKIEonPCin1080p", slug="frankieonpcin1080p")
@@ -5688,6 +5758,49 @@ def test_background_auto_sync_clears_stale_running_jobs_before_library_sync(tmp_
         assert stale_job.details.get("stale") is True
 
     assert called == ["library"]
+
+
+def test_background_auto_sync_runs_orphans_without_api_discovery(tmp_path: Path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'background-orphans.db'}", future=True)
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+    with session_factory() as db:
+        db.add(
+            SyncSettings(
+                automatic_detection_enabled=True,
+                automatic_sync_enabled=False,
+                scan_interval_seconds=900,
+                youtube_api_key="configured-key",
+            )
+        )
+        db.commit()
+
+    monkeypatch.setattr(background_service, "SessionLocal", session_factory)
+    calls: list[dict[str, object]] = []
+
+    async def fake_sync_scope(db, scope, target_id, api_key, **kwargs):
+        del db, target_id
+        calls.append(
+            {
+                "scope": scope,
+                "api_key": api_key,
+                "allow_api_discovery": kwargs.get("allow_api_discovery"),
+            }
+        )
+        return SyncJob(scope=scope, status="completed", details={})
+
+    monkeypatch.setattr(background_service, "sync_scope", fake_sync_scope)
+
+    asyncio.run(background_service.background_auto_sync_once(Settings(background_tasks_enabled=False)))
+
+    assert calls == [
+        {
+            "scope": "orphans",
+            "api_key": "configured-key",
+            "allow_api_discovery": False,
+        }
+    ]
 
 
 def test_apply_sync_item_auto_organizes_root_file_without_losing_match(tmp_path: Path, monkeypatch):

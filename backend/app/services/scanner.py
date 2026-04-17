@@ -33,7 +33,7 @@ from app.models.entities import (
     YouTubeVideoSnapshot,
 )
 from app.services.media import generate_preview_clip, generate_thumbnail, fingerprint_file, is_video_file, probe_media
-from app.services.utils import infer_folder_hints, infer_published_at, is_generic_channel_name, parse_episode_number, slugify
+from app.services.utils import infer_folder_hints, infer_published_at, is_generic_channel_name, labels_confidently_match, parse_episode_number, slugify
 
 settings = get_settings()
 logger = get_logger()
@@ -278,6 +278,8 @@ def upsert_video_for_path(
     classification_relative = file_path.relative_to(classification_root or mounted_root)
     container_hint = classification_root.name if classification_root and classification_root != mounted_root else None
     title, channel_hint, series_hint = infer_folder_hints(classification_relative, container_hint=container_hint)
+    if labels_confidently_match(channel_hint, series_hint):
+        series_hint = None
     episode_number = parse_episode_number(title)
     published_at = infer_published_at(file_path)
     fingerprint = fingerprint_file(file_path)
