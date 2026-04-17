@@ -637,7 +637,7 @@ def _extract_live_playback_url_sync(youtube_video_id: str, cookie_path: Path) ->
                 },
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["web", "ios", "tv_embedded", "web_embedded"],
+                        "player_client": ["web", "web_embedded", "web_creator"],
                     }
                 },
             },
