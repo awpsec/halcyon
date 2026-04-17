@@ -492,6 +492,53 @@ def test_fetch_live_stream_candidates_web_rejects_unverified_watch_page_candidat
     assert items == []
 
 
+def test_fetch_watch_page_candidate_includes_live_broadcast_details(monkeypatch):
+    html = """
+    <html><body><script>
+    var ytInitialPlayerResponse = {
+      "videoDetails": {
+        "title": "PGL Main Stream",
+        "author": "PGL",
+        "channelId": "channel-pgl",
+        "lengthSeconds": "0",
+        "viewCount": "42",
+        "isLiveContent": true
+      },
+      "microformat": {
+        "playerMicroformatRenderer": {
+          "publishDate": "2026-04-17T10:00:00-07:00",
+          "liveBroadcastDetails": {
+            "isLiveNow": true,
+            "startTimestamp": "2026-04-17T17:00:00+00:00"
+          }
+        }
+      }
+    };
+    </script></body></html>
+    """
+
+    class DummyResponse:
+        def __init__(self, text: str):
+            self.text = text
+            self.is_error = False
+
+    async def fake_throttled_get(*args, **kwargs):
+        return DummyResponse(html)
+
+    monkeypatch.setattr(sync_service, "throttled_get", fake_throttled_get)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_watch_page_candidate(client, "abc123def45", 3)
+
+    result = asyncio.run(run())
+
+    assert result is not None
+    assert result["snippet"]["liveBroadcastContent"] == "live"
+    assert result["liveStreamingDetails"]["actualStartTime"] == "2026-04-17T17:00:00+00:00"
+    assert result["liveStreamingDetails"]["actualEndTime"] is None
+
+
 def test_fetch_live_stream_candidates_web_accepts_matching_channel_title_when_id_is_sparse(monkeypatch):
     class DummyResponse:
         def __init__(self, url: str):
@@ -783,6 +830,75 @@ def test_fetch_live_stream_candidates_web_uses_search_fallback_when_channel_page
     assert items[0]["id"] == "livepgl1234a"
     assert items[0]["snippet"]["channelId"] == "channel-pgl"
     assert items[0]["snippet"]["channelTitle"] == "PGL"
+
+
+def test_fetch_live_stream_candidates_web_uses_feed_fallback_when_channel_pages_fail(monkeypatch):
+    class DummyResponse:
+        def __init__(self, url: str, text: str = ""):
+            self.text = text
+            self.is_error = False
+            self.url = url
+
+    feed_xml = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <yt:videoId>feedlive123</yt:videoId>
+        <title>PGL Main Stream</title>
+        <published>2026-04-17T17:00:00+00:00</published>
+        <author>
+          <name>PGL</name>
+        </author>
+      </entry>
+    </feed>
+    """
+
+    async def fake_throttled_get(*args, **kwargs):
+        url = args[1]
+        del kwargs
+        if "feeds/videos.xml" in url:
+            return DummyResponse(url, feed_xml)
+        return DummyResponse(url, "<html><body>No live items here</body></html>")
+
+    async def fake_hydrate_candidate_from_watch_page(client, item, requests_per_second, status_callback=None):
+        del client, requests_per_second, status_callback
+        return {
+            **item,
+            "snippet": {
+                **(item.get("snippet", {}) or {}),
+                "title": "PGL Main Stream",
+                "channelTitle": "PGL",
+                "channelId": "channel-pgl",
+                "liveBroadcastContent": "live",
+            },
+            "statistics": {},
+            "liveStreamingDetails": {
+                "scheduledStartTime": None,
+                "actualStartTime": "2026-04-17T17:00:00+00:00",
+                "actualEndTime": None,
+            },
+            "_waytube_source": "watch-page",
+        }
+
+    monkeypatch.setattr(sync_service, "throttled_get", fake_throttled_get)
+    monkeypatch.setattr(sync_service, "hydrate_candidate_from_watch_page", fake_hydrate_candidate_from_watch_page)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_live_stream_candidates_web(
+                client,
+                "channel-pgl",
+                3,
+                channel_name="PGL",
+            )
+
+    checked, items = asyncio.run(run())
+
+    assert checked is True
+    assert len(items) == 1
+    assert items[0]["id"] == "feedlive123"
+    assert items[0]["snippet"]["channelId"] == "channel-pgl"
+    assert items[0]["snippet"]["liveBroadcastContent"] == "live"
 
 
 def test_fetch_fallback_candidates_merges_across_query_batches(monkeypatch):

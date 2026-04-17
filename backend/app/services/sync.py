@@ -11,6 +11,7 @@ import shutil
 import time
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from typing import Any
+import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -3574,7 +3575,136 @@ async def fetch_live_stream_candidates_web(
             youtube_video_id,
             snippet.get("title"),
         )
-    return checked, items
+    if items:
+        return checked, items
+    feed_checked, feed_items = await fetch_live_stream_candidates_feed(
+        client,
+        youtube_channel_id,
+        requests_per_second,
+        local_channel_id=local_channel_id,
+        channel_name=channel_name,
+    )
+    return checked or feed_checked, feed_items
+
+
+async def fetch_live_stream_candidates_feed(
+    client: httpx.AsyncClient,
+    youtube_channel_id: str,
+    requests_per_second: int,
+    *,
+    local_channel_id: int | None = None,
+    channel_name: str | None = None,
+    limit: int = 6,
+) -> tuple[bool, list[dict]]:
+    response = await throttled_get(
+        client,
+        "https://www.youtube.com/feeds/videos.xml",
+        params={"channel_id": youtube_channel_id},
+        requests_per_second=requests_per_second,
+        headers=REQUEST_HEADERS,
+    )
+    if response.is_error:
+        return False, []
+
+    logger.info(
+        "Live feed lookup start channel_id=%s youtube_channel_id=%s",
+        local_channel_id,
+        youtube_channel_id,
+    )
+
+    try:
+        root = ET.fromstring(response.text.lstrip())
+    except ET.ParseError:
+        logger.info(
+            "Live feed lookup parse failed channel_id=%s youtube_channel_id=%s",
+            local_channel_id,
+            youtube_channel_id,
+        )
+        return True, []
+
+    ns = {
+        "atom": "http://www.w3.org/2005/Atom",
+        "yt": "http://www.youtube.com/xml/schemas/2015",
+    }
+    entries = root.findall("atom:entry", ns)
+    items: list[dict] = []
+    for entry in entries[:limit]:
+        youtube_video_id = str(entry.findtext("yt:videoId", default="", namespaces=ns) or "").strip()
+        if not youtube_video_id:
+            continue
+        title = clean_display_title(entry.findtext("atom:title", default="", namespaces=ns) or "")
+        published_at = str(entry.findtext("atom:published", default="", namespaces=ns) or "").strip() or None
+        author_name = clean_display_title(entry.findtext("atom:author/atom:name", default="", namespaces=ns) or "")
+        seed_candidate = {
+            "id": youtube_video_id,
+            "snippet": {
+                "title": title,
+                "channelTitle": author_name or channel_name,
+                "channelId": youtube_channel_id,
+                "description": None,
+                "publishedAt": published_at,
+                "thumbnails": {
+                    "high": {"url": youtube_default_thumbnail_url(youtube_video_id)}
+                },
+            },
+            "statistics": {},
+            "_waytube_source": "youtube-channel-feed",
+        }
+        candidate = await hydrate_candidate_from_watch_page(
+            client,
+            seed_candidate,
+            requests_per_second,
+        )
+        snippet = candidate.setdefault("snippet", {})
+        if not _live_candidate_matches_monitored_channel(
+            candidate,
+            youtube_channel_id=youtube_channel_id,
+            channel_name=channel_name,
+        ):
+            logger.info(
+                "Live feed lookup candidate rejected youtube_channel_id=%s video_id=%s reason=channel-mismatch candidate_channel_id=%s candidate_channel_title=%s",
+                youtube_channel_id,
+                youtube_video_id,
+                snippet.get("channelId"),
+                snippet.get("channelTitle"),
+            )
+            continue
+        live_details = candidate.get("liveStreamingDetails", {}) or {}
+        is_currently_live = (
+            snippet.get("liveBroadcastContent") == "live"
+            or (
+                live_details.get("actualStartTime")
+                and not live_details.get("actualEndTime")
+            )
+        )
+        if not is_currently_live:
+            continue
+        if not snippet.get("channelId"):
+            snippet["channelId"] = youtube_channel_id
+        if channel_name and not snippet.get("channelTitle"):
+            snippet["channelTitle"] = channel_name
+        if not snippet.get("title"):
+            snippet["title"] = "Live stream"
+        thumbnails = snippet.setdefault("thumbnails", {})
+        if not best_thumbnail_url(thumbnails):
+            thumbnails["high"] = {"url": youtube_default_thumbnail_url(youtube_video_id)}
+        candidate["_waytube_live_web"] = True
+        candidate["_waytube_local_channel_id"] = local_channel_id
+        candidate["_waytube_checked_youtube_channel_id"] = youtube_channel_id
+        items.append(candidate)
+        logger.info(
+            "Live feed lookup accepted youtube_channel_id=%s video_id=%s title=%s",
+            youtube_channel_id,
+            youtube_video_id,
+            snippet.get("title"),
+        )
+    logger.info(
+        "Live feed lookup channel_id=%s youtube_channel_id=%s accepted=%s",
+        local_channel_id,
+        youtube_channel_id,
+        len(items),
+    )
+    return True, items
 
 
 def _parse_iso8601_datetime(value: str | None) -> datetime | None:
@@ -4177,6 +4307,19 @@ async def fetch_watch_page_candidate(
     length_seconds = parse_maybe_int(video_details.get("lengthSeconds"))
     view_count = parse_maybe_int(video_details.get("viewCount"))
     published_at = microformat.get("publishDate")
+    live_broadcast_details = microformat.get("liveBroadcastDetails", {}) or {}
+    live_start_timestamp = str(live_broadcast_details.get("startTimestamp") or "").strip() or None
+    live_end_timestamp = str(live_broadcast_details.get("endTimestamp") or "").strip() or None
+    is_live_now = bool(live_broadcast_details.get("isLiveNow"))
+    is_upcoming = bool(video_details.get("isUpcoming"))
+    live_broadcast_content = "live" if is_live_now else ("upcoming" if is_upcoming else "none")
+    actual_start_time = None
+    scheduled_start_time = None
+    if live_start_timestamp:
+        if is_live_now or not is_upcoming:
+            actual_start_time = live_start_timestamp
+        else:
+            scheduled_start_time = live_start_timestamp
     thumbnails = video_details.get("thumbnail", {}).get("thumbnails", [])
     thumbnail_url = thumbnails[-1]["url"] if thumbnails else None
     html_text = response.text
@@ -4206,12 +4349,18 @@ async def fetch_watch_page_candidate(
             "channelId": channel_id,
             "description": description,
             "publishedAt": published_at_value,
+            "liveBroadcastContent": live_broadcast_content,
             "thumbnails": {"high": {"url": thumbnail_url}} if thumbnail_url else {},
         },
         "statistics": {
             "viewCount": view_count,
             "likeCount": parse_abbreviated_number(like_match.group(1)) if like_match else None,
             "commentCount": parse_abbreviated_number(comment_match.group(1)) if comment_match else None,
+        },
+        "liveStreamingDetails": {
+            "scheduledStartTime": scheduled_start_time,
+            "actualStartTime": actual_start_time,
+            "actualEndTime": live_end_timestamp,
         },
         "_waytube_duration_seconds": length_seconds,
         "_waytube_source": "watch-page",
