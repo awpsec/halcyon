@@ -630,6 +630,7 @@ def _extract_live_playback_url_sync(youtube_video_id: str, cookie_path: Path) ->
                 "cookiefile": str(cookie_path),
                 "noplaylist": True,
                 "format": "best/bestvideo+bestaudio",
+                "js_runtimes": {"node": {}},
                 "http_headers": {
                     **REQUEST_HEADERS,
                     "Referer": "https://www.youtube.com/",
@@ -651,6 +652,7 @@ def _extract_live_playback_url_sync(youtube_video_id: str, cookie_path: Path) ->
                 "cookiefile": str(cookie_path),
                 "noplaylist": True,
                 "format": "best",
+                "js_runtimes": {"node": {}},
             },
         },
     ]
