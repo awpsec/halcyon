@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 import hashlib
 import math
@@ -9,10 +10,10 @@ import secrets
 import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Cookie, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import and_, case, func, literal, or_, select
 from sqlalchemy.orm import Session, joinedload
@@ -143,6 +144,7 @@ from app.services.sync import (
     allow_fallback_art_enabled,
     auto_organize_channel_files,
     build_youtube_api_quota_summary,
+    extract_json_blob,
     monitored_live_channel_ids,
     normalize_youtube_api_quota,
     prefer_high_res_banners_enabled,
@@ -189,6 +191,13 @@ LIVE_EMPTY_REFRESH_INTERVAL_SECONDS = 60
 LIVE_STALE_AFTER_SECONDS = 1800
 DEFAULT_LIBRARY_SENTINEL = ".halcyon-library-root"
 YOUTUBE_VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
+LIVE_EMBED_BLOCKED_STATUS_VALUES = {
+    "LOGIN_REQUIRED",
+    "AGE_CHECK_REQUIRED",
+    "CONTENT_CHECK_REQUIRED",
+}
+YOUTUBE_COOKIES_FILENAME = "youtube-cookies.txt"
+YOUTUBE_COOKIES_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _normalize_fs_path(value: str | Path) -> str:
@@ -417,6 +426,200 @@ def _authoritative_youtube_match(video: Video) -> YouTubeMatch | None:
     if match and match.status == "matched":
         return match
     return None
+
+
+def _youtube_cookies_path() -> Path:
+    return settings.config_dir / YOUTUBE_COOKIES_FILENAME
+
+
+def _youtube_cookies_status_values() -> tuple[bool, datetime | None]:
+    cookie_path = _youtube_cookies_path()
+    if not cookie_path.is_file():
+        return False, None
+    try:
+        updated_at = datetime.utcfromtimestamp(cookie_path.stat().st_mtime)
+    except OSError:
+        return False, None
+    return True, updated_at
+
+
+def _youtube_text(value: object) -> str | None:
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, list):
+        joined = " ".join(part for item in value if (part := _youtube_text(item)))
+        return joined.strip() or None
+    if isinstance(value, dict):
+        for key in ("simpleText", "text", "content"):
+            text = _youtube_text(value.get(key))
+            if text:
+                return text
+        runs = value.get("runs")
+        if isinstance(runs, list):
+            text = _youtube_text(runs)
+            if text:
+                return text
+        for key in (
+            "reason",
+            "message",
+            "messages",
+            "subreason",
+            "headline",
+            "description",
+            "errorScreen",
+            "playerErrorMessageRenderer",
+            "subreasonRenderer",
+            "info",
+        ):
+            text = _youtube_text(value.get(key))
+            if text:
+                return text
+    return None
+
+
+def _live_embed_blocked_reason_from_html(html: str | None) -> str | None:
+    if not html:
+        return None
+    player_response = extract_json_blob(
+        html,
+        [
+            "var ytInitialPlayerResponse = ",
+            "ytInitialPlayerResponse = ",
+            'ytInitialPlayerResponse":',
+        ],
+    )
+    playability_status = (
+        player_response.get("playabilityStatus")
+        if isinstance(player_response, dict)
+        else None
+    )
+    if not isinstance(playability_status, dict):
+        html_lower = html.lower()
+        if "sign in to confirm your age" in html_lower or "age-restricted" in html_lower:
+            return "This live stream needs an age-verified YouTube session."
+        if "only available on youtube" in html_lower:
+            return "YouTube is blocking the embedded player for this stream."
+        return None
+    status_value = str(playability_status.get("status") or "").strip().upper()
+    raw_reason = _youtube_text(playability_status.get("reason")) or _youtube_text(playability_status)
+    raw_reason_lower = (raw_reason or "").lower()
+    if (
+        status_value in LIVE_EMBED_BLOCKED_STATUS_VALUES
+        or "confirm your age" in raw_reason_lower
+        or "age-restricted" in raw_reason_lower
+        or "only available on youtube" in raw_reason_lower
+    ):
+        if "confirm your age" in raw_reason_lower or "age-restricted" in raw_reason_lower:
+            return "This live stream needs an age-verified YouTube session."
+        if raw_reason:
+            return raw_reason
+        return "YouTube is blocking the embedded player for this stream."
+    return None
+
+
+async def _fetch_live_watch_page_html(youtube_video_id: str) -> str | None:
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            headers=REQUEST_HEADERS,
+            timeout=10.0,
+        ) as client:
+            response = await client.get(
+                "https://www.youtube.com/watch",
+                params={"v": youtube_video_id, "hl": "en"},
+            )
+    except httpx.HTTPError:
+        return None
+    if response.is_error:
+        return None
+    return response.text
+
+
+def _pick_live_playback_url(info: dict[str, Any]) -> str | None:
+    best_url: str | None = None
+    best_score = -1.0
+    for fmt in info.get("formats") or []:
+        if not isinstance(fmt, dict):
+            continue
+        url = fmt.get("manifest_url") or fmt.get("url")
+        if not isinstance(url, str) or not url.strip():
+            continue
+        protocol = str(fmt.get("protocol") or "").lower()
+        score = 0.0
+        if "m3u8" in protocol or ".m3u8" in url.lower():
+            score += 10_000
+        if fmt.get("vcodec") not in {None, "", "none"}:
+            score += 500
+        if fmt.get("acodec") not in {None, "", "none"}:
+            score += 250
+        try:
+            score += float(fmt.get("height") or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            score += float(fmt.get("tbr") or 0) / 10.0
+        except (TypeError, ValueError):
+            pass
+        if score > best_score:
+            best_score = score
+            best_url = url
+    if best_url:
+        return best_url
+    for key in ("manifest_url", "url"):
+        direct = info.get(key)
+        if isinstance(direct, str) and direct.strip():
+            return direct
+    return None
+
+
+def _extract_live_playback_url_sync(youtube_video_id: str, cookie_path: Path) -> str | None:
+    try:
+        from yt_dlp import YoutubeDL
+    except Exception as exc:
+        logger.warning("Live playback fallback unavailable because yt-dlp is missing: %s", exc)
+        return None
+    watch_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "cookiefile": str(cookie_path),
+        "format": "best",
+    }
+    try:
+        with YoutubeDL(options) as ydl:
+            info = ydl.extract_info(watch_url, download=False)
+    except Exception as exc:
+        logger.warning("Live playback fallback extraction failed for %s: %s", youtube_video_id, exc)
+        return None
+    if not isinstance(info, dict):
+        return None
+    return _pick_live_playback_url(info)
+
+
+async def _resolve_live_playback(youtube_video_id: str) -> dict[str, Any]:
+    html = await _fetch_live_watch_page_html(youtube_video_id)
+    embed_blocked_reason = _live_embed_blocked_reason_from_html(html)
+    payload: dict[str, Any] = {
+        "playback_mode": "youtube-embed",
+        "playback_url": None,
+        "embed_blocked_reason": embed_blocked_reason,
+    }
+    if not embed_blocked_reason:
+        return payload
+    cookie_path = _youtube_cookies_path()
+    if not cookie_path.is_file():
+        return payload
+    playback_url = await asyncio.to_thread(
+        _extract_live_playback_url_sync,
+        youtube_video_id,
+        cookie_path,
+    )
+    if playback_url:
+        payload["playback_mode"] = "direct"
+        payload["playback_url"] = playback_url
+    return payload
 
 
 def _trusted_snapshot_published_at(snapshot: YouTubeVideoSnapshot | None) -> datetime | None:
@@ -1253,6 +1456,9 @@ def _serialize_live_stream(db: Session, stream: YouTubeLiveStreamSnapshot) -> Li
         fetched_at=stream.fetched_at,
         watch_url=f"https://www.youtube.com/watch?v={stream.youtube_video_id}",
         embed_url=f"https://www.youtube.com/embed/{stream.youtube_video_id}?autoplay=1&playsinline=1&rel=0&modestbranding=1",
+        playback_mode="youtube-embed",
+        playback_url=None,
+        embed_blocked_reason=None,
     )
 
 
@@ -1357,11 +1563,14 @@ def _live_overview_payload(db: Session) -> LiveOverviewOut:
 
 
 def _sync_settings_payload(db: Session, settings_row: SyncSettings) -> SyncSettingsOut:
+    youtube_cookies_configured, youtube_cookies_updated_at = _youtube_cookies_status_values()
     return SyncSettingsOut.model_validate(
         {
             **settings_row.__dict__,
             "live_monitored_channel_ids": sorted(monitored_live_channel_ids(db)),
             "youtube_api_key_configured": bool(_active_youtube_api_key(db)),
+            "youtube_cookies_configured": youtube_cookies_configured,
+            "youtube_cookies_updated_at": youtube_cookies_updated_at,
             **build_youtube_api_quota_summary(settings_row),
         }
     )
@@ -2071,7 +2280,10 @@ async def live_stream_detail(
         raise HTTPException(status_code=404, detail="Live stream not found")
     payload = _serialize_live_stream(db, stream)
     chat_enabled = await _detect_live_chat_enabled(youtube_video_id)
-    return payload.model_copy(update={"chat_enabled": chat_enabled})
+    playback = await _resolve_live_playback(youtube_video_id)
+    if playback.get("playback_mode") != "youtube-embed":
+        chat_enabled = False
+    return payload.model_copy(update={"chat_enabled": chat_enabled, **playback})
 
 
 @router.get("/search")
@@ -3125,6 +3337,56 @@ def get_sync_settings(
         changed = True
     changed = normalize_youtube_api_quota(settings_row) or changed
     if changed:
+        db.commit()
+        db.refresh(settings_row)
+    return _sync_settings_payload(db, settings_row)
+
+
+@router.post("/sync/youtube-cookies", response_model=SyncSettingsOut)
+async def upload_youtube_cookies(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_configured_admin_user),
+) -> SyncSettingsOut:
+    del current_user
+    filename = (file.filename or "").strip().lower()
+    if filename and not filename.endswith(".txt"):
+        raise HTTPException(status_code=400, detail="Upload a cookies.txt file")
+    content = await file.read()
+    await file.close()
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="Uploaded cookies file is empty")
+    if len(content) > YOUTUBE_COOKIES_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="Uploaded cookies file is too large")
+    cookie_path = _youtube_cookies_path()
+    cookie_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = cookie_path.with_suffix(".upload")
+    if temp_path.exists():
+        temp_path.unlink()
+    temp_path.write_bytes(content)
+    temp_path.replace(cookie_path)
+    settings_row = db.scalar(select(SyncSettings))
+    if not settings_row:
+        settings_row = SyncSettings()
+        db.add(settings_row)
+        db.commit()
+        db.refresh(settings_row)
+    return _sync_settings_payload(db, settings_row)
+
+
+@router.delete("/sync/youtube-cookies", response_model=SyncSettingsOut)
+async def delete_youtube_cookies(
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_configured_admin_user),
+) -> SyncSettingsOut:
+    del current_user
+    cookie_path = _youtube_cookies_path()
+    if cookie_path.exists():
+        cookie_path.unlink()
+    settings_row = db.scalar(select(SyncSettings))
+    if not settings_row:
+        settings_row = SyncSettings()
+        db.add(settings_row)
         db.commit()
         db.refresh(settings_row)
     return _sync_settings_payload(db, settings_row)

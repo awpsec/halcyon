@@ -220,6 +220,8 @@ export type SyncSettings = {
   last_live_sync_at: string | null;
   last_subtitle_sync_at: string | null;
   youtube_api_key_configured: boolean;
+  youtube_cookies_configured: boolean;
+  youtube_cookies_updated_at: string | null;
   youtube_api_quota_daily_limit: number;
   youtube_api_quota_used_units: number;
   youtube_api_quota_remaining_units: number;
@@ -247,6 +249,9 @@ export type LiveStream = {
   watch_url: string;
   embed_url: string;
   chat_enabled: boolean;
+  playback_mode: string;
+  playback_url: string | null;
+  embed_blocked_reason: string | null;
 };
 
 export type LiveOverview = {
@@ -397,10 +402,12 @@ function playbackClientProfile(): "default" | "mobile" | "android" {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const timezone = browserTimeZone();
+  const isFormData =
+    typeof FormData !== "undefined" && init?.body instanceof FormData;
   const response = await fetch(path, {
     credentials: "include",
     headers: {
-      "Content-Type": "application/json",
+      ...(isFormData ? {} : { "Content-Type": "application/json" }),
       ...(timezone ? { "X-Halcyon-Timezone": timezone } : {}),
       ...(init?.headers ?? {})
     },
@@ -532,6 +539,12 @@ export const api = {
   syncSettings: () => request<SyncSettings>("/api/sync/settings"),
   updateSyncSettings: (payload: { automatic_detection_enabled: boolean; automatic_sync_enabled: boolean; subtitle_generation_enabled: boolean; scan_interval_seconds: number; allow_fallback_art: boolean; prefer_high_res_banners: boolean; live_tab_enabled: boolean; live_monitored_channel_ids: number[]; comment_limit: number; max_replies_per_comment: number; requests_per_second: number; youtube_api_key?: string | null; clear_youtube_api_key?: boolean }) =>
     request<SyncSettings>("/api/sync/settings", { method: "PUT", body: JSON.stringify(payload) }),
+  uploadYoutubeCookies: (file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    return request<SyncSettings>("/api/sync/youtube-cookies", { method: "POST", body });
+  },
+  deleteYoutubeCookies: () => request<SyncSettings>("/api/sync/youtube-cookies", { method: "DELETE" }),
   syncSubtitles: () => request("/api/sync/subtitles", { method: "POST" }),
   retentionSettings: () => request<RetentionOverview>("/api/retention/settings"),
   updateRetentionSettings: (payload: {

@@ -8,6 +8,7 @@ import {
   type RetentionFolderBrowser,
   type RetentionLookupItem,
   type RetentionRun,
+  type SyncSettings,
   type TranscodeItem,
   type UpdateStatus,
   type VideoSummary,
@@ -499,6 +500,8 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
   });
   const [youtubeApiKeyConfigured, setYoutubeApiKeyConfigured] = useState(false);
   const [clearYoutubeApiKeyRequested, setClearYoutubeApiKeyRequested] = useState(false);
+  const [youtubeCookiesUploading, setYoutubeCookiesUploading] = useState(false);
+  const [youtubeCookiesRemoving, setYoutubeCookiesRemoving] = useState(false);
   const [retentionDraft, setRetentionDraft] = useState({
     enabled: false,
     retention_days: 30,
@@ -571,6 +574,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
   const syncActivityRef = useRef<HTMLDivElement | null>(null);
   const uploadsPanelRef = useRef<HTMLDivElement | null>(null);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  const youtubeCookiesInputRef = useRef<HTMLInputElement | null>(null);
   const avatarCropStageRef = useRef<HTMLDivElement | null>(null);
   const avatarCropDragRef = useRef<{
     pointerId: number;
@@ -645,6 +649,30 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
       }),
     [adminProfiles, profilePermissionDrafts],
   );
+  const youtubeCookiesUpdatedLabel = useMemo(() => {
+    const updatedAt = syncState.data?.youtube_cookies_updated_at;
+    if (!updatedAt) return null;
+    return formatAbsoluteDateTime(updatedAt) ?? formatRelativeDate(updatedAt) ?? "recently";
+  }, [syncState.data?.youtube_cookies_updated_at]);
+
+  function populateSyncDraft(next: SyncSettings) {
+    setSyncDraft({
+      automatic_detection_enabled: next.automatic_detection_enabled ?? true,
+      automatic_sync_enabled: next.automatic_sync_enabled,
+      subtitle_generation_enabled: next.subtitle_generation_enabled ?? false,
+      scan_interval_seconds: next.scan_interval_seconds ?? 30,
+      allow_fallback_art: next.allow_fallback_art ?? false,
+      prefer_high_res_banners: next.prefer_high_res_banners ?? false,
+      live_tab_enabled: next.live_tab_enabled ?? true,
+      live_monitored_channel_ids: next.live_monitored_channel_ids ?? [],
+      comment_limit: next.comment_limit,
+      max_replies_per_comment: next.max_replies_per_comment ?? 3,
+      requests_per_second: next.requests_per_second ?? 3,
+      youtube_api_key: "",
+    });
+    setYoutubeApiKeyConfigured(next.youtube_api_key_configured ?? false);
+    setClearYoutubeApiKeyRequested(false);
+  }
 
   function setActiveTab(nextTab: SettingsTab) {
     const next = new URLSearchParams(searchParams);
@@ -694,22 +722,7 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
 
   useEffect(() => {
     if (!syncState.data || syncDirty || syncSaving) return;
-    setSyncDraft({
-      automatic_detection_enabled: syncState.data.automatic_detection_enabled ?? true,
-      automatic_sync_enabled: syncState.data.automatic_sync_enabled,
-      subtitle_generation_enabled: syncState.data.subtitle_generation_enabled ?? false,
-      scan_interval_seconds: syncState.data.scan_interval_seconds ?? 30,
-      allow_fallback_art: syncState.data.allow_fallback_art ?? false,
-      prefer_high_res_banners: syncState.data.prefer_high_res_banners ?? false,
-      live_tab_enabled: syncState.data.live_tab_enabled ?? true,
-      live_monitored_channel_ids: syncState.data.live_monitored_channel_ids ?? [],
-      comment_limit: syncState.data.comment_limit,
-      max_replies_per_comment: syncState.data.max_replies_per_comment ?? 3,
-      requests_per_second: syncState.data.requests_per_second ?? 3,
-      youtube_api_key: "",
-    });
-    setYoutubeApiKeyConfigured(syncState.data.youtube_api_key_configured ?? false);
-    setClearYoutubeApiKeyRequested(false);
+    populateSyncDraft(syncState.data);
   }, [syncDirty, syncSaving, syncState.data]);
 
   useEffect(() => {
@@ -1252,28 +1265,41 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
         clear_youtube_api_key: clearYoutubeApiKeyRequested,
       });
       syncState.setData(next);
-      setSyncDraft({
-        automatic_detection_enabled: next.automatic_detection_enabled ?? true,
-        automatic_sync_enabled: next.automatic_sync_enabled,
-        subtitle_generation_enabled: next.subtitle_generation_enabled ?? false,
-        scan_interval_seconds: next.scan_interval_seconds ?? 30,
-        allow_fallback_art: next.allow_fallback_art ?? false,
-        prefer_high_res_banners: next.prefer_high_res_banners ?? false,
-        live_tab_enabled: next.live_tab_enabled ?? true,
-        live_monitored_channel_ids: next.live_monitored_channel_ids ?? [],
-        comment_limit: next.comment_limit,
-        max_replies_per_comment: next.max_replies_per_comment ?? 3,
-        requests_per_second: next.requests_per_second ?? 3,
-        youtube_api_key: "",
-      });
-      setYoutubeApiKeyConfigured(next.youtube_api_key_configured ?? false);
-      setClearYoutubeApiKeyRequested(false);
+      populateSyncDraft(next);
       setSyncDirty(false);
       pushToast("success", "Sync settings saved");
     } catch (error) {
       pushToast("error", "Unable to save sync settings", error instanceof Error ? error.message : "Unknown sync error");
     } finally {
       setSyncSaving(false);
+    }
+  }
+
+  async function uploadYoutubeCookies(file: File) {
+    setYoutubeCookiesUploading(true);
+    try {
+      const next = await api.uploadYoutubeCookies(file);
+      syncState.setData(next);
+      populateSyncDraft(next);
+      pushToast("success", "YouTube live cookies uploaded");
+    } catch (error) {
+      pushToast("error", "Unable to upload YouTube cookies", error instanceof Error ? error.message : "Unknown upload error");
+    } finally {
+      setYoutubeCookiesUploading(false);
+    }
+  }
+
+  async function removeYoutubeCookies() {
+    setYoutubeCookiesRemoving(true);
+    try {
+      const next = await api.deleteYoutubeCookies();
+      syncState.setData(next);
+      populateSyncDraft(next);
+      pushToast("success", "YouTube live cookies removed");
+    } catch (error) {
+      pushToast("error", "Unable to remove YouTube cookies", error instanceof Error ? error.message : "Unknown removal error");
+    } finally {
+      setYoutubeCookiesRemoving(false);
     }
   }
 
@@ -2209,6 +2235,19 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                     )}
                   </div>
                 ) : null}
+                <input
+                  ref={youtubeCookiesInputRef}
+                  type="file"
+                  accept=".txt,text/plain"
+                  hidden
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.currentTarget.value = "";
+                    if (file) {
+                      void uploadYoutubeCookies(file);
+                    }
+                  }}
+                />
                 <label className="settings-field">
                   <span>YouTube API key</span>
                   <input
@@ -2245,6 +2284,37 @@ export function SettingsPage({ profile, preferences, onPreferencesChange, onProf
                     </button>
                   </div>
                 ) : null}
+                <div className="settings-field-hint-row">
+                  <span className="settings-field-hint">
+                    {syncState.data?.youtube_cookies_configured
+                      ? `YouTube live cookies are configured${youtubeCookiesUpdatedLabel ? ` • updated ${youtubeCookiesUpdatedLabel}` : ""}. Halcyon only uses them when YouTube blocks an embedded livestream.`
+                      : "Optional live-only fallback. Upload YouTube cookies to let Halcyon try authenticated playback when YouTube blocks an embedded livestream."}
+                  </span>
+                  <div className="settings-actions-row">
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      disabled={youtubeCookiesUploading || youtubeCookiesRemoving}
+                      onClick={() => youtubeCookiesInputRef.current?.click()}
+                    >
+                      {youtubeCookiesUploading
+                        ? "Uploading..."
+                        : syncState.data?.youtube_cookies_configured
+                          ? "Replace cookies"
+                          : "Upload cookies"}
+                    </button>
+                    {syncState.data?.youtube_cookies_configured ? (
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        disabled={youtubeCookiesUploading || youtubeCookiesRemoving}
+                        onClick={() => void removeYoutubeCookies()}
+                      >
+                        {youtubeCookiesRemoving ? "Removing..." : "Remove cookies"}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
                 <div className="settings-quota-meter" aria-label="Estimated YouTube API usage">
                   <div className="settings-quota-meter-header">
                     <strong>Estimated daily YouTube API quota</strong>

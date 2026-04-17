@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { type Preferences, api } from "../api/client";
 import { AvatarImage } from "../components/AvatarImage";
+import { HalcyonPlayer } from "../components/HalcyonPlayer";
 import { LinkifiedText } from "../components/LinkifiedText";
 import { useAsyncData } from "../hooks/useAsyncData";
 import {
@@ -53,6 +54,7 @@ export function LiveWatchPage({ preferences }: LiveWatchPageProps) {
   const { youtubeVideoId } = useParams();
   const playerShellRef = useRef<HTMLDivElement | null>(null);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
+  const [playerError, setPlayerError] = useState<string | null>(null);
   const [displayMode, setDisplayMode] = useState<"default" | "theater">(() =>
     resolvePlayerModePreference(preferences.defaultPlayerMode),
   );
@@ -86,6 +88,7 @@ export function LiveWatchPage({ preferences }: LiveWatchPageProps) {
 
   useEffect(() => {
     setDescriptionExpanded(false);
+    setPlayerError(null);
   }, [youtubeVideoId]);
 
   useEffect(() => {
@@ -184,6 +187,58 @@ export function LiveWatchPage({ preferences }: LiveWatchPageProps) {
       : null;
   const chatPanelHeight = chatHeight ? `${chatHeight}px` : "min(68vh, 720px)";
   const hasEmbeddedChat = Boolean(chatUrl);
+  const hasDirectPlayback =
+    data.playback_mode !== "youtube-embed" && Boolean(data.playback_url);
+  const embedBlockedWithoutFallback =
+    !hasDirectPlayback && Boolean(data.embed_blocked_reason);
+  const playerControls = (
+    <div className="player-topbar">
+      <div className="player-topbar-right">
+        <button
+          className={`icon-button floating-control floating-control-fades-when-active ${displayMode === "theater" ? "active-chip" : ""}`}
+          onClick={() =>
+            setDisplayMode((current) =>
+              current === "default" ? "theater" : "default",
+            )
+          }
+          aria-label="Toggle theater mode"
+          type="button"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            className="icon-button-svg"
+            aria-hidden="true"
+          >
+            <path
+              d="M4 6.75A2.75 2.75 0 0 1 6.75 4h10.5A2.75 2.75 0 0 1 20 6.75v10.5A2.75 2.75 0 0 1 17.25 20H6.75A2.75 2.75 0 0 1 4 17.25zm1.5 0v10.5c0 .69.56 1.25 1.25 1.25h2.5V5.5h-2.5c-.69 0-1.25.56-1.25 1.25m5.25-1.25v13h6.5c.69 0 1.25-.56 1.25-1.25V6.75c0-.69-.56-1.25-1.25-1.25z"
+              fill="currentColor"
+            />
+          </svg>
+        </button>
+        <button
+          className={`icon-button floating-control ${isFullscreen ? "active-chip" : ""}`}
+          onClick={() =>
+            void (isFullscreen
+              ? exitFullscreen()
+              : requestFullscreen(playerShellRef.current))
+          }
+          aria-label="Toggle fullscreen"
+          type="button"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            className="icon-button-svg"
+            aria-hidden="true"
+          >
+            <path
+              d="M5.75 4h4.5v1.5h-3v3h-1.5zm8 0h4.5v4.5h-1.5v-3h-3zm3 8h1.5v4.5h-4.5V15h3zm-9.5 3h3v1.5h-4.5V12h1.5z"
+              fill="currentColor"
+            />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
 
   return (
     <div
@@ -198,61 +253,60 @@ export function LiveWatchPage({ preferences }: LiveWatchPageProps) {
                 className="video-frame advanced-player watch-player-frame live-watch-player-frame"
               >
                 <div className="live-embed-shell">
-                  <iframe
-                    className="live-player-embed"
-                    src={data.embed_url}
-                    title={displayTitle}
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                    allowFullScreen
-                  />
-                  <div className="player-topbar">
-                    <div className="player-topbar-right">
-                      <button
-                        className={`icon-button floating-control floating-control-fades-when-active ${displayMode === "theater" ? "active-chip" : ""}`}
-                        onClick={() =>
-                          setDisplayMode((current) =>
-                            current === "default" ? "theater" : "default",
-                          )
-                        }
-                        aria-label="Toggle theater mode"
-                        type="button"
+                  {hasDirectPlayback && data.playback_url ? (
+                    <>
+                      <HalcyonPlayer
+                        source={data.playback_url}
+                        autoplay={preferences.autoplay}
+                        captions={[]}
+                        captionsEnabled={false}
+                        mousewheelVolumeControl={preferences.mousewheelVolumeControl}
+                        mode={displayMode}
+                        onFatalError={setPlayerError}
+                      />
+                      {playerControls}
+                    </>
+                  ) : embedBlockedWithoutFallback ? (
+                    <div
+                      className="live-chat-empty"
+                      style={{ height: "100%", minHeight: "20rem", padding: "1.5rem" }}
+                    >
+                      <p>{data.embed_blocked_reason}</p>
+                      <p className="muted-copy">
+                        Upload a YouTube cookies file in Settings to let Halcyon try authenticated live playback for blocked streams.
+                      </p>
+                      <a
+                        className="ghost-button"
+                        href={data.watch_url}
+                        target="_blank"
+                        rel="noreferrer"
                       >
-                        <svg
-                          viewBox="0 0 24 24"
-                          className="icon-button-svg"
-                          aria-hidden="true"
-                        >
-                          <path
-                            d="M4 6.75A2.75 2.75 0 0 1 6.75 4h10.5A2.75 2.75 0 0 1 20 6.75v10.5A2.75 2.75 0 0 1 17.25 20H6.75A2.75 2.75 0 0 1 4 17.25zm1.5 0v10.5c0 .69.56 1.25 1.25 1.25h2.5V5.5h-2.5c-.69 0-1.25.56-1.25 1.25m5.25-1.25v13h6.5c.69 0 1.25-.56 1.25-1.25V6.75c0-.69-.56-1.25-1.25-1.25z"
-                            fill="currentColor"
-                          />
-                        </svg>
-                      </button>
-                      <button
-                        className={`icon-button floating-control ${isFullscreen ? "active-chip" : ""}`}
-                        onClick={() =>
-                          void (isFullscreen
-                            ? exitFullscreen()
-                            : requestFullscreen(playerShellRef.current))
-                        }
-                        aria-label="Toggle fullscreen"
-                        type="button"
-                      >
-                        <svg
-                          viewBox="0 0 24 24"
-                          className="icon-button-svg"
-                          aria-hidden="true"
-                        >
-                          <path
-                            d="M5.75 4h4.5v1.5h-3v3h-1.5zm8 0h4.5v4.5h-1.5v-3h-3zm3 8h1.5v4.5h-4.5V15h3zm-9.5 3h3v1.5h-4.5V12h1.5z"
-                            fill="currentColor"
-                          />
-                        </svg>
-                      </button>
+                        Open on YouTube
+                      </a>
                     </div>
-                  </div>
+                  ) : (
+                    <>
+                      <iframe
+                        className="live-player-embed"
+                        src={data.embed_url}
+                        title={displayTitle}
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                        allowFullScreen
+                      />
+                      {playerControls}
+                    </>
+                  )}
                 </div>
               </div>
+              {playerError ? (
+                <div
+                  className="watch-description live-watch-description-panel"
+                  style={{ marginTop: "0.75rem" }}
+                >
+                  <strong>Live playback fallback failed</strong>
+                  <p className="muted-copy">{playerError}</p>
+                </div>
+              ) : null}
             </div>
 
             <div className="watch-meta-slot">

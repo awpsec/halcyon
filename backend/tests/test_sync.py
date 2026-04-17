@@ -72,6 +72,95 @@ def test_fetch_channel_about_details_parses_counts_without_api(monkeypatch):
     assert result["video_count"] == 6_945
 
 
+def test_live_embed_blocked_reason_detects_age_gate():
+    html = """
+    <html>
+      <body>
+        <script>
+          var ytInitialPlayerResponse = {
+            "playabilityStatus": {
+              "status": "LOGIN_REQUIRED",
+              "reason": "This video is age-restricted and only available on YouTube."
+            }
+          };
+        </script>
+      </body>
+    </html>
+    """
+
+    assert (
+        routes_service._live_embed_blocked_reason_from_html(html)
+        == "This live stream needs an age-verified YouTube session."
+    )
+
+
+def test_resolve_live_playback_uses_cookies_only_for_blocked_embeds(tmp_path: Path, monkeypatch):
+    cookie_path = tmp_path / "youtube-cookies.txt"
+    cookie_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    monkeypatch.setattr(routes_service.settings, "config_dir", tmp_path)
+
+    async def fake_fetch(_youtube_video_id: str):
+        return """
+        <html>
+          <body>
+            <script>
+              var ytInitialPlayerResponse = {
+                "playabilityStatus": {
+                  "status": "LOGIN_REQUIRED",
+                  "reason": "This video is age-restricted and only available on YouTube."
+                }
+              };
+            </script>
+          </body>
+        </html>
+        """
+
+    monkeypatch.setattr(routes_service, "_fetch_live_watch_page_html", fake_fetch)
+    monkeypatch.setattr(
+        routes_service,
+        "_extract_live_playback_url_sync",
+        lambda youtube_video_id, path: (
+            "https://example.com/live.m3u8"
+            if youtube_video_id == "abc123def45" and path == cookie_path
+            else None
+        ),
+    )
+
+    result = asyncio.run(routes_service._resolve_live_playback("abc123def45"))
+
+    assert result["playback_mode"] == "direct"
+    assert result["playback_url"] == "https://example.com/live.m3u8"
+    assert result["embed_blocked_reason"] == "This live stream needs an age-verified YouTube session."
+
+
+def test_resolve_live_playback_does_not_switch_when_no_cookies(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(routes_service.settings, "config_dir", tmp_path)
+
+    async def fake_fetch(_youtube_video_id: str):
+        return """
+        <html>
+          <body>
+            <script>
+              var ytInitialPlayerResponse = {
+                "playabilityStatus": {
+                  "status": "LOGIN_REQUIRED",
+                  "reason": "This video is age-restricted and only available on YouTube."
+                }
+              };
+            </script>
+          </body>
+        </html>
+        """
+
+    monkeypatch.setattr(routes_service, "_fetch_live_watch_page_html", fake_fetch)
+
+    result = asyncio.run(routes_service._resolve_live_playback("abc123def45"))
+
+    assert result["playback_mode"] == "youtube-embed"
+    assert result["playback_url"] is None
+    assert result["embed_blocked_reason"] == "This live stream needs an age-verified YouTube session."
+
+
 def test_infer_channel_ids_from_neighbor_titles_rejects_low_signal_overlap(tmp_path: Path):
     with make_session(tmp_path) as db:
         generic_channel = Channel(name="Unknown Channel", slug="unknown-channel")

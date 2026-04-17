@@ -292,6 +292,8 @@ class SyncSettingsOut(OrmModel):
     last_live_sync_at: datetime | None = None
     last_subtitle_sync_at: datetime | None = None
     youtube_api_key_configured: bool = False
+    youtube_cookies_configured: bool = False
+    youtube_cookies_updated_at: datetime | None = None
     youtube_api_quota_daily_limit: int = 10_000
     youtube_api_quota_used_units: int = 0
     youtube_api_quota_remaining_units: int = 10_000
@@ -407,6 +409,9 @@ class LiveStreamOut(BaseModel):
     watch_url: str
     embed_url: str
     chat_enabled: bool = True
+    playback_mode: str = "youtube-embed"
+    playback_url: str | None = None
+    embed_blocked_reason: str | None = None
 
 
 class LiveOverviewOut(BaseModel):
