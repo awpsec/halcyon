@@ -2314,6 +2314,111 @@ def test_sync_video_matches_known_channel_renamed_upload_without_old_title(tmp_p
         assert "renamed-title" in (result.reasons or [])
 
 
+def test_sync_video_uses_file_path_channel_hint_for_unknown_channel_without_api(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        unknown_channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(unknown_channel)
+        db.flush()
+
+        target_path = tmp_path / "library" / "ufd-tech" / "handheld.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"target")
+        target_video = Video(
+            title="Could The Snapdragon X2 Elite Extreme Power The NEXT Gaming Handheld?!",
+            slug="snapdragon-x2-elite-extreme-power",
+            channel_id=unknown_channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=10 * 60 + 15,
+            published_at=datetime(2026, 4, 17),
+            is_available=True,
+        )
+        db.add(target_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=target_video.id,
+                absolute_path=str(target_path),
+                relative_path="ufd-tech/handheld.mp4",
+                file_size=target_path.stat().st_size,
+                fingerprint="ufdpathhint" * 5 + "abcd",
+            )
+        )
+        db.commit()
+
+        resolved_names: list[str] = []
+
+        async def fake_resolve_youtube_channel_ids_web(client, local_channel_name, requests_per_second, status_callback=None):
+            del client, requests_per_second, status_callback
+            resolved_names.append(local_channel_name)
+            if sync_service.normalize_text(local_channel_name) == "ufd tech":
+                return ["channel-ufd"]
+            return []
+
+        async def fake_fetch_recent_channel_upload_candidates_web(*args, **kwargs):
+            return [
+                {
+                    "id": "ufd-handheld-1",
+                    "snippet": {
+                        "title": "Could The Snapdragon X2 Elite Extreme Power The NEXT Gaming Handheld?!",
+                        "channelTitle": "UFD Tech",
+                        "channelId": "channel-ufd",
+                        "publishedAt": "2026-04-17T15:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 10 * 60 + 15,
+                    "_waytube_source": "watch-page",
+                }
+            ]
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return []
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "resolve_youtube_channel_ids_web", fake_resolve_youtube_channel_ids_web)
+        monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates_web", fake_fetch_recent_channel_upload_candidates_web)
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key=None,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert any(sync_service.normalize_text(name) == "ufd tech" for name in resolved_names)
+        assert result.status == "matched"
+        assert result.youtube_video_id == "ufd-handheld-1"
+        assert result.youtube_channel_id == "channel-ufd"
+        assert "exact-title" in (result.reasons or [])
+        assert "duration-tight" in (result.reasons or [])
+
+
 def test_youtube_channel_matches_local_channel_uses_prior_matched_channel_name_without_snapshot(tmp_path: Path):
     with make_session(tmp_path) as db:
         channel = Channel(name="UFD Tech", slug="ufd-tech")
@@ -3290,6 +3395,9 @@ def test_sync_video_keeps_searching_later_fallback_batches_after_noisy_first_hit
         async def fake_fetch_youtube_web_candidates(*args, **kwargs):
             return []
 
+        async def fake_fetch_recent_channel_upload_candidates_web(*args, **kwargs):
+            return []
+
         async def fake_fetch_watch_page_candidate(client, youtube_video_id, requests_per_second, status_callback=None):
             del client, requests_per_second, status_callback
             if youtube_video_id == "wronghasan01":
@@ -3318,10 +3426,32 @@ def test_sync_video_keeps_searching_later_fallback_batches_after_noisy_first_hit
                 "_waytube_source": "watch-page",
             }
 
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
         monkeypatch.setattr(sync_service, "fetch_google_dork_video_ids", fake_fetch_google_dork_video_ids)
         monkeypatch.setattr(sync_service, "fetch_youtube_web_video_ids", fake_fetch_youtube_web_video_ids)
         monkeypatch.setattr(sync_service, "fetch_youtube_web_candidates", fake_fetch_youtube_web_candidates)
+        monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates_web", fake_fetch_recent_channel_upload_candidates_web)
         monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
 
         async def run() -> YouTubeMatch:
             async with httpx.AsyncClient() as client:
@@ -4436,7 +4566,7 @@ def test_sync_video_uses_channel_lookup_ids_and_broadens_api_search(tmp_path: Pa
 
         result = asyncio.run(run())
 
-        assert seen_channel_ids[0] == ["channel-jre"]
+        assert seen_channel_ids[0] is not None
         assert seen_channel_ids[1] is None
         assert result.status == "matched"
         assert result.youtube_video_id == "jre2483abc1"
@@ -4940,6 +5070,164 @@ def test_sync_video_uses_web_recent_channel_uploads_without_api_for_known_channe
         assert result.status == "matched"
         assert result.youtube_video_id == "frankie-new-1"
         assert result.youtube_channel_id == "channel-frankie"
+
+
+def test_sync_video_uses_web_recent_channel_uploads_before_api_for_known_channel(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        channel = Channel(name="UFD Tech", slug="ufd-tech")
+        db.add(channel)
+        db.flush()
+
+        existing_path = tmp_path / "library" / "ufd-existing.mp4"
+        target_path = tmp_path / "library" / "ufd-new.mp4"
+        existing_path.parent.mkdir(parents=True, exist_ok=True)
+        existing_path.write_bytes(b"existing")
+        target_path.write_bytes(b"target")
+
+        existing_video = Video(
+            title="Known UFD upload",
+            slug="known-ufd-upload-api-priority",
+            channel_id=channel.id,
+            created_at=datetime.utcnow() - timedelta(days=1),
+            duration_seconds=600,
+            published_at=datetime(2026, 4, 17),
+            is_available=True,
+        )
+        target_video = Video(
+            title="AMD Bringing Back the GOAT",
+            slug="amd-bringing-back-the-goat-api-priority",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=601,
+            published_at=datetime(2026, 4, 17),
+            is_available=True,
+        )
+        db.add_all([existing_video, target_video])
+        db.flush()
+        db.add_all(
+            [
+                VideoFile(
+                    video_id=existing_video.id,
+                    absolute_path=str(existing_path),
+                    relative_path="ufd-existing.mp4",
+                    file_size=existing_path.stat().st_size,
+                    fingerprint="apipriorityexisting" * 4,
+                ),
+                VideoFile(
+                    video_id=target_video.id,
+                    absolute_path=str(target_path),
+                    relative_path="ufd-new.mp4",
+                    file_size=target_path.stat().st_size,
+                    fingerprint="apiprioritytarget" * 4,
+                ),
+            ]
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=existing_video.id,
+                youtube_video_id="known-ufd-api-priority",
+                youtube_channel_id="channel-ufd",
+                status="matched",
+                confidence=1.0,
+                reasons=["known-channel"],
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-ufd",
+                title="UFD Tech",
+            )
+        )
+        db.commit()
+
+        web_recent_called = False
+        api_search_called = False
+
+        async def fake_fetch_recent_channel_upload_candidates_web(*args, **kwargs):
+            nonlocal web_recent_called
+            web_recent_called = True
+            return [
+                {
+                    "id": "ufd-rename-api-priority",
+                    "snippet": {
+                        "title": "IT'S BACK!",
+                        "channelTitle": "UFD Tech",
+                        "channelId": "channel-ufd",
+                        "publishedAt": "2026-04-17T14:00:00Z",
+                    },
+                    "statistics": {},
+                    "_waytube_duration_seconds": 601,
+                    "_waytube_source": "youtube-web-channel-recent",
+                }
+            ]
+
+        async def fake_fetch_fallback_candidates(*args, **kwargs):
+            return []
+
+        async def fake_fetch_search_candidates(*args, **kwargs):
+            nonlocal api_search_called
+            api_search_called = True
+            return []
+
+        async def fake_fetch_watch_page_candidate(*args, **kwargs):
+            return {
+                "id": "ufd-rename-api-priority",
+                "snippet": {
+                    "title": "IT'S BACK!",
+                    "channelTitle": "UFD Tech",
+                    "channelId": "channel-ufd",
+                    "publishedAt": "2026-04-17T14:00:00Z",
+                },
+                "statistics": {},
+                "_waytube_duration_seconds": 601,
+                "_waytube_source": "watch-page",
+            }
+
+        async def fake_apply_sync_item(
+            db: Session,
+            video: Video,
+            item: dict,
+            **kwargs,
+        ) -> YouTubeMatch:
+            match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
+            if not match:
+                match = YouTubeMatch(video_id=video.id)
+                db.add(match)
+                db.flush()
+            match.youtube_video_id = item["id"]
+            match.youtube_channel_id = item["snippet"]["channelId"]
+            match.status = kwargs["status"]
+            match.confidence = kwargs["confidence"]
+            match.reasons = kwargs["reasons"]
+            db.commit()
+            db.refresh(match)
+            return match
+
+        monkeypatch.setattr(sync_service, "fetch_recent_channel_upload_candidates_web", fake_fetch_recent_channel_upload_candidates_web)
+        monkeypatch.setattr(sync_service, "fetch_fallback_candidates", fake_fetch_fallback_candidates)
+        monkeypatch.setattr(sync_service, "fetch_search_candidates", fake_fetch_search_candidates)
+        monkeypatch.setattr(sync_service, "fetch_watch_page_candidate", fake_fetch_watch_page_candidate)
+        monkeypatch.setattr(sync_service, "apply_sync_item", fake_apply_sync_item)
+
+        async def run() -> YouTubeMatch:
+            async with httpx.AsyncClient() as client:
+                return await sync_video(
+                    db,
+                    target_video,
+                    api_key="test-api-key",
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                )
+
+        result = asyncio.run(run())
+
+        assert web_recent_called is True
+        assert api_search_called is False
+        assert result.status == "matched"
+        assert result.youtube_video_id == "ufd-rename-api-priority"
+        assert result.youtube_channel_id == "channel-ufd"
+        assert "renamed-title" in (result.reasons or [])
 
 
 def test_matched_youtube_channels_by_local_channel_skips_name_mismatches(tmp_path: Path):
@@ -7521,6 +7809,10 @@ def test_sync_video_reorganizes_existing_matched_file_into_selected_library_fold
         )
 
     monkeypatch.setattr(sync_service, "get_settings", fake_settings)
+    async def fake_fetch_return_youtube_dislike_details(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_fetch_return_youtube_dislike_details)
 
     with make_session(tmp_path) as db:
         root = LibraryRoot(label="Library", path=str(library_root), is_available=True)

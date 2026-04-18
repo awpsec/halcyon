@@ -49,7 +49,7 @@ from app.models.entities import (
 )
 from app.core.config import get_settings
 from app.services.media import download_thumbnail, fingerprint_file, generate_thumbnail
-from app.services.utils import canonicalize_search_text, clean_display_title, is_generic_channel_name, normalize_text, parse_episode_number, resolve_display_name, slugify, title_similarity, tokenize_text
+from app.services.utils import canonicalize_search_text, clean_display_title, infer_folder_hints, is_generic_channel_name, normalize_text, parse_episode_number, resolve_display_name, slugify, title_similarity, tokenize_text
 
 YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 GOOGLE_SEARCH_BASE = "https://www.google.com/search"
@@ -2524,6 +2524,7 @@ def build_search_queries(
     video: Video,
     *,
     include_channel: bool = True,
+    local_channel_names: list[str] | None = None,
     channel_hints: list[str] | None = None,
 ) -> list[str]:
     raw_title = clean_display_title(video.title)
@@ -2532,11 +2533,19 @@ def build_search_queries(
     compact_title = " ".join(title_tokens[:12]) if title_tokens else normalized_title
     queries: list[str] = []
     hinted_channels: list[str] = []
+    local_channels: list[str] = []
+    for local_name in local_channel_names or []:
+        cleaned_local_name = clean_display_title(local_name or "")
+        if cleaned_local_name and not is_generic_channel_name(cleaned_local_name):
+            local_channels.extend(channel_name_query_variants(cleaned_local_name))
+    if not local_channels and video.channel and video.channel.name and not is_generic_channel_name(video.channel.name):
+        local_channels.extend(channel_name_query_variants(video.channel.name))
+    local_channels = _dedupe_non_empty_strings(local_channels)
     for hint in channel_hints or []:
         hinted_channels.extend(channel_name_query_variants(hint))
     hinted_channels = _dedupe_non_empty_strings(hinted_channels)
-    if include_channel and video.channel and video.channel.name and not is_generic_channel_name(video.channel.name):
-        for channel_name in channel_name_query_variants(video.channel.name):
+    if include_channel:
+        for channel_name in local_channels:
             queries.append(f"{channel_name} {raw_title}".strip())
             queries.append(f"{channel_name} {compact_title}".strip())
             queries.append(f"\"{compact_title}\" {channel_name}".strip())
@@ -2566,6 +2575,26 @@ def build_search_queries(
         if cleaned and cleaned not in deduped:
             deduped.append(cleaned)
     return deduped[:8]
+
+
+def local_channel_name_hints(video: Video) -> list[str]:
+    hints: list[str] = []
+    if video.channel and video.channel.name and not is_generic_channel_name(video.channel.name):
+        hints.append(clean_display_title(video.channel.name))
+    for video_file in video.files or []:
+        candidate_path_text = str(video_file.relative_path or "").strip() or str(video_file.absolute_path or "").strip()
+        if not candidate_path_text:
+            continue
+        try:
+            _title, channel_hint, _series_hint = infer_folder_hints(Path(candidate_path_text))
+        except Exception:
+            continue
+        cleaned_channel_hint = clean_display_title(channel_hint or "")
+        if not cleaned_channel_hint or is_generic_channel_name(cleaned_channel_hint):
+            continue
+        if cleaned_channel_hint not in hints:
+            hints.append(cleaned_channel_hint)
+    return hints
 
 
 def fallback_query_batches(queries: list[str], *, batch_size: int = 4) -> list[list[str]]:
@@ -5010,6 +5039,7 @@ async def sync_video(
     logger.info("Sync video start video_id=%s title=%s", video.id, video.title)
     effective_api_key = api_key
     api_error: YouTubeSyncError | None = None
+    local_channel_names = local_channel_name_hints(video)
     if status_callback:
         status_callback(phase="prepare", title=video.title, source="sync")
     existing_match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
@@ -5299,30 +5329,32 @@ async def sync_video(
     if not force:
         hint_channel_ids.extend(infer_channel_ids_from_series_neighbors(db, video))
     authoritative_channel_ids = _dedupe_non_empty_strings(authoritative_channel_ids)
-    if video.channel and not is_generic_channel_name(video.channel.name) and channel_cache is not None:
+    if local_channel_names and channel_cache is not None:
         for channel_snapshot in channel_cache.values():
             title = channel_snapshot.get("snippet", {}).get("title") if channel_snapshot else None
             channel_id = channel_snapshot.get("id") if channel_snapshot else None
-            if title and channel_id and channel_names_confidently_match(video.channel.name, title):
+            if title and channel_id and any(channel_names_confidently_match(local_name, title) for local_name in local_channel_names):
                 authoritative_channel_ids.append(channel_id)
                 if channel_id not in name_verified_channel_ids:
                     name_verified_channel_ids.append(channel_id)
         authoritative_channel_ids = _dedupe_non_empty_strings(authoritative_channel_ids)
     if (
         not authoritative_channel_ids
-        and video.channel
-        and not is_generic_channel_name(video.channel.name)
+        and local_channel_names
         and not force
     ):
-        for channel_id in await resolve_youtube_channel_ids_web(
-            client,
-            video.channel.name,
-            requests_per_second,
-            status_callback=status_callback,
-        ):
-            authoritative_channel_ids.append(channel_id)
-            if channel_id not in name_verified_channel_ids:
-                name_verified_channel_ids.append(channel_id)
+        for local_channel_name in local_channel_names:
+            for channel_id in await resolve_youtube_channel_ids_web(
+                client,
+                local_channel_name,
+                requests_per_second,
+                status_callback=status_callback,
+            ):
+                authoritative_channel_ids.append(channel_id)
+                if channel_id not in name_verified_channel_ids:
+                    name_verified_channel_ids.append(channel_id)
+            if authoritative_channel_ids:
+                break
         authoritative_channel_ids = _dedupe_non_empty_strings(authoritative_channel_ids)
     if use_local_channel_bucket and video.channel:
         authoritative_channel_ids = [
@@ -5343,11 +5375,7 @@ async def sync_video(
         if channel_id not in authoritative_channel_ids
     ]
 
-    include_local_channel_queries = bool(
-        not force
-        and video.channel
-        and not is_generic_channel_name(video.channel.name)
-    )
+    include_local_channel_queries = bool(not force and local_channel_names)
     channel_hints = channel_name_hints_for_ids(
         db,
         _dedupe_non_empty_strings([*authoritative_channel_ids, *hint_channel_ids]),
@@ -5355,10 +5383,11 @@ async def sync_video(
     scoped_queries = build_search_queries(
         video,
         include_channel=include_local_channel_queries or not authoritative_channel_ids,
+        local_channel_names=local_channel_names,
         channel_hints=channel_hints,
     )
     candidates: list[dict] = []
-    if authoritative_channel_ids and not effective_api_key:
+    if authoritative_channel_ids:
         merge_candidate_items(
             candidates,
             await fetch_recent_channel_upload_candidates_web(
@@ -5460,18 +5489,26 @@ async def sync_video(
             existing_match.api_discovery_blocked_until.isoformat(),
             existing_match.api_discovery_attempt_count or 0,
         )
-    if not authoritative_channel_ids and video.channel and not is_generic_channel_name(video.channel.name) and effective_api_key and api_discovery_allowed:
+    if not authoritative_channel_ids and local_channel_names and effective_api_key and api_discovery_allowed:
         try:
             api_discovery_attempted = True
-            for candidate in await fetch_channel_candidates(client, effective_api_key, video.channel.name, requests_per_second):
-                snippet = candidate.get("snippet", {})
-                if channel_names_confidently_match(video.channel.name, snippet.get("channelTitle")) and candidate.get("id", {}).get("channelId"):
-                    youtube_channel_id = candidate["id"]["channelId"]
-                    authoritative_channel_ids.append(youtube_channel_id)
-                    if youtube_channel_id not in name_verified_channel_ids:
-                        name_verified_channel_ids.append(youtube_channel_id)
+            for local_channel_name in local_channel_names:
+                for candidate in await fetch_channel_candidates(client, effective_api_key, local_channel_name, requests_per_second):
+                    snippet = candidate.get("snippet", {})
+                    if channel_names_confidently_match(local_channel_name, snippet.get("channelTitle")) and candidate.get("id", {}).get("channelId"):
+                        youtube_channel_id = candidate["id"]["channelId"]
+                        authoritative_channel_ids.append(youtube_channel_id)
+                        if youtube_channel_id not in name_verified_channel_ids:
+                            name_verified_channel_ids.append(youtube_channel_id)
+                if authoritative_channel_ids:
+                    break
         except YouTubeSyncError as exc:
-            logger.warning("Sync channel fallback video_id=%s channel=%s error=%s", video.id, video.channel.name, exc)
+            logger.warning(
+                "Sync channel fallback video_id=%s channels=%s error=%s",
+                video.id,
+                ",".join(local_channel_names),
+                exc,
+            )
             api_error = exc
             if exc.fatal:
                 effective_api_key = None
@@ -5496,6 +5533,7 @@ async def sync_video(
         scoped_queries = build_search_queries(
             video,
             include_channel=include_local_channel_queries or not authoritative_channel_ids,
+            local_channel_names=local_channel_names,
             channel_hints=channel_hints,
         )
 
@@ -5521,6 +5559,7 @@ async def sync_video(
                     build_search_queries(
                         video,
                         include_channel=include_local_channel_queries or not authoritative_channel_ids,
+                        local_channel_names=local_channel_names,
                         channel_hints=channel_hints,
                     ),
                     requests_per_second,
