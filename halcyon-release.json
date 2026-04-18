@@ -1,6 +1,6 @@
 {
   "name": "halcyon",
-  "version": "1.1.26-418.005",
+  "version": "1.1.26-418.006",
   "repository_url": "https://github.com/awpsec/halcyon",
   "manifest_url": "https://raw.githubusercontent.com/awpsec/halcyon/main/halcyon-release.json",
   "update_command": "halcyon update"
