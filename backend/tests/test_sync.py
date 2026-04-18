@@ -7,6 +7,7 @@ import types
 import httpx
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
+from starlette.requests import Request
 
 import app.api.routes as routes_service
 import app.services.background as background_service
@@ -210,16 +211,31 @@ def test_live_stream_detail_keeps_chat_enabled_for_direct_playback(tmp_path: Pat
         monkeypatch.setattr(routes_service, "_detect_live_chat_enabled", fake_detect_live_chat_enabled)
         monkeypatch.setattr(routes_service, "_resolve_live_playback", fake_resolve_live_playback)
 
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/live/abc123def45",
+                "headers": [],
+                "query_string": b"",
+                "server": ("testserver", 80),
+                "scheme": "http",
+                "client": ("127.0.0.1", 12345),
+                "root_path": "",
+            }
+        )
+
         result = asyncio.run(
             routes_service.live_stream_detail(
                 "abc123def45",
+                request=request,
                 db=db,
                 current_user=user,
             )
         )
 
         assert result.playback_mode == "direct"
-        assert result.playback_url == "https://example.com/live.m3u8"
+        assert result.playback_url.startswith("/api/live/abc123def45/asset?src=")
         assert result.chat_enabled is True
 
 
@@ -287,6 +303,27 @@ def test_extract_live_playback_url_sync_tries_default_logged_in_clients_first(mo
     assert captured_options[0]["format"] == "best"
     assert captured_options[0]["extractor_args"]["youtube"]["formats"] == ["incomplete"]
     assert "player_client" not in captured_options[0]["extractor_args"]["youtube"]
+
+
+def test_rewrite_live_manifest_proxies_relative_and_uri_attribute_targets():
+    manifest = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-MAP:URI="init.mp4"
+variant.m3u8
+#EXTINF:4.000,
+segment0001.ts
+"""
+
+    rewritten = routes_service._rewrite_live_manifest(
+        manifest,
+        base_url="https://manifest.googlevideo.com/api/manifest/hls_playlist",
+        youtube_video_id="abc123def45",
+    )
+
+    assert '/api/live/abc123def45/asset?src=' in rewritten
+    assert 'URI="/api/live/abc123def45/asset?src=' in rewritten
+    assert "variant.m3u8" not in rewritten
+    assert "segment0001.ts" not in rewritten
 
 
 def test_infer_channel_ids_from_neighbor_titles_rejects_low_signal_overlap(tmp_path: Path):

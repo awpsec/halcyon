@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections import Counter
 import hashlib
 import math
@@ -11,10 +12,11 @@ import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 from fastapi import APIRouter, Cookie, Depends, File, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import and_, case, func, literal, or_, select
 from sqlalchemy.orm import Session, joinedload
 
@@ -200,6 +202,20 @@ LIVE_EMBED_BLOCKED_STATUS_VALUES = {
 }
 YOUTUBE_COOKIES_FILENAME = "youtube-cookies.txt"
 YOUTUBE_COOKIES_MAX_BYTES = 4 * 1024 * 1024
+LIVE_PROXY_ALLOWED_HOST_SUFFIXES = (
+    ".googlevideo.com",
+    ".youtube.com",
+    ".youtube-nocookie.com",
+    ".ytimg.com",
+)
+LIVE_PROXY_ALLOWED_HOSTS = {
+    "googlevideo.com",
+    "youtube.com",
+    "youtube-nocookie.com",
+    "ytimg.com",
+    "manifest.googlevideo.com",
+}
+LIVE_MANIFEST_URI_PATTERN = re.compile(r'URI="([^"]+)"')
 
 
 def _normalize_fs_path(value: str | Path) -> str:
@@ -428,6 +444,55 @@ def _authoritative_youtube_match(video: Video) -> YouTubeMatch | None:
     if match and match.status == "matched":
         return match
     return None
+
+
+def _encode_live_proxy_src(raw_url: str) -> str:
+    return base64.urlsafe_b64encode(raw_url.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _decode_live_proxy_src(encoded_url: str) -> str | None:
+    try:
+        padding = "=" * (-len(encoded_url) % 4)
+        return base64.urlsafe_b64decode(f"{encoded_url}{padding}").decode("utf-8")
+    except Exception:
+        return None
+
+
+def _is_allowed_live_proxy_url(raw_url: str) -> bool:
+    parsed = urlparse(raw_url)
+    if parsed.scheme != "https":
+        return False
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        return False
+    if hostname in LIVE_PROXY_ALLOWED_HOSTS:
+        return True
+    return any(hostname.endswith(suffix) for suffix in LIVE_PROXY_ALLOWED_HOST_SUFFIXES)
+
+
+def _live_proxy_asset_path(youtube_video_id: str, raw_url: str) -> str:
+    encoded = quote(_encode_live_proxy_src(raw_url), safe="")
+    return f"{settings.api_prefix}/live/{youtube_video_id}/asset?src={encoded}"
+
+
+def _rewrite_live_manifest(manifest_text: str, *, base_url: str, youtube_video_id: str) -> str:
+    rewritten_lines: list[str] = []
+    for line in manifest_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            rewritten_lines.append(line)
+            continue
+        if stripped.startswith("#"):
+            rewritten_lines.append(
+                LIVE_MANIFEST_URI_PATTERN.sub(
+                    lambda match: f'URI="{_live_proxy_asset_path(youtube_video_id, urljoin(base_url, match.group(1)))}"',
+                    line,
+                )
+            )
+            continue
+        absolute_url = urljoin(base_url, stripped)
+        rewritten_lines.append(_live_proxy_asset_path(youtube_video_id, absolute_url))
+    return "\n".join(rewritten_lines) + ("\n" if manifest_text.endswith("\n") else "")
 
 
 def _youtube_cookies_path() -> Path:
@@ -1678,6 +1743,65 @@ async def _refresh_live_if_due(
     )
 
 
+async def _fetch_live_proxy_response(raw_url: str, request: Request) -> Response:
+    if not _is_allowed_live_proxy_url(raw_url):
+        raise HTTPException(status_code=400, detail="Live proxy URL is not allowed")
+    forward_headers = {
+        **REQUEST_HEADERS,
+        "Referer": "https://www.youtube.com/",
+        "Origin": "https://www.youtube.com",
+    }
+    range_header = request.headers.get("range")
+    if range_header:
+        forward_headers["Range"] = range_header
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            headers=forward_headers,
+            timeout=30.0,
+        ) as client:
+            upstream = await client.get(raw_url)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Live proxy fetch failed: {exc}") from exc
+    if upstream.is_error:
+        raise HTTPException(status_code=upstream.status_code, detail="Live proxy fetch failed")
+    content_type = upstream.headers.get("content-type", "")
+    body = upstream.content
+    youtube_video_id = _extract_youtube_video_id(request.path_params.get("youtube_video_id", "")) or ""
+    if (
+        raw_url.lower().endswith(".m3u8")
+        or "mpegurl" in content_type.lower()
+        or body.startswith(b"#EXTM3U")
+    ):
+        manifest_text = body.decode("utf-8", errors="ignore")
+        rewritten = _rewrite_live_manifest(
+            manifest_text,
+            base_url=str(upstream.url),
+            youtube_video_id=youtube_video_id,
+        )
+        return Response(
+            content=rewritten,
+            media_type="application/vnd.apple.mpegurl",
+            headers={"Cache-Control": "no-store"},
+        )
+    passthrough_headers: dict[str, str] = {"Cache-Control": "no-store"}
+    content_length = upstream.headers.get("content-length")
+    if content_length:
+        passthrough_headers["Content-Length"] = content_length
+    accept_ranges = upstream.headers.get("accept-ranges")
+    if accept_ranges:
+        passthrough_headers["Accept-Ranges"] = accept_ranges
+    content_range = upstream.headers.get("content-range")
+    if content_range:
+        passthrough_headers["Content-Range"] = content_range
+    return Response(
+        content=body,
+        media_type=content_type or None,
+        headers=passthrough_headers,
+        status_code=upstream.status_code,
+    )
+
+
 def _live_overview_payload(db: Session) -> LiveOverviewOut:
     settings_row = db.scalar(select(SyncSettings))
     if not settings_row:
@@ -2402,6 +2526,7 @@ async def live_overview(
 @router.get("/live/{youtube_video_id}", response_model=LiveStreamOut)
 async def live_stream_detail(
     youtube_video_id: str,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ) -> LiveStreamOut:
@@ -2423,9 +2548,29 @@ async def live_stream_detail(
     payload = _serialize_live_stream(db, stream)
     chat_enabled = await _detect_live_chat_enabled(youtube_video_id)
     playback = await _resolve_live_playback(youtube_video_id)
+    if playback.get("playback_mode") == "direct" and playback.get("playback_url"):
+        playback["playback_url"] = _live_proxy_asset_path(
+            youtube_video_id,
+            str(playback["playback_url"]),
+        )
     # Live chat is a separate YouTube iframe and does not depend on the stream
     # being rendered through the standard embed player.
     return payload.model_copy(update={"chat_enabled": chat_enabled, **playback})
+
+
+@router.get("/live/{youtube_video_id}/asset")
+async def live_stream_asset_proxy(
+    youtube_video_id: str,
+    request: Request,
+    src: str = Query(...),
+    current_user: UserProfile = Depends(get_current_user),
+) -> Response:
+    del current_user
+    del youtube_video_id
+    raw_url = _decode_live_proxy_src(src)
+    if not raw_url:
+        raise HTTPException(status_code=400, detail="Invalid live proxy source")
+    return await _fetch_live_proxy_response(raw_url, request)
 
 
 @router.get("/search")
