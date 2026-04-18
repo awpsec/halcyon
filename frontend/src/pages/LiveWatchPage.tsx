@@ -55,6 +55,7 @@ export function LiveWatchPage({ preferences }: LiveWatchPageProps) {
   const playerShellRef = useRef<HTMLDivElement | null>(null);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
+  const [preferredPlayer, setPreferredPlayer] = useState<"youtube" | "fallback">("youtube");
   const [displayMode, setDisplayMode] = useState<"default" | "theater">(() =>
     resolvePlayerModePreference(preferences.defaultPlayerMode),
   );
@@ -89,6 +90,7 @@ export function LiveWatchPage({ preferences }: LiveWatchPageProps) {
   useEffect(() => {
     setDescriptionExpanded(false);
     setPlayerError(null);
+    setPreferredPlayer("youtube");
   }, [youtubeVideoId]);
 
   useEffect(() => {
@@ -191,6 +193,7 @@ export function LiveWatchPage({ preferences }: LiveWatchPageProps) {
     data.playback_mode !== "youtube-embed" && Boolean(data.playback_url);
   const embedBlockedWithoutFallback =
     !hasDirectPlayback && Boolean(data.embed_blocked_reason);
+  const showingFallbackPlayer = hasDirectPlayback && preferredPlayer === "fallback";
   const playerControls = (
     <div className="player-topbar">
       <div className="player-topbar-right">
@@ -248,12 +251,47 @@ export function LiveWatchPage({ preferences }: LiveWatchPageProps) {
         <div className="watch-stage-row">
           <div className="watch-main-column">
             <div className="watch-player-slot">
+              {hasDirectPlayback ? (
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "0.65rem",
+                    alignItems: "center",
+                    marginBottom: "0.75rem",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <button
+                    type="button"
+                    className={`ghost-button ${preferredPlayer === "youtube" ? "active-chip" : ""}`}
+                    onClick={() => {
+                      setPreferredPlayer("youtube");
+                      setPlayerError(null);
+                    }}
+                  >
+                    YouTube player
+                  </button>
+                  <button
+                    type="button"
+                    className={`ghost-button ${preferredPlayer === "fallback" ? "active-chip" : ""}`}
+                    onClick={() => {
+                      setPreferredPlayer("fallback");
+                      setPlayerError(null);
+                    }}
+                  >
+                    Fallback player
+                  </button>
+                  <span className="muted-copy" style={{ fontSize: "0.92rem" }}>
+                    YouTube embed is the default. Use fallback only when the embed refuses to play.
+                  </span>
+                </div>
+              ) : null}
               <div
                 ref={playerShellRef}
                 className="video-frame advanced-player watch-player-frame live-watch-player-frame"
               >
                 <div className="live-embed-shell">
-                  {hasDirectPlayback && data.playback_url ? (
+                  {showingFallbackPlayer && data.playback_url ? (
                     <>
                       <HalcyonPlayer
                         source={data.playback_url}
@@ -287,16 +325,13 @@ export function LiveWatchPage({ preferences }: LiveWatchPageProps) {
                       </a>
                     </div>
                   ) : (
-                    <>
-                      <iframe
-                        className="live-player-embed"
-                        src={data.embed_url}
-                        title={displayTitle}
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                        allowFullScreen
-                      />
-                      {playerControls}
-                    </>
+                    <iframe
+                      className="live-player-embed"
+                      src={data.embed_url}
+                      title={displayTitle}
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                      allowFullScreen
+                    />
                   )}
                 </div>
               </div>
