@@ -305,6 +305,22 @@ def test_extract_live_playback_url_sync_tries_default_logged_in_clients_first(mo
     assert "player_client" not in captured_options[0]["extractor_args"]["youtube"]
 
 
+def test_youtube_cookies_status_prefers_stored_upload_time(tmp_path: Path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    cookie_path = config_dir / "youtube-cookies.txt"
+    cookie_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    uploaded_at = datetime(2026, 4, 18, 15, 30, 0)
+
+    monkeypatch.setattr(routes_service.settings, "config_dir", config_dir)
+    routes_service._write_youtube_cookies_uploaded_at(uploaded_at)
+
+    configured, stored_timestamp = routes_service._youtube_cookies_status_values()
+
+    assert configured is True
+    assert stored_timestamp == uploaded_at
+
+
 def test_rewrite_live_manifest_proxies_relative_and_uri_attribute_targets():
     manifest = """#EXTM3U
 #EXT-X-VERSION:3

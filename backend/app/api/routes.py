@@ -4,6 +4,7 @@ import asyncio
 import base64
 from collections import Counter
 import hashlib
+import json
 import math
 import os
 import re
@@ -202,6 +203,7 @@ LIVE_EMBED_BLOCKED_STATUS_VALUES = {
 }
 YOUTUBE_COOKIES_FILENAME = "youtube-cookies.txt"
 YOUTUBE_COOKIES_MAX_BYTES = 4 * 1024 * 1024
+YOUTUBE_COOKIES_METADATA_FILENAME = "youtube-cookies.metadata.json"
 LIVE_PROXY_ALLOWED_HOST_SUFFIXES = (
     ".googlevideo.com",
     ".youtube.com",
@@ -499,10 +501,44 @@ def _youtube_cookies_path() -> Path:
     return settings.config_dir / YOUTUBE_COOKIES_FILENAME
 
 
+def _youtube_cookies_metadata_path() -> Path:
+    return settings.config_dir / YOUTUBE_COOKIES_METADATA_FILENAME
+
+
+def _write_youtube_cookies_uploaded_at(uploaded_at: datetime) -> None:
+    metadata_path = _youtube_cookies_metadata_path()
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps({"uploaded_at": uploaded_at.replace(microsecond=0).isoformat() + "Z"}),
+        encoding="utf-8",
+    )
+
+
+def _read_youtube_cookies_uploaded_at() -> datetime | None:
+    metadata_path = _youtube_cookies_metadata_path()
+    if not metadata_path.is_file():
+        return None
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    uploaded_at = payload.get("uploaded_at") if isinstance(payload, dict) else None
+    if not isinstance(uploaded_at, str) or not uploaded_at.strip():
+        return None
+    parsed = uploaded_at.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(parsed).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
 def _youtube_cookies_status_values() -> tuple[bool, datetime | None]:
     cookie_path = _youtube_cookies_path()
     if not cookie_path.is_file():
         return False, None
+    stored_uploaded_at = _read_youtube_cookies_uploaded_at()
+    if stored_uploaded_at is not None:
+        return True, stored_uploaded_at
     try:
         updated_at = datetime.utcfromtimestamp(cookie_path.stat().st_mtime)
     except OSError:
@@ -3652,6 +3688,7 @@ async def upload_youtube_cookies(
         temp_path.unlink()
     temp_path.write_bytes(content)
     temp_path.replace(cookie_path)
+    _write_youtube_cookies_uploaded_at(datetime.utcnow())
     settings_row = db.scalar(select(SyncSettings))
     if not settings_row:
         settings_row = SyncSettings()
@@ -3670,6 +3707,9 @@ async def delete_youtube_cookies(
     cookie_path = _youtube_cookies_path()
     if cookie_path.exists():
         cookie_path.unlink()
+    metadata_path = _youtube_cookies_metadata_path()
+    if metadata_path.exists():
+        metadata_path.unlink()
     settings_row = db.scalar(select(SyncSettings))
     if not settings_row:
         settings_row = SyncSettings()

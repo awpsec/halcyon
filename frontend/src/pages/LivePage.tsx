@@ -33,6 +33,9 @@ export function LivePage() {
     let cancelled = false;
 
     async function refreshLive(initial = false) {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        return;
+      }
       try {
         const next = await api.liveOverview();
         if (!cancelled) {

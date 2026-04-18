@@ -43,6 +43,7 @@ const baseNavItems: NavItem[] = [
   { to: "/playlists", label: "Playlists" },
 ];
 const LIVE_OVERVIEW_POLL_MS = 60_000;
+const JOB_STATUS_POLL_MS = 10_000;
 const MOBILE_SHELL_MAX_WIDTH = 980;
 
 function matchesMobileUserAgent() {
@@ -220,6 +221,9 @@ export function AppShell({
     let cancelled = false;
 
     async function loadLiveOverview() {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        return;
+      }
       try {
         const next = await api.liveOverview();
         if (!cancelled) {
@@ -243,6 +247,9 @@ export function AppShell({
     let cancelled = false;
 
     async function loadJobs() {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        return;
+      }
       try {
         const next = await api.jobsStatus();
         if (!cancelled) {
@@ -258,7 +265,7 @@ export function AppShell({
     void loadJobs();
     const interval = window.setInterval(() => {
       void loadJobs();
-    }, 3500);
+    }, JOB_STATUS_POLL_MS);
 
     return () => {
       cancelled = true;

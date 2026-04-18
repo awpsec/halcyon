@@ -91,6 +91,8 @@ function applyCaptionsEnabled(node: HTMLVideoElement, enabled: boolean) {
 export function HalcyonPlayer({
   source,
   autoplay,
+  live = false,
+  preferHighQuality = false,
   captions,
   captionsEnabled = false,
   chapters = [],
@@ -107,6 +109,8 @@ export function HalcyonPlayer({
 }: {
   source: string;
   autoplay: boolean;
+  live?: boolean;
+  preferHighQuality?: boolean;
   captions: CaptionTrack[];
   captionsEnabled?: boolean;
   chapters?: ChapterMarker[];
@@ -197,6 +201,15 @@ export function HalcyonPlayer({
           lowLatencyMode: false,
           liveDurationInfinity: false,
         });
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (!preferHighQuality || !hls.levels.length) {
+            return;
+          }
+          const highestLevel = hls.levels.length - 1;
+          hls.currentLevel = highestLevel;
+          hls.nextLevel = highestLevel;
+          hls.loadLevel = highestLevel;
+        });
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (!data.fatal) return;
           clearWaitingTimer();
@@ -257,7 +270,7 @@ export function HalcyonPlayer({
       ? null
       : new Plyr(node, {
           autoplay,
-          seekTime: 5,
+          seekTime: live ? 0 : 5,
           ratio: plyrRatio,
           hideControls: true,
           captions: {
@@ -267,13 +280,8 @@ export function HalcyonPlayer({
           },
           controls: [
             "play-large",
-            "restart",
-            "rewind",
             "play",
-            "fast-forward",
-            "progress",
-            "current-time",
-            "duration",
+            ...(live ? [] : ["restart", "rewind", "fast-forward", "progress", "current-time", "duration"]),
             "mute",
             "volume",
             "captions",
@@ -285,7 +293,7 @@ export function HalcyonPlayer({
             enabled: true,
             iosNative: true,
           },
-          settings: ["captions", "speed"],
+          settings: live ? ["captions"] : ["captions", "speed"],
         });
     playerRef.current = player;
     onReadyRef.current?.(node, player);

@@ -286,6 +286,9 @@ export function HomePage({ preferences, profile }: { preferences: Preferences; p
     let cancelled = false;
 
     async function refreshLiveOverview() {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        return;
+      }
       try {
         const next = await api.liveOverview();
         if (!cancelled) {

@@ -258,6 +258,8 @@ export function LiveWatchPage({ preferences }: LiveWatchPageProps) {
                       <HalcyonPlayer
                         source={data.playback_url}
                         autoplay={preferences.autoplay}
+                        live
+                        preferHighQuality
                         captions={[]}
                         captionsEnabled={false}
                         mousewheelVolumeControl={preferences.mousewheelVolumeControl}
