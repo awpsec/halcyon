@@ -186,8 +186,10 @@ AUTH_RESET_LIMIT = 5
 AUTH_RESET_WINDOW_SECONDS = 15 * 60
 AUTH_ADMIN_RECOVERY_LIMIT = 5
 AUTH_ADMIN_RECOVERY_WINDOW_SECONDS = 15 * 60
-LIVE_REFRESH_INTERVAL_SECONDS = 300
-LIVE_EMPTY_REFRESH_INTERVAL_SECONDS = 60
+# Bias live refresh toward quota safety. It is better to tolerate slightly stale
+# live rows than to repeatedly re-check empty states and burn API-assisted paths.
+LIVE_REFRESH_INTERVAL_SECONDS = 600
+LIVE_EMPTY_REFRESH_INTERVAL_SECONDS = 900
 LIVE_STALE_AFTER_SECONDS = 1800
 DEFAULT_LIBRARY_SENTINEL = ".halcyon-library-root"
 YOUTUBE_VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
@@ -622,6 +624,27 @@ def _extract_live_playback_url_sync(youtube_video_id: str, cookie_path: Path) ->
     watch_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
     attempt_options = [
         {
+            "label": "authenticated-default",
+            "options": {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "cookiefile": str(cookie_path),
+                "noplaylist": True,
+                "format": "best",
+                "http_headers": {
+                    **REQUEST_HEADERS,
+                    "Referer": "https://www.youtube.com/",
+                    "Origin": "https://www.youtube.com",
+                },
+                "extractor_args": {
+                    "youtube": {
+                        "formats": ["incomplete"],
+                    }
+                },
+            },
+        },
+        {
             "label": "authenticated-live",
             "options": {
                 "quiet": True,
@@ -638,7 +661,8 @@ def _extract_live_playback_url_sync(youtube_video_id: str, cookie_path: Path) ->
                 },
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["web", "web_embedded", "web_creator"],
+                        "player_client": ["default", "web_embedded", "web_creator"],
+                        "formats": ["incomplete"],
                     }
                 },
             },
@@ -653,6 +677,11 @@ def _extract_live_playback_url_sync(youtube_video_id: str, cookie_path: Path) ->
                 "noplaylist": True,
                 "format": "best",
                 "js_runtimes": {"node": {}},
+                "extractor_args": {
+                    "youtube": {
+                        "formats": ["incomplete"],
+                    }
+                },
             },
         },
     ]
@@ -2394,8 +2423,8 @@ async def live_stream_detail(
     payload = _serialize_live_stream(db, stream)
     chat_enabled = await _detect_live_chat_enabled(youtube_video_id)
     playback = await _resolve_live_playback(youtube_video_id)
-    if playback.get("playback_mode") != "youtube-embed":
-        chat_enabled = False
+    # Live chat is a separate YouTube iframe and does not depend on the stream
+    # being rendered through the standard embed player.
     return payload.model_copy(update={"chat_enabled": chat_enabled, **playback})
 
 

@@ -1,6 +1,8 @@
 import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
+import sys
+import types
 
 import httpx
 from sqlalchemy import create_engine, select
@@ -169,6 +171,58 @@ def test_resolve_live_playback_does_not_switch_when_no_cookies(tmp_path: Path, m
     assert result["embed_blocked_reason"] == "This live stream needs an age-verified YouTube session."
 
 
+def test_live_stream_detail_keeps_chat_enabled_for_direct_playback(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        user = UserProfile(name="tester", display_name="Tester", accent_color="#fff")
+        channel = Channel(name="ESL Counter-Strike", slug="esl-counter-strike")
+        db.add_all([user, channel])
+        db.flush()
+
+        db.add(
+            YouTubeLiveStreamSnapshot(
+                youtube_video_id="abc123def45",
+                youtube_channel_id="channel-esl",
+                channel_id=channel.id,
+                title="Team Spirit vs MOUZ - IEM Rio 2026 - Quarterfinals",
+                description="Live now",
+                thumbnail_url="https://i.ytimg.com/vi/abc123def45/maxresdefault_live.jpg",
+                is_live=True,
+                last_seen_at=datetime.utcnow(),
+                fetched_at=datetime.utcnow(),
+            )
+        )
+        db.commit()
+
+        async def fake_refresh_live_if_due(*args, **kwargs):
+            return None
+
+        async def fake_detect_live_chat_enabled(_youtube_video_id: str) -> bool:
+            return True
+
+        async def fake_resolve_live_playback(_youtube_video_id: str) -> dict[str, str | None]:
+            return {
+                "playback_mode": "direct",
+                "playback_url": "https://example.com/live.m3u8",
+                "embed_blocked_reason": None,
+            }
+
+        monkeypatch.setattr(routes_service, "_refresh_live_if_due", fake_refresh_live_if_due)
+        monkeypatch.setattr(routes_service, "_detect_live_chat_enabled", fake_detect_live_chat_enabled)
+        monkeypatch.setattr(routes_service, "_resolve_live_playback", fake_resolve_live_playback)
+
+        result = asyncio.run(
+            routes_service.live_stream_detail(
+                "abc123def45",
+                db=db,
+                current_user=user,
+            )
+        )
+
+        assert result.playback_mode == "direct"
+        assert result.playback_url == "https://example.com/live.m3u8"
+        assert result.chat_enabled is True
+
+
 def test_pick_live_playback_url_prefers_requested_downloads():
     info = {
         "formats": [
@@ -192,6 +246,47 @@ def test_pick_live_playback_url_prefers_requested_downloads():
     }
 
     assert routes_service._pick_live_playback_url(info) == "https://example.com/live.m3u8"
+
+
+def test_extract_live_playback_url_sync_tries_default_logged_in_clients_first(monkeypatch, tmp_path: Path):
+    cookie_path = tmp_path / "youtube-cookies.txt"
+    cookie_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    captured_options: list[dict] = []
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            captured_options.append(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, _url, download=False):
+            assert download is False
+            if len(captured_options) == 1:
+                return {
+                    "formats": [
+                        {
+                            "url": "https://example.com/live-default.m3u8",
+                            "protocol": "m3u8_native",
+                            "height": 1080,
+                            "vcodec": "avc1",
+                            "acodec": "mp4a",
+                        }
+                    ]
+                }
+            raise AssertionError("later fallback attempts should not run once a playback URL is found")
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYoutubeDL))
+
+    result = routes_service._extract_live_playback_url_sync("abc123def45", cookie_path)
+
+    assert result == "https://example.com/live-default.m3u8"
+    assert captured_options[0]["format"] == "best"
+    assert captured_options[0]["extractor_args"]["youtube"]["formats"] == ["incomplete"]
+    assert "player_client" not in captured_options[0]["extractor_args"]["youtube"]
 
 
 def test_infer_channel_ids_from_neighbor_titles_rejects_low_signal_overlap(tmp_path: Path):
@@ -1655,6 +1750,34 @@ def test_refresh_live_if_due_rechecks_empty_state_quickly(tmp_path: Path, monkey
         asyncio.run(routes_service._refresh_live_if_due(db))
 
         assert calls == [True]
+
+
+def test_refresh_live_if_due_skips_recent_empty_state(tmp_path: Path, monkeypatch):
+    with make_session(tmp_path) as db:
+        recent_sync_age = min(
+            routes_service.LIVE_REFRESH_INTERVAL_SECONDS,
+            routes_service.LIVE_EMPTY_REFRESH_INTERVAL_SECONDS,
+        ) - 5
+        settings_row = SyncSettings(
+            live_tab_enabled=True,
+            last_live_sync_at=datetime.utcnow() - timedelta(seconds=recent_sync_age),
+            requests_per_second=3,
+        )
+        db.add(settings_row)
+        db.commit()
+
+        calls: list[bool] = []
+
+        async def fake_refresh_live_streams(*args, **kwargs):
+            calls.append(True)
+            return []
+
+        monkeypatch.setattr(routes_service, "refresh_live_streams", fake_refresh_live_streams)
+        monkeypatch.setattr(routes_service, "_active_youtube_api_key", lambda _db: None)
+
+        asyncio.run(routes_service._refresh_live_if_due(db))
+
+        assert calls == []
 
 
 def test_hydrate_candidate_from_watch_page_preserves_existing_channel_metadata_when_watch_page_is_sparse(monkeypatch):
