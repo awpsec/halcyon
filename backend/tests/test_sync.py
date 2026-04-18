@@ -570,6 +570,55 @@ def test_fetch_watch_page_candidate_keeps_full_timestamp_publish_at(monkeypatch)
     assert result["snippet"]["publishedAt"] == "2026-04-09T04:34:45-07:00"
 
 
+def test_fetch_watch_page_candidate_ignores_generic_youtube_meta_description(monkeypatch):
+    html = """
+    <html>
+      <head>
+        <meta name="description" content="Enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on YouTube." />
+        <meta property="og:description" content="Enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on YouTube." />
+        <meta property="og:title" content="YouTube" />
+      </head>
+      <body>
+        <script>
+          var ytInitialPlayerResponse = {
+            "videoDetails": {
+              "title": "Actual title",
+              "author": "Actual channel",
+              "channelId": "channel-actual",
+              "lengthSeconds": "321"
+            },
+            "microformat": {
+              "playerMicroformatRenderer": {
+                "publishDate": "2026-04-09"
+              }
+            }
+          };
+        </script>
+      </body>
+    </html>
+    """
+
+    class DummyResponse:
+        def __init__(self, text: str):
+            self.text = text
+            self.is_error = False
+
+    async def fake_throttled_get(*args, **kwargs):
+        return DummyResponse(html)
+
+    monkeypatch.setattr(sync_service, "throttled_get", fake_throttled_get)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await sync_service.fetch_watch_page_candidate(client, "abc123def45", 3)
+
+    result = asyncio.run(run())
+
+    assert result is not None
+    assert result["snippet"]["title"] == "Actual title"
+    assert result["snippet"]["description"] is None
+
+
 def test_fetch_live_stream_candidates_web_rejects_unverified_watch_page_candidates(monkeypatch):
     class DummyResponse:
         def __init__(self, url: str):
@@ -4812,7 +4861,7 @@ def test_matched_youtube_channels_by_local_channel_skips_clip_variants(tmp_path:
         assert sync_service.matched_youtube_channels_by_local_channel(db) == {}
 
 
-def test_refresh_live_streams_uses_web_lookup_even_with_api_key(tmp_path: Path, monkeypatch):
+def test_refresh_live_streams_prefers_api_lookup_when_api_key_is_available(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="PGL", slug="pgl")
         db.add(channel)
@@ -4855,38 +4904,47 @@ def test_refresh_live_streams_uses_web_lookup_even_with_api_key(tmp_path: Path, 
         )
         db.commit()
 
-        async def fail_live_api(*args, **kwargs):
-            raise AssertionError("live refresh should not use youtube api helpers")
-
-        async def fake_fetch_live_stream_candidates_web(*args, **kwargs):
-            return (
-                True,
-                [
-                    {
-                        "id": "live123",
-                        "snippet": {
-                            "title": "Current stream",
-                            "channelTitle": "PGL",
-                            "channelId": "channel-pgl",
-                            "liveBroadcastContent": "live",
-                            "thumbnails": {},
-                        },
-                        "liveStreamingDetails": {
-                            "actualStartTime": "2026-04-15T12:00:00Z",
-                            "concurrentViewers": "4812",
-                        },
-                        "statistics": {},
-                        "_waytube_live_web": True,
-                        "_waytube_local_channel_id": channel.id,
-                        "_waytube_checked_youtube_channel_id": "channel-pgl",
+        async def fake_fetch_channel_details(*args, **kwargs):
+            return {
+                "snippet": {
+                    "title": "PGL",
+                },
+                "contentDetails": {
+                    "relatedPlaylists": {
+                        "uploads": "uploads-pgl",
                     }
-                ],
-            )
+                },
+            }
 
-        monkeypatch.setattr(sync_service, "fetch_channel_details", fail_live_api)
-        monkeypatch.setattr(sync_service, "fetch_recent_upload_playlist_video_ids", fail_live_api)
-        monkeypatch.setattr(sync_service, "fetch_live_video_details", fail_live_api)
-        monkeypatch.setattr(sync_service, "fetch_live_stream_candidates_web", fake_fetch_live_stream_candidates_web)
+        async def fake_fetch_recent_upload_playlist_video_ids(*args, **kwargs):
+            return ["live123", "recent-vod-1"]
+
+        async def fake_fetch_live_video_details(*args, **kwargs):
+            return [
+                {
+                    "id": "live123",
+                    "snippet": {
+                        "title": "Current stream",
+                        "channelTitle": "PGL",
+                        "channelId": "channel-pgl",
+                        "liveBroadcastContent": "live",
+                        "thumbnails": {},
+                    },
+                    "liveStreamingDetails": {
+                        "actualStartTime": "2026-04-15T12:00:00Z",
+                        "concurrentViewers": "4812",
+                    },
+                    "statistics": {},
+                }
+            ]
+
+        async def fail_web_lookup(*args, **kwargs):
+            raise AssertionError("live refresh should not need web lookup when api lookup succeeds")
+
+        monkeypatch.setattr(sync_service, "fetch_channel_details", fake_fetch_channel_details)
+        monkeypatch.setattr(sync_service, "fetch_recent_upload_playlist_video_ids", fake_fetch_recent_upload_playlist_video_ids)
+        monkeypatch.setattr(sync_service, "fetch_live_video_details", fake_fetch_live_video_details)
+        monkeypatch.setattr(sync_service, "fetch_live_stream_candidates_web", fail_web_lookup)
 
         async def run():
             return await refresh_live_streams(db, api_key="test-api-key", requests_per_second=3)
@@ -4899,7 +4957,7 @@ def test_refresh_live_streams_uses_web_lookup_even_with_api_key(tmp_path: Path, 
         assert rows[0].concurrent_viewers == 4812
 
 
-def test_refresh_live_streams_marks_existing_live_row_stale_when_web_lookup_finds_no_valid_candidate(tmp_path: Path, monkeypatch):
+def test_refresh_live_streams_marks_existing_live_row_stale_when_api_lookup_finds_no_valid_candidate(tmp_path: Path, monkeypatch):
     with make_session(tmp_path) as db:
         channel = Channel(name="PGL", slug="pgl")
         db.add(channel)
@@ -4942,16 +5000,14 @@ def test_refresh_live_streams_marks_existing_live_row_stale_when_web_lookup_find
         )
         db.commit()
 
-        async def fail_live_api(*args, **kwargs):
-            raise AssertionError("live refresh should not use youtube api helpers")
+        async def fake_fetch_live_video_details(*args, **kwargs):
+            return []
 
-        async def fake_fetch_live_stream_candidates_web(*args, **kwargs):
-            return True, []
+        async def fail_web_lookup(*args, **kwargs):
+            raise AssertionError("live refresh should not need web lookup when api lookup succeeds")
 
-        monkeypatch.setattr(sync_service, "fetch_channel_details", fail_live_api)
-        monkeypatch.setattr(sync_service, "fetch_recent_upload_playlist_video_ids", fail_live_api)
-        monkeypatch.setattr(sync_service, "fetch_live_video_details", fail_live_api)
-        monkeypatch.setattr(sync_service, "fetch_live_stream_candidates_web", fake_fetch_live_stream_candidates_web)
+        monkeypatch.setattr(sync_service, "fetch_live_video_details", fake_fetch_live_video_details)
+        monkeypatch.setattr(sync_service, "fetch_live_stream_candidates_web", fail_web_lookup)
 
         async def run():
             return await refresh_live_streams(db, api_key="test-api-key", requests_per_second=3)
@@ -5010,16 +5066,27 @@ def test_refresh_live_streams_clears_rows_for_superseded_channel_mapping(tmp_pat
         )
         db.commit()
 
-        async def fail_live_api(*args, **kwargs):
-            raise AssertionError("live refresh should not use youtube api helpers")
+        async def fake_fetch_channel_details(*args, **kwargs):
+            return {
+                "snippet": {
+                    "title": "PGL",
+                },
+                "contentDetails": {
+                    "relatedPlaylists": {
+                        "uploads": "uploads-pgl",
+                    }
+                },
+            }
 
-        async def fake_fetch_live_stream_candidates_web(*args, **kwargs):
-            return True, []
+        async def fake_fetch_recent_upload_playlist_video_ids(*args, **kwargs):
+            return []
 
-        monkeypatch.setattr(sync_service, "fetch_channel_details", fail_live_api)
-        monkeypatch.setattr(sync_service, "fetch_recent_upload_playlist_video_ids", fail_live_api)
-        monkeypatch.setattr(sync_service, "fetch_live_video_details", fail_live_api)
-        monkeypatch.setattr(sync_service, "fetch_live_stream_candidates_web", fake_fetch_live_stream_candidates_web)
+        async def fail_web_lookup(*args, **kwargs):
+            raise AssertionError("live refresh should not need web lookup when api lookup succeeds")
+
+        monkeypatch.setattr(sync_service, "fetch_channel_details", fake_fetch_channel_details)
+        monkeypatch.setattr(sync_service, "fetch_recent_upload_playlist_video_ids", fake_fetch_recent_upload_playlist_video_ids)
+        monkeypatch.setattr(sync_service, "fetch_live_stream_candidates_web", fail_web_lookup)
 
         async def run():
             return await refresh_live_streams(db, api_key="test-api-key", requests_per_second=3)
@@ -8161,6 +8228,107 @@ def test_sync_video_uses_api_refresh_for_periodic_engagement_window(tmp_path: Pa
         assert refreshed_snapshot.like_count == 1300
         assert len(stored_comments) == 1
         assert stored_comments[0].body == "Fresh comment"
+
+
+def test_apply_sync_item_does_not_overwrite_snapshot_with_generic_youtube_description(tmp_path: Path, monkeypatch):
+    def fake_settings() -> Settings:
+        return Settings(
+            mounted_roots=[],
+            config_dir=tmp_path / "config",
+            cache_dir=tmp_path / "cache",
+            background_tasks_enabled=False,
+        )
+
+    async def fake_ryd(*args, **kwargs):
+        return None
+
+    async def fake_channel_enrichment(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(sync_service, "get_settings", fake_settings)
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_enrichment)
+    monkeypatch.setattr(sync_service, "fetch_channel_details", fake_channel_enrichment)
+    monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
+
+    with make_session(tmp_path) as db:
+        channel = Channel(name="PowerfulJRE", slug="powerfuljre")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="Generic fallback guard",
+            slug="generic-fallback-guard",
+            channel_id=channel.id,
+            created_at=datetime.utcnow(),
+            duration_seconds=321,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(tmp_path / "generic-fallback-guard.mp4"),
+                relative_path="generic-fallback-guard.mp4",
+                file_size=123,
+                fingerprint="f" * 64,
+            )
+        )
+        db.add(
+            YouTubeVideoSnapshot(
+                youtube_video_id="generic-fallback-yt",
+                youtube_channel_id="channel-jre",
+                title="Generic fallback guard",
+                description="Existing description",
+                duration_seconds=321,
+                fetched_at=datetime.utcnow() - timedelta(hours=1),
+            )
+        )
+        db.commit()
+        db.refresh(video)
+
+        item = {
+            "id": "generic-fallback-yt",
+            "snippet": {
+                "title": "Generic fallback guard",
+                "channelTitle": "PowerfulJRE",
+                "channelId": "channel-jre",
+                "publishedAt": "2026-04-17T12:00:00Z",
+                "description": "Enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on YouTube.",
+                "thumbnails": {},
+            },
+            "statistics": {
+                "viewCount": "1234",
+                "likeCount": "56",
+            },
+            "_waytube_duration_seconds": 321,
+            "_waytube_source": "watch-page",
+        }
+
+        async def run() -> None:
+            async with httpx.AsyncClient() as client:
+                await apply_sync_item(
+                    db,
+                    video,
+                    item,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                    api_key=None,
+                    confidence=0.93,
+                    reasons=["title", "duration-tight"],
+                    status="matched",
+                )
+
+        asyncio.run(run())
+
+        refreshed_snapshot = db.scalar(
+            select(YouTubeVideoSnapshot).where(YouTubeVideoSnapshot.youtube_video_id == "generic-fallback-yt")
+        )
+
+        assert refreshed_snapshot is not None
+        assert refreshed_snapshot.description == "Existing description"
 
 
 def test_apply_sync_item_fetches_replies_beyond_inline_batch(tmp_path: Path, monkeypatch):

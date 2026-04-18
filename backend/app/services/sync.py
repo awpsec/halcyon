@@ -176,6 +176,13 @@ CHANNEL_AUTHORITY_REJECT_TOKENS = {
     "vod",
     "vods",
 }
+GENERIC_YOUTUBE_PAGE_TITLES = {
+    "youtube",
+    "youtube - broadcast yourself",
+}
+GENERIC_YOUTUBE_PAGE_DESCRIPTIONS = {
+    "enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on youtube.",
+}
 
 try:
     YOUTUBE_API_QUOTA_TZ = ZoneInfo("America/Los_Angeles")
@@ -1468,6 +1475,33 @@ def extract_meta_content(text: str, property_name: str) -> str | None:
     if not match:
         return None
     return match.group(1).replace("&amp;", "&").strip() or None
+
+
+def _normalized_generic_page_text(value: str | None) -> str:
+    normalized = re.sub(r"\s+", " ", (value or "").strip()).strip().lower()
+    return normalized
+
+
+def is_generic_youtube_page_title(value: str | None) -> bool:
+    return _normalized_generic_page_text(value) in GENERIC_YOUTUBE_PAGE_TITLES
+
+
+def is_generic_youtube_page_description(value: str | None) -> bool:
+    return _normalized_generic_page_text(value) in GENERIC_YOUTUBE_PAGE_DESCRIPTIONS
+
+
+def sanitize_watch_page_title(value: str | None) -> str | None:
+    cleaned = clean_display_title(value or "").strip()
+    if not cleaned or is_generic_youtube_page_title(cleaned):
+        return None
+    return cleaned
+
+
+def sanitize_watch_page_description(value: str | None) -> str | None:
+    cleaned = str(value or "").strip()
+    if not cleaned or is_generic_youtube_page_description(cleaned):
+        return None
+    return cleaned
 
 
 def is_snapshot_fresh(value: datetime | None, *, max_age: timedelta = MATCH_REFRESH_AFTER) -> bool:
@@ -3799,9 +3833,9 @@ async def refresh_live_streams(
             db.commit()
             return []
 
-        # Keep live detection on the web/watch-page path even when an API key is configured.
-        # This preserves quota for library sync and avoids cross-channel live candidate drift.
-        use_api = False
+        # Prefer the cheap uploads-playlist + videos.list API path when a key is available.
+        # This avoids the 100-unit search.list cost while still giving reliable live detection.
+        use_api = bool(api_key)
         for channel_id, youtube_channel_id in channel_map.items():
             local_channel = db.get(Channel, channel_id)
             channel_label = local_channel.name if local_channel else None
@@ -4327,7 +4361,9 @@ async def fetch_watch_page_candidate(
     title = video_details.get("title")
     author = video_details.get("author")
     channel_id = video_details.get("channelId")
-    description = video_details.get("shortDescription")
+    description = sanitize_watch_page_description(
+        video_details.get("shortDescription")
+    )
     length_seconds = parse_maybe_int(video_details.get("lengthSeconds"))
     view_count = parse_maybe_int(video_details.get("viewCount"))
     published_at = microformat.get("publishDate")
@@ -4347,11 +4383,15 @@ async def fetch_watch_page_candidate(
     thumbnails = video_details.get("thumbnail", {}).get("thumbnails", [])
     thumbnail_url = thumbnails[-1]["url"] if thumbnails else None
     html_text = response.text
-    title = title or extract_meta_content(html_text, "title") or extract_meta_content(html_text, "og:title")
+    title = (
+        sanitize_watch_page_title(title)
+        or sanitize_watch_page_title(extract_meta_content(html_text, "title"))
+        or sanitize_watch_page_title(extract_meta_content(html_text, "og:title"))
+    )
     description = (
         description
-        or extract_meta_content(html_text, "description")
-        or extract_meta_content(html_text, "og:description")
+        or sanitize_watch_page_description(extract_meta_content(html_text, "description"))
+        or sanitize_watch_page_description(extract_meta_content(html_text, "og:description"))
     )
     thumbnail_url = thumbnail_url or extract_meta_content(html_text, "og:image")
     if not published_at:
@@ -4368,7 +4408,7 @@ async def fetch_watch_page_candidate(
     return {
         "id": youtube_video_id,
         "snippet": {
-            "title": clean_display_title(title or ""),
+            "title": title or "",
             "channelTitle": author,
             "channelId": channel_id,
             "description": description,
@@ -4579,7 +4619,11 @@ async def apply_sync_item(
     if not engagement_only:
         snapshot.title = clean_display_title(snippet.get("title") or snapshot.title or video.title)
         incoming_description = snippet.get("description")
-        if isinstance(incoming_description, str) and incoming_description.strip():
+        if (
+            isinstance(incoming_description, str)
+            and incoming_description.strip()
+            and not is_generic_youtube_page_description(incoming_description)
+        ):
             snapshot.description = incoming_description
         incoming_duration_seconds = item.get("_waytube_duration_seconds")
         if incoming_duration_seconds is not None:
