@@ -9084,8 +9084,15 @@ body,
   position: absolute;
   inset: auto 0 0;
   height: 74px;
-  pointer-events: none;
-  background: color-mix(in srgb, var(--panel-strong) 96%, transparent);
+  z-index: 2;
+  pointer-events: auto;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--panel-strong) 0%, transparent) 0%,
+      color-mix(in srgb, var(--panel-strong) 92%, transparent) 24%,
+      var(--panel-strong) 100%
+    );
 }
 
 .live-chat-empty {
