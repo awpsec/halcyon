@@ -497,12 +497,19 @@ def _rewrite_live_manifest(manifest_text: str, *, base_url: str, youtube_video_i
     return "\n".join(rewritten_lines) + ("\n" if manifest_text.endswith("\n") else "")
 
 
+def _configured_config_dir() -> Path:
+    configured = getattr(settings, "config_dir", None)
+    if configured is None:
+        configured = get_settings().config_dir
+    return Path(configured)
+
+
 def _youtube_cookies_path() -> Path:
-    return settings.config_dir / YOUTUBE_COOKIES_FILENAME
+    return _configured_config_dir() / YOUTUBE_COOKIES_FILENAME
 
 
 def _youtube_cookies_metadata_path() -> Path:
-    return settings.config_dir / YOUTUBE_COOKIES_METADATA_FILENAME
+    return _configured_config_dir() / YOUTUBE_COOKIES_METADATA_FILENAME
 
 
 def _write_youtube_cookies_uploaded_at(uploaded_at: datetime) -> None:
