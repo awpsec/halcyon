@@ -4888,7 +4888,38 @@ async def apply_sync_item(
                         len(organization_moves),
                         )
 
-    if match.status == "matched" and effective_api_key and engagement_refresh_due and comment_limit > 0:
+    existing_comment_count = (
+        db.scalar(
+            select(func.count(YouTubeCommentSnapshot.id)).where(
+                YouTubeCommentSnapshot.youtube_video_id == video_id
+            )
+        )
+        or 0
+    )
+    comment_backfill_due = bool(
+        effective_api_key
+        and video_id
+        and comment_limit > 0
+        and not engagement_only
+        and existing_comment_count == 0
+        and periodic_stats_refresh_allowed(video, snapshot)
+        and matched_metadata_is_confident(
+            db,
+            video,
+            snapshot,
+            match=match,
+            youtube_video_id=video_id,
+            confidence=confidence,
+            reasons=reasons,
+            status=status,
+        )
+    )
+    if (
+        match.status == "matched"
+        and effective_api_key
+        and comment_limit > 0
+        and (engagement_refresh_due or comment_backfill_due)
+    ):
         reply_limit = max(0, int(max_replies_per_comment))
         try:
             comment_items = await fetch_top_comments(

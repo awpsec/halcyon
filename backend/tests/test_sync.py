@@ -8494,6 +8494,132 @@ def test_apply_sync_item_skips_comment_enrichment_until_engagement_refresh_is_du
         assert stored_comments == []
 
 
+def test_apply_sync_item_fetches_comments_on_initial_confident_match(tmp_path: Path, monkeypatch):
+    def fake_settings() -> Settings:
+        return Settings(
+            mounted_roots=[],
+            config_dir=tmp_path / "config",
+            cache_dir=tmp_path / "cache",
+            background_tasks_enabled=False,
+        )
+
+    async def fake_ryd(*args, **kwargs):
+        return None
+
+    async def fake_channel_about(*args, **kwargs):
+        return None
+
+    async def fake_channel_details(*args, **kwargs):
+        return {
+            "snippet": {
+                "title": "PowerfulJRE",
+                "description": "Channel description",
+                "thumbnails": {},
+            },
+            "statistics": {},
+            "brandingSettings": {"image": {}},
+            "contentDetails": {"relatedPlaylists": {}},
+        }
+
+    async def fake_top_comments(*args, **kwargs):
+        return [
+            {
+                "snippet": {
+                    "topLevelComment": {
+                        "id": "initial-comment-1",
+                        "snippet": {
+                            "authorDisplayName": "Commenter",
+                            "textDisplay": "Initial comment",
+                            "likeCount": 7,
+                            "publishedAt": "2026-04-20T08:00:00Z",
+                        },
+                    },
+                    "totalReplyCount": 0,
+                }
+            }
+        ]
+
+    monkeypatch.setattr(sync_service, "get_settings", fake_settings)
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_about)
+    monkeypatch.setattr(sync_service, "fetch_channel_details", fake_channel_details)
+    monkeypatch.setattr(sync_service, "fetch_top_comments", fake_top_comments)
+    monkeypatch.setattr(sync_service, "download_thumbnail", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
+
+    with make_session(tmp_path) as db:
+        unknown_channel = Channel(name="Unknown Channel", slug="unknown-channel")
+        db.add(unknown_channel)
+        db.flush()
+
+        video = Video(
+            title="Joe Rogan Experience #2484 - David Cross",
+            slug="joe-rogan-experience-2484-david-cross-initial-comments",
+            channel_id=unknown_channel.id,
+            created_at=datetime.utcnow(),
+            published_at=datetime.utcnow() - timedelta(hours=2),
+            duration_seconds=2 * 3600 + 23 * 60 + 4,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(tmp_path / "initial-comments.mp4"),
+                relative_path="initial-comments.mp4",
+                file_size=123,
+                fingerprint="f" * 64,
+            )
+        )
+        db.commit()
+        db.refresh(video)
+
+        item = {
+            "id": "initial-comments-yt",
+            "snippet": {
+                "title": "Joe Rogan Experience #2484 - David Cross",
+                "channelTitle": "PowerfulJRE",
+                "channelId": "channel-jre",
+                "publishedAt": "2026-04-20T06:00:00Z",
+                "description": "Fresh episode",
+                "thumbnails": {
+                    "high": {"url": "https://i.ytimg.com/vi/initial-comments-yt/hqdefault.jpg"}
+                },
+            },
+            "statistics": {
+                "viewCount": "33000",
+                "likeCount": "1300",
+            },
+            "_waytube_duration_seconds": 2 * 3600 + 23 * 60 + 4,
+            "_waytube_source": "youtube-api",
+        }
+
+        async def run() -> None:
+            async with httpx.AsyncClient() as client:
+                await apply_sync_item(
+                    db,
+                    video,
+                    item,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                    api_key="test-api-key",
+                    confidence=0.93,
+                    reasons=["exact-title", "duration-tight"],
+                    status="matched",
+                )
+
+        asyncio.run(run())
+
+        stored_comments = db.scalars(
+            select(YouTubeCommentSnapshot).where(YouTubeCommentSnapshot.youtube_video_id == "initial-comments-yt")
+        ).all()
+
+        assert len(stored_comments) == 1
+        assert stored_comments[0].body == "Initial comment"
+
+
 def test_video_requires_refresh_ignores_periodic_engagement_window_without_api_key(tmp_path: Path):
     with make_session(tmp_path) as db:
         channel = Channel(name="PowerfulJRE", slug="powerfuljre")
