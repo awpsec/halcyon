@@ -8018,7 +8018,7 @@ body,
   height: 18px;
   transform: translate(-50%, -50%);
   border: 0;
-  border-radius: 999px;
+  border-radius: 6px;
   padding: 0;
   background: transparent;
   cursor: pointer;
@@ -8030,22 +8030,26 @@ body,
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 8px;
-  height: 8px;
-  transform: translate(-50%, -50%);
-  border-radius: 999px;
+  width: 6px;
+  height: 6px;
+  transform: translate(-50%, -50%) scale(var(--chapter-marker-scale, 1));
+  border-radius: 2px;
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 0 0 1px rgba(6, 6, 6, 0.3);
+  opacity: var(--chapter-marker-opacity, 0.82);
   transition:
     transform 140ms ease,
     background-color 140ms ease,
-    opacity 140ms ease;
+    opacity 140ms ease,
+    box-shadow 140ms ease;
 }
 
 .halcyon-player-chapter-marker:hover::before,
 .halcyon-player-chapter-marker:focus-visible::before {
-  transform: translate(-50%, -50%) scale(1.18);
+  transform: translate(-50%, -50%) scale(2.3);
   background: #ffffff;
+  opacity: 1;
+  box-shadow: 0 0 0 1px rgba(6, 6, 6, 0.34), 0 0 0 6px rgba(255, 255, 255, 0.12);
 }
 
 .halcyon-player-chapter-tooltip {

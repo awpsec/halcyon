@@ -4,10 +4,10 @@ from pathlib import Path
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.routes import set_watch_state
+from app.api.routes import _next_up_for_video, set_watch_state, update_progress
 from app.models.base import Base
 from app.models.entities import Channel, Series, UserProfile, Video, VideoFile, WatchHistory, WatchProgress, YouTubeMatch, YouTubeVideoSnapshot
-from app.schemas.common import WatchStateIn
+from app.schemas.common import ProgressIn, WatchStateIn
 from app.services.feed import build_home_feed
 
 
@@ -92,6 +92,78 @@ def test_unwatched_resets_progress_and_removes_continue_watching(tmp_path: Path)
         assert refreshed_progress is None
         assert history_rows == []
         assert refreshed_continue is None
+
+
+def test_low_progress_does_not_create_resume_history_or_continue_watching(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        user, video = create_user_and_video(db, tmp_path)
+
+        result = update_progress(
+            video.id,
+            ProgressIn(user_id=user.id, position_seconds=120, completed=False),
+            db=db,
+            current_user=user,
+        )
+
+        stored_progress = db.scalar(
+            select(WatchProgress).where(
+                WatchProgress.user_id == user.id,
+                WatchProgress.video_id == video.id,
+            )
+        )
+        history_rows = db.scalars(
+            select(WatchHistory).where(
+                WatchHistory.user_id == user.id,
+                WatchHistory.video_id == video.id,
+            )
+        ).all()
+        sections = build_home_feed(db, user.id)
+        continue_section = next((section for section in sections if section.key == "continue"), None)
+
+        assert result == {"ok": True}
+        assert stored_progress is None
+        assert history_rows == []
+        assert continue_section is None
+
+
+def test_low_progress_does_not_override_existing_meaningful_resume_point(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        user, video = create_user_and_video(db, tmp_path)
+
+        db.add(
+            WatchProgress(
+                user_id=user.id,
+                video_id=video.id,
+                position_seconds=840,
+                completed=False,
+            )
+        )
+        db.commit()
+
+        update_progress(
+            video.id,
+            ProgressIn(user_id=user.id, position_seconds=90, completed=False),
+            db=db,
+            current_user=user,
+        )
+
+        stored_progress = db.scalar(
+            select(WatchProgress).where(
+                WatchProgress.user_id == user.id,
+                WatchProgress.video_id == video.id,
+            )
+        )
+        history_rows = db.scalars(
+            select(WatchHistory).where(
+                WatchHistory.user_id == user.id,
+                WatchHistory.video_id == video.id,
+            )
+        ).all()
+
+        assert stored_progress is not None
+        assert stored_progress.position_seconds == 840
+        assert stored_progress.completed is False
+        assert history_rows == []
 
 
 def test_recently_added_excludes_watched_videos(tmp_path: Path):
@@ -400,3 +472,78 @@ def test_home_suggested_next_series_episode_uses_earliest_unwatched_episode(tmp_
         assert suggested_section is not None
         assert suggested_section.items[0].id == second_video.id
         assert suggested_section.items[0].reason == "next-up"
+
+
+def test_next_up_skips_already_watched_episodes(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        user, first_video = create_user_and_video(db, tmp_path)
+        series = Series(name="Playable Series", slug="playable-series")
+        db.add(series)
+        db.flush()
+
+        first_video.series_id = series.id
+        first_video.episode_number = 1
+        first_video.title = "Episode 1"
+
+        second_path = tmp_path / "library" / "channel" / "episode-2.mp4"
+        second_path.write_bytes(b"episode-two-data")
+        second_video = Video(
+            title="Episode 2",
+            slug="playable-series-2",
+            channel_id=first_video.channel_id,
+            series_id=series.id,
+            episode_number=2,
+            created_at=datetime.utcnow(),
+            duration_seconds=1800,
+            is_available=True,
+        )
+        db.add(second_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=second_video.id,
+                absolute_path=str(second_path),
+                relative_path="channel/episode-2.mp4",
+                file_size=second_path.stat().st_size,
+                fingerprint="f" * 64,
+            )
+        )
+
+        third_path = tmp_path / "library" / "channel" / "episode-3.mp4"
+        third_path.write_bytes(b"episode-three-data")
+        third_video = Video(
+            title="Episode 3",
+            slug="playable-series-3",
+            channel_id=first_video.channel_id,
+            series_id=series.id,
+            episode_number=3,
+            created_at=datetime.utcnow(),
+            duration_seconds=1800,
+            is_available=True,
+        )
+        db.add(third_video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=third_video.id,
+                absolute_path=str(third_path),
+                relative_path="channel/episode-3.mp4",
+                file_size=third_path.stat().st_size,
+                fingerprint="g" * 64,
+            )
+        )
+
+        db.add(
+            WatchProgress(
+                user_id=user.id,
+                video_id=second_video.id,
+                position_seconds=0,
+                completed=True,
+            )
+        )
+        db.commit()
+
+        next_up = _next_up_for_video(db, first_video, user_id=user.id)
+
+        assert next_up is not None
+        assert next_up.id == third_video.id

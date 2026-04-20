@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import hashlib
+import math
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
@@ -13,6 +14,7 @@ from app.services.sync import youtube_channel_matches_local_channel
 from app.services.utils import is_generic_channel_name, parse_episode_number
 
 TRUSTED_PUBLISHED_AT_SOURCES = {"youtube-api", "watch-page"}
+WATCH_RESUME_MIN_THRESHOLD = 0.05
 
 
 def _authoritative_youtube_match(video: Video, db: Session | None = None) -> YouTubeMatch | None:
@@ -104,10 +106,22 @@ def _channel_display(video: Video, db: Session) -> tuple[str | None, str | None]
     return channel_name, channel_avatar_url
 
 
-def _visible_progress_seconds(progress: WatchProgress | None) -> int:
+def _meaningful_watch_progress_cutoff(duration_seconds: int | None) -> int:
+    if not duration_seconds or duration_seconds <= 0:
+        return 1
+    return max(1, math.ceil(duration_seconds * WATCH_RESUME_MIN_THRESHOLD))
+
+
+def _visible_progress_seconds(
+    progress: WatchProgress | None,
+    duration_seconds: int | None,
+) -> int:
     if not progress or progress.completed:
         return 0
-    return max(0, progress.position_seconds or 0)
+    visible_progress = max(0, progress.position_seconds or 0)
+    if visible_progress < _meaningful_watch_progress_cutoff(duration_seconds):
+        return 0
+    return visible_progress
 
 
 def _trusted_snapshot_published_at(snapshot: YouTubeVideoSnapshot | None) -> datetime | None:
@@ -185,7 +199,7 @@ def _video_to_card(video: Video, progress_by_video: dict[int, WatchProgress], re
         duration_seconds=video.duration_seconds,
         thumbnail_url=_thumbnail_url(video),
         watched=bool(progress and progress.completed),
-        progress_seconds=_visible_progress_seconds(progress),
+        progress_seconds=_visible_progress_seconds(progress, video.duration_seconds),
         reason=reason,
         published_at=published_at,
         youtube_view_count=view_count,
@@ -210,11 +224,20 @@ def build_home_feed(db: Session, user_id: int) -> list[FeedSection]:
         for video in all_videos
         if progress_by_video.get(video.id)
         and not progress_by_video[video.id].completed
+        and _visible_progress_seconds(progress_by_video[video.id], video.duration_seconds) > 0
         and progress_by_video[video.id].updated_at
         and progress_by_video[video.id].updated_at >= continue_cutoff
     ]
     queue = [video for video in all_videos if video.id in queue_video_ids]
-    random_pool = [video for video in all_videos if not progress_by_video.get(video.id)]
+    random_pool = [
+        video
+        for video in all_videos
+        if not progress_by_video.get(video.id)
+        or (
+            not progress_by_video[video.id].completed
+            and _visible_progress_seconds(progress_by_video.get(video.id), video.duration_seconds) <= 0
+        )
+    ]
     recently_added = sorted(
         [video for video in all_videos if video.id not in watched_video_ids],
         key=lambda video: _video_recency_timestamp(video, trusted_published_at_by_video_id),
@@ -389,7 +412,7 @@ def summarize_video(video: Video, progress: WatchProgress | None = None, db: Ses
         published_at=published_at,
         thumbnail_url=_thumbnail_url(overridden),
         watched=bool(progress and progress.completed),
-        progress_seconds=_visible_progress_seconds(progress),
+        progress_seconds=_visible_progress_seconds(progress, overridden.duration_seconds),
         youtube_view_count=view_count,
         youtube_like_count=like_count,
         youtube_dislike_count=dislike_count,

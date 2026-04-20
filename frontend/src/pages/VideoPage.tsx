@@ -35,6 +35,7 @@ import {
 import { pushToast } from "../lib/notifications";
 
 const WATCH_COMPLETION_THRESHOLD = 0.95;
+const WATCH_RESUME_MIN_THRESHOLD = 0.05;
 const SUGGESTION_LOADING_MIN_MS = 180;
 const PLAYER_MODE_STORAGE_KEY = "halcyon.playerMode";
 const STANDARD_COMMENT_PREVIEW_COUNT = 4;
@@ -359,6 +360,27 @@ type AutoplayTarget = WatchSuggestionItem & {
   watch_ref: string;
 };
 
+function meaningfulWatchProgressCutoff(durationSeconds: number | null | undefined) {
+  if (!durationSeconds || durationSeconds <= 0) return 1;
+  return Math.max(1, Math.ceil(durationSeconds * WATCH_RESUME_MIN_THRESHOLD));
+}
+
+function hasMeaningfulWatchProgress(
+  progressSeconds: number | null | undefined,
+  durationSeconds: number | null | undefined,
+) {
+  return Math.max(0, Math.floor(progressSeconds ?? 0)) >= meaningfulWatchProgressCutoff(durationSeconds);
+}
+
+function isVideoSummaryWatched(
+  item: Pick<WatchSuggestionItem, "completed" | "watched" | "progress_seconds" | "duration_seconds"> | null | undefined,
+) {
+  if (!item) return false;
+  if (item.completed ?? item.watched) return true;
+  if (!item.duration_seconds || item.duration_seconds <= 0) return false;
+  return ((item.progress_seconds ?? 0) / item.duration_seconds) >= 0.995;
+}
+
 function normalizeSuggestionItems(
   items: VideoSummary[] | WatchSuggestionItem[] | null | undefined,
   nextUpId: number | null,
@@ -366,7 +388,9 @@ function normalizeSuggestionItems(
   if (!items?.length) return [];
   const seen = new Set<number>();
   return items.filter((item) => {
-    if (!item || item.id === nextUpId || seen.has(item.id)) return false;
+    if (!item || item.id === nextUpId || seen.has(item.id) || isVideoSummaryWatched(item)) {
+      return false;
+    }
     seen.add(item.id);
     return true;
   });
@@ -375,7 +399,7 @@ function normalizeSuggestionItems(
 function toAutoplayTarget(
   item: VideoSummary | WatchSuggestionItem | null | undefined,
 ): AutoplayTarget | null {
-  if (!item?.id || !item.title) return null;
+  if (!item?.id || !item.title || isVideoSummaryWatched(item)) return null;
   const watchRef = item.watch_ref ? String(item.watch_ref) : String(item.id);
   return {
     ...item,
@@ -416,8 +440,9 @@ function WatchSuggestionRow({
           ((item.progress_seconds ?? 0) / item.duration_seconds) * 100,
         )
       : 0;
-  const isWatched = item.completed ?? item.watched ?? progressPercent >= 99.5;
-  const canMarkUnwatched = isWatched || (item.progress_seconds ?? 0) > 0;
+  const isWatched = isVideoSummaryWatched(item);
+  const canMarkUnwatched =
+    isWatched || hasMeaningfulWatchProgress(item.progress_seconds, item.duration_seconds);
   const publishedAt = item.published_at ?? null;
   const isNew =
     publishedAt !== null &&
@@ -1205,11 +1230,19 @@ export function VideoPage({
   }, [engagementRatio]);
   const playerAspectRatio = "16 / 9";
   const videoWatched = Boolean(data?.video?.watched ?? (data as any)?.video?.completed);
-  const canMarkVideoUnwatched = videoWatched || (data?.video?.progress_seconds ?? data?.resume_point ?? 0) > 0;
+  const canMarkVideoUnwatched =
+    videoWatched ||
+    hasMeaningfulWatchProgress(
+      data?.video?.progress_seconds ?? data?.resume_point ?? 0,
+      data?.video?.duration_seconds,
+    );
   const resumablePosition = useMemo(() => {
     if (!data?.resume_point || data.resume_point <= 0) return null;
     if (videoWatched) return null;
     const durationSeconds = data.video.duration_seconds;
+    if (!hasMeaningfulWatchProgress(data.resume_point, durationSeconds)) {
+      return null;
+    }
     if (
       durationSeconds &&
       durationSeconds > 0 &&
@@ -1219,6 +1252,10 @@ export function VideoPage({
     }
     return data.resume_point;
   }, [data, videoWatched]);
+  const nextUpItem = useMemo(() => {
+    if (!data?.next_up || isVideoSummaryWatched(data.next_up)) return null;
+    return data.next_up;
+  }, [data?.next_up]);
   const activeSuggestionFeed = suggestionFeeds[suggestionFilter];
   const visibleSuggestedItems = activeSuggestionFeed.items;
   const showSuggestionLoadingState =
@@ -2784,13 +2821,13 @@ export function VideoPage({
             </div>
           </div>
           <aside className="watch-sidebar">
-            {data.next_up ? (
+            {nextUpItem ? (
               <section className="watch-sidebar-section">
                 <div className="section-heading">
                   <h2>Up Next</h2>
                 </div>
                 <WatchSuggestionRow
-                  item={data.next_up}
+                  item={nextUpItem}
                   onRefresh={refreshWatchPage}
                   profile={profile}
                 />

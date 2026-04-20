@@ -405,6 +405,7 @@ def _enforce_auth_rate_limit(key: str, *, limit: int, window_seconds: int) -> No
         )
 DEFAULT_USER_AVATAR = "/assets/branding/default_avi.png"
 WATCH_COMPLETION_THRESHOLD = 0.95
+WATCH_RESUME_MIN_THRESHOLD = 0.05
 EXPLORE_HISTORY_LIMIT = 48
 EXPLORE_STOPWORDS = {
     "about",
@@ -1342,6 +1343,19 @@ def _normalized_watch_progress(
     return safe_position, False
 
 
+def _meaningful_watch_progress_cutoff(duration_seconds: int | None) -> int:
+    if not duration_seconds or duration_seconds <= 0:
+        return 1
+    return max(1, math.ceil(duration_seconds * WATCH_RESUME_MIN_THRESHOLD))
+
+
+def _has_meaningful_watch_progress(
+    position_seconds: int | None,
+    duration_seconds: int | None,
+) -> bool:
+    return max(0, int(position_seconds or 0)) >= _meaningful_watch_progress_cutoff(duration_seconds)
+
+
 def _resume_point_for(progress: WatchProgress | None, duration_seconds: int | None) -> int:
     if not progress:
         return 0
@@ -1350,7 +1364,9 @@ def _resume_point_for(progress: WatchProgress | None, duration_seconds: int | No
         duration_seconds=duration_seconds,
         completed=bool(progress.completed),
     )
-    return 0 if completed else normalized_position
+    if completed or not _has_meaningful_watch_progress(normalized_position, duration_seconds):
+        return 0
+    return normalized_position
 
 
 def _video_ref_for(db: Session, video: Video) -> str:
@@ -1374,8 +1390,18 @@ def _video_ref_for(db: Session, video: Video) -> str:
     return str(video.id)
 
 
-def _next_up_for_video(db: Session, video: Video) -> Video | None:
+def _next_up_for_video(db: Session, video: Video, *, user_id: int | None = None) -> Video | None:
     next_up = None
+    watched_video_ids: set[int] = set()
+    if user_id is not None:
+        watched_video_ids = set(
+            db.scalars(
+                select(WatchProgress.video_id).where(
+                    WatchProgress.user_id == user_id,
+                    WatchProgress.completed.is_(True),
+                )
+            ).all()
+        )
     if video.series_id:
         next_up = db.scalars(
             _video_query()
@@ -1383,13 +1409,18 @@ def _next_up_for_video(db: Session, video: Video) -> Video | None:
                 Video.series_id == video.series_id,
                 Video.episode_number.is_not(None),
                 Video.episode_number > (video.episode_number or 0),
+                Video.id.not_in(watched_video_ids) if watched_video_ids else literal(True),
             )
             .order_by(Video.episode_number.asc())
         ).unique().first()
     if next_up is None and video.channel_id:
         next_up = db.scalars(
             _video_query()
-            .where(Video.channel_id == video.channel_id, Video.id != video.id)
+            .where(
+                Video.channel_id == video.channel_id,
+                Video.id != video.id,
+                Video.id.not_in(watched_video_ids) if watched_video_ids else literal(True),
+            )
             .order_by(Video.created_at.desc())
         ).unique().first()
     return next_up
@@ -2704,7 +2735,7 @@ def get_video(
     youtube_snapshot = None
     channel_snapshot = _channel_snapshot_for_channel(db, video.channel_id) if video.channel_id else None
     channel_display_name = channel_snapshot.title if channel_snapshot and channel_snapshot.title else (video.channel.name if video.channel else None)
-    next_up = _next_up_for_video(db, video)
+    next_up = _next_up_for_video(db, video, user_id=current_user.id)
     suggested_page = _watch_suggestions_page(
         db,
         video=video,
@@ -2859,7 +2890,7 @@ def get_video_suggestions(
         if channel_snapshot and channel_snapshot.title
         else (video.channel.name if video.channel else None)
     )
-    next_up = _next_up_for_video(db, video)
+    next_up = _next_up_for_video(db, video, user_id=current_user.id)
     return _watch_suggestions_page(
         db,
         video=video,
@@ -2883,14 +2914,19 @@ def update_progress(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     progress = db.scalar(select(WatchProgress).where(WatchProgress.user_id == current_user.id, WatchProgress.video_id == video_id))
-    if not progress:
-        progress = WatchProgress(user_id=current_user.id, video_id=video_id)
-        db.add(progress)
     normalized_position, completed = _normalized_watch_progress(
         payload.position_seconds,
         duration_seconds=video.duration_seconds,
         completed=payload.completed,
     )
+    if not completed and not _has_meaningful_watch_progress(normalized_position, video.duration_seconds):
+        if progress and not progress.completed and not _has_meaningful_watch_progress(progress.position_seconds, video.duration_seconds):
+            db.delete(progress)
+            db.commit()
+        return {"ok": True}
+    if not progress:
+        progress = WatchProgress(user_id=current_user.id, video_id=video_id)
+        db.add(progress)
     history_position = max(0, int(payload.position_seconds))
     if video.duration_seconds and video.duration_seconds > 0:
         history_position = min(history_position, video.duration_seconds)

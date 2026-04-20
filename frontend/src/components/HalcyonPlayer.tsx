@@ -131,6 +131,7 @@ export function HalcyonPlayer({
   const shellRef = useRef<HTMLDivElement | null>(null);
   const [durationSeconds, setDurationSeconds] = useState<number | null>(null);
   const [chapterHost, setChapterHost] = useState<HTMLElement | null>(null);
+  const [chapterPointerPercent, setChapterPointerPercent] = useState<number | null>(null);
   const [currentTimeSeconds, setCurrentTimeSeconds] = useState(0);
   const onReadyRef = useRef(onReady);
   const onPauseRef = useRef(onPause);
@@ -496,6 +497,36 @@ export function HalcyonPlayer({
   }, [source]);
 
   useEffect(() => {
+    const host = chapterHost;
+    if (!host) {
+      setChapterPointerPercent(null);
+      return undefined;
+    }
+    const currentHost = host;
+
+    function handlePointerMove(event: PointerEvent) {
+      const bounds = currentHost.getBoundingClientRect();
+      if (bounds.width <= 0) return;
+      const ratio = (event.clientX - bounds.left) / bounds.width;
+      const clamped = Math.max(0, Math.min(1, ratio));
+      setChapterPointerPercent(clamped * 100);
+    }
+
+    function handlePointerLeave() {
+      setChapterPointerPercent(null);
+    }
+
+    currentHost.addEventListener("pointermove", handlePointerMove);
+    currentHost.addEventListener("pointerleave", handlePointerLeave);
+    currentHost.addEventListener("mouseleave", handlePointerLeave);
+    return () => {
+      currentHost.removeEventListener("pointermove", handlePointerMove);
+      currentHost.removeEventListener("pointerleave", handlePointerLeave);
+      currentHost.removeEventListener("mouseleave", handlePointerLeave);
+    };
+  }, [chapterHost]);
+
+  useEffect(() => {
     const shell = shellRef.current;
     if (!shell || !mousewheelVolumeControl) return;
 
@@ -587,23 +618,38 @@ export function HalcyonPlayer({
       {chapterMarkers.length && chapterHost
         ? createPortal(
             <div className="halcyon-player-chapters" aria-label="Video chapters">
-              {chapterMarkers.map((chapter) => (
-                <button
-                  key={`${chapter.startSeconds}-${chapter.label}`}
-                  type="button"
-                  className="halcyon-player-chapter-marker"
-                  style={{ left: `${chapter.leftPercent}%` }}
-                  aria-label={`Jump to ${chapter.label}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    const node = videoRef.current;
-                    if (!node) return;
-                    node.currentTime = chapter.startSeconds;
-                  }}
-                >
-                  <span className="halcyon-player-chapter-tooltip">{chapter.label}</span>
-                </button>
-              ))}
+              {chapterMarkers.map((chapter) => {
+                const pointerDistance =
+                  chapterPointerPercent == null
+                    ? Number.POSITIVE_INFINITY
+                    : Math.abs(chapter.leftPercent - chapterPointerPercent);
+                const proximityStrength =
+                  chapterPointerPercent == null
+                    ? 0
+                    : Math.max(0, 1 - pointerDistance / 14);
+                const markerStyle = {
+                  left: `${chapter.leftPercent}%`,
+                  "--chapter-marker-scale": (1 + proximityStrength * 1.1).toFixed(3),
+                  "--chapter-marker-opacity": (0.72 + proximityStrength * 0.28).toFixed(3),
+                } as CSSProperties;
+                return (
+                  <button
+                    key={`${chapter.startSeconds}-${chapter.label}`}
+                    type="button"
+                    className="halcyon-player-chapter-marker"
+                    style={markerStyle}
+                    aria-label={`Jump to ${chapter.label}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      const node = videoRef.current;
+                      if (!node) return;
+                      node.currentTime = chapter.startSeconds;
+                    }}
+                  >
+                    <span className="halcyon-player-chapter-tooltip">{chapter.label}</span>
+                  </button>
+                );
+              })}
             </div>,
             chapterHost,
           )
