@@ -8007,6 +8007,10 @@ body,
   opacity: 1;
 }
 
+.halcyon-player-shell .plyr__progress .halcyon-player-chapters {
+  opacity: 1;
+}
+
 .halcyon-player-chapter-marker {
   position: absolute;
   top: 50%;
