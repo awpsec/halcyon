@@ -8620,6 +8620,154 @@ def test_apply_sync_item_fetches_comments_on_initial_confident_match(tmp_path: P
         assert stored_comments[0].body == "Initial comment"
 
 
+def test_apply_sync_item_backfills_missing_comments_for_old_confident_match(tmp_path: Path, monkeypatch):
+    def fake_settings() -> Settings:
+        return Settings(
+            mounted_roots=[],
+            config_dir=tmp_path / "config",
+            cache_dir=tmp_path / "cache",
+            background_tasks_enabled=False,
+        )
+
+    async def fake_ryd(*args, **kwargs):
+        return None
+
+    async def fake_channel_about(*args, **kwargs):
+        return None
+
+    async def fail_channel_details(*args, **kwargs):
+        raise AssertionError("channel metadata should already be settled")
+
+    async def fake_top_comments(*args, **kwargs):
+        return [
+            {
+                "snippet": {
+                    "topLevelComment": {
+                        "id": "old-comment-1",
+                        "snippet": {
+                            "authorDisplayName": "Commenter",
+                            "textDisplay": "Backfilled old comment",
+                            "likeCount": 3,
+                            "publishedAt": "2026-04-20T08:00:00Z",
+                        },
+                    },
+                    "totalReplyCount": 0,
+                }
+            }
+        ]
+
+    monkeypatch.setattr(sync_service, "get_settings", fake_settings)
+    monkeypatch.setattr(sync_service, "fetch_return_youtube_dislike_details", fake_ryd)
+    monkeypatch.setattr(sync_service, "fetch_channel_about_details", fake_channel_about)
+    monkeypatch.setattr(sync_service, "fetch_channel_details", fail_channel_details)
+    monkeypatch.setattr(sync_service, "fetch_top_comments", fake_top_comments)
+    monkeypatch.setattr(sync_service, "download_thumbnail", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sync_service, "generate_thumbnail", lambda *args, **kwargs: None)
+
+    with make_session(tmp_path) as db:
+        channel = Channel(name="PowerfulJRE", slug="powerfuljre")
+        db.add(channel)
+        db.flush()
+
+        video = Video(
+            title="Joe Rogan Experience #2484 - David Cross",
+            slug="joe-rogan-experience-2484-david-cross-old-comment-backfill",
+            channel_id=channel.id,
+            created_at=datetime.utcnow() - timedelta(days=4),
+            published_at=datetime.utcnow() - timedelta(days=4),
+            duration_seconds=2 * 3600 + 23 * 60 + 4,
+            is_available=True,
+        )
+        db.add(video)
+        db.flush()
+        db.add(
+            VideoFile(
+                video_id=video.id,
+                absolute_path=str(tmp_path / "old-comments.mp4"),
+                relative_path="old-comments.mp4",
+                file_size=123,
+                fingerprint="g" * 64,
+            )
+        )
+        db.add(
+            YouTubeMatch(
+                video_id=video.id,
+                youtube_video_id="old-comments-yt",
+                youtube_channel_id="channel-jre",
+                status="matched",
+                confidence=0.96,
+                reasons=["exact-title", "duration-tight", "channel"],
+            )
+        )
+        db.add(
+            YouTubeVideoSnapshot(
+                youtube_video_id="old-comments-yt",
+                youtube_channel_id="channel-jre",
+                title="Joe Rogan Experience #2484 - David Cross",
+                description="Settled metadata",
+                duration_seconds=2 * 3600 + 23 * 60 + 4,
+                thumbnail_url="https://i.ytimg.com/vi/old-comments-yt/hqdefault.jpg",
+                published_at=datetime.utcnow() - timedelta(days=4),
+                published_at_source="youtube-api",
+                view_count=32000,
+                like_count=1200,
+                fetched_at=datetime.utcnow() - timedelta(days=3),
+            )
+        )
+        db.add(
+            YouTubeChannelSnapshot(
+                youtube_channel_id="channel-jre",
+                title="PowerfulJRE",
+            )
+        )
+        db.commit()
+        db.refresh(video)
+
+        item = {
+            "id": "old-comments-yt",
+            "snippet": {
+                "title": "Joe Rogan Experience #2484 - David Cross",
+                "channelTitle": "PowerfulJRE",
+                "channelId": "channel-jre",
+                "publishedAt": (datetime.utcnow() - timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "description": "Settled metadata",
+                "thumbnails": {
+                    "high": {"url": "https://i.ytimg.com/vi/old-comments-yt/hqdefault.jpg"}
+                },
+            },
+            "statistics": {
+                "viewCount": "33000",
+                "likeCount": "1300",
+            },
+            "_waytube_duration_seconds": 2 * 3600 + 23 * 60 + 4,
+            "_waytube_source": "youtube-api",
+        }
+
+        async def run() -> None:
+            async with httpx.AsyncClient() as client:
+                await apply_sync_item(
+                    db,
+                    video,
+                    item,
+                    comment_limit=25,
+                    requests_per_second=3,
+                    client=client,
+                    api_key="test-api-key",
+                    confidence=0.96,
+                    reasons=["exact-title", "duration-tight", "channel"],
+                    status="matched",
+                )
+
+        asyncio.run(run())
+
+        stored_comments = db.scalars(
+            select(YouTubeCommentSnapshot).where(YouTubeCommentSnapshot.youtube_video_id == "old-comments-yt")
+        ).all()
+
+        assert len(stored_comments) == 1
+        assert stored_comments[0].body == "Backfilled old comment"
+
+
 def test_video_requires_refresh_ignores_periodic_engagement_window_without_api_key(tmp_path: Path):
     with make_session(tmp_path) as db:
         channel = Channel(name="PowerfulJRE", slug="powerfuljre")

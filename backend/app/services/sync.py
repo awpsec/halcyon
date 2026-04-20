@@ -4902,7 +4902,6 @@ async def apply_sync_item(
         and comment_limit > 0
         and not engagement_only
         and existing_comment_count == 0
-        and periodic_stats_refresh_allowed(video, snapshot)
         and matched_metadata_is_confident(
             db,
             video,
