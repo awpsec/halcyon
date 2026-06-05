@@ -904,6 +904,7 @@ def run_retention_cycle(db: Session, *, trigger: str = "auto", force: bool = Fal
 
         if should_stage_candidates:
             cutoff = now - timedelta(days=max(1, settings_row.retention_days))
+            retention_age_timestamp = func.coalesce(Video.published_at, Video.created_at)
             pending_video_ids = set(
                 db.scalars(select(RetentionItem.video_id).where(RetentionItem.status == "staged")).all()
             )
@@ -912,9 +913,9 @@ def run_retention_cycle(db: Session, *, trigger: str = "auto", force: bool = Fal
                 .options(joinedload(Video.files), joinedload(Video.channel), joinedload(Video.series))
                 .where(
                     Video.is_available.is_(True),
-                    Video.created_at < cutoff,
+                    retention_age_timestamp < cutoff,
                 )
-                .order_by(Video.created_at.asc(), Video.id.asc())
+                .order_by(retention_age_timestamp.asc(), Video.id.asc())
             ).unique().all()
 
             for video in candidate_videos:

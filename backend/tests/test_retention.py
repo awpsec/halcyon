@@ -192,6 +192,46 @@ def test_manual_retention_run_reports_missing_source_files(tmp_path: Path):
         assert retention_item is None
 
 
+def test_manual_retention_run_uses_published_date_for_candidate_age(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        video, video_file, source_path = create_video_with_file(db, tmp_path)
+        video.created_at = datetime.utcnow()
+        video.published_at = datetime.utcnow() - timedelta(days=45)
+        settings_row = get_or_create_retention_settings(db)
+        settings_row.enabled = True
+        settings_row.retention_days = 30
+        settings_row.staging_folder_path = str(tmp_path / "retention-staging")
+        db.commit()
+
+        result = run_retention_cycle(db, trigger="manual", force=True)
+
+        retention_item = db.scalar(select(RetentionItem).where(RetentionItem.video_file_id == video_file.id))
+        assert result["marked"] == 1
+        assert retention_item is not None
+        assert retention_item.status == "staged"
+        assert Path(retention_item.staged_absolute_path).exists()
+        assert not source_path.exists()
+
+
+def test_manual_retention_run_prefers_recent_published_date_over_old_library_row(tmp_path: Path):
+    with make_session(tmp_path) as db:
+        video, video_file, source_path = create_video_with_file(db, tmp_path)
+        video.created_at = datetime.utcnow() - timedelta(days=90)
+        video.published_at = datetime.utcnow() - timedelta(days=5)
+        settings_row = get_or_create_retention_settings(db)
+        settings_row.enabled = True
+        settings_row.retention_days = 30
+        settings_row.staging_folder_path = str(tmp_path / "retention-staging")
+        db.commit()
+
+        result = run_retention_cycle(db, trigger="manual", force=True)
+
+        retention_item = db.scalar(select(RetentionItem).where(RetentionItem.video_file_id == video_file.id))
+        assert result["marked"] == 0
+        assert retention_item is None
+        assert source_path.exists()
+
+
 def test_record_retention_failure_persists_history(tmp_path: Path):
     with make_session(tmp_path) as db:
         result = record_retention_failure(db, trigger="manual", message="UNIQUE constraint failed")
