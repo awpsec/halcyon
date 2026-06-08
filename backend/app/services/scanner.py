@@ -28,6 +28,7 @@ from app.models.entities import (
     VideoReaction,
     WatchHistory,
     WatchProgress,
+    YouTubeCommentReplySnapshot,
     YouTubeCommentSnapshot,
     YouTubeMatch,
     YouTubeVideoSnapshot,
@@ -160,6 +161,15 @@ def _delete_video_dependencies(db: Session, video: Video) -> None:
     db.query(YouTubeMatch).filter(YouTubeMatch.video_id == video.id).delete(synchronize_session=False)
 
     if youtube_video_id:
+        comment_ids = list(
+            db.scalars(
+                select(YouTubeCommentSnapshot.id).where(YouTubeCommentSnapshot.youtube_video_id == youtube_video_id)
+            ).all()
+        )
+        reply_filters = [YouTubeCommentReplySnapshot.youtube_video_id == youtube_video_id]
+        if comment_ids:
+            reply_filters.append(YouTubeCommentReplySnapshot.parent_comment_id.in_(comment_ids))
+        db.query(YouTubeCommentReplySnapshot).filter(or_(*reply_filters)).delete(synchronize_session=False)
         db.query(YouTubeCommentSnapshot).filter(
             YouTubeCommentSnapshot.youtube_video_id == youtube_video_id
         ).delete(synchronize_session=False)

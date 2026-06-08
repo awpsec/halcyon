@@ -6,7 +6,16 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.timezone import server_timezone_name
 from app.models.base import Base
-from app.models.entities import Channel, RetentionItem, RetentionRun, Video, VideoFile
+from app.models.entities import (
+    Channel,
+    RetentionItem,
+    RetentionRun,
+    Video,
+    VideoFile,
+    YouTubeCommentReplySnapshot,
+    YouTubeCommentSnapshot,
+    YouTubeMatch,
+)
 from app.services.retention import (
     delete_pending_retention_items,
     get_or_create_retention_settings,
@@ -349,6 +358,38 @@ def test_delete_video_dependencies_detaches_retention_history_before_bulk_file_d
         assert detached_item is not None
         assert detached_item.video_id is None
         assert detached_item.video_file_id is None
+
+
+def test_delete_video_dependencies_deletes_comment_replies_before_parent_comments(tmp_path: Path):
+    with make_foreign_key_session(tmp_path) as db:
+        video, _, _ = create_video_with_file(db, tmp_path)
+        youtube_video_id = "comment-fk-video"
+        db.add(YouTubeMatch(video_id=video.id, youtube_video_id=youtube_video_id, status="matched"))
+        parent_comment = YouTubeCommentSnapshot(
+            youtube_video_id=youtube_video_id,
+            youtube_comment_id="parent-comment",
+            author_name="Parent",
+            body="Parent comment",
+        )
+        db.add(parent_comment)
+        db.flush()
+        db.add(
+            YouTubeCommentReplySnapshot(
+                parent_comment_id=parent_comment.id,
+                youtube_video_id=youtube_video_id,
+                youtube_reply_id="child-reply",
+                author_name="Reply",
+                body="Reply comment",
+            )
+        )
+        db.commit()
+
+        _delete_video_dependencies(db, video)
+        db.commit()
+
+        assert db.get(Video, video.id) is None
+        assert db.scalar(select(YouTubeCommentReplySnapshot).where(YouTubeCommentReplySnapshot.youtube_video_id == youtube_video_id)) is None
+        assert db.scalar(select(YouTubeCommentSnapshot).where(YouTubeCommentSnapshot.youtube_video_id == youtube_video_id)) is None
 
 
 def test_missing_file_cleanup_detaches_retention_history_before_file_delete(tmp_path: Path):
