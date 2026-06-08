@@ -717,6 +717,7 @@ def _delete_retention_item(
     delete_finalize_paths: list[Path] | None = None,
 ) -> bool:
     video_file = db.get(VideoFile, item.video_file_id) if item.video_file_id is not None else None
+    video = db.get(Video, item.video_id) if item.video_id is not None else None
     staged_path = Path(item.staged_absolute_path)
     subtitle_source_path = generated_subtitle_path(Path(item.original_absolute_path))
 
@@ -748,20 +749,29 @@ def _delete_retention_item(
         if delete_finalize_paths is not None:
             delete_finalize_paths.append(delete_buffer_subtitle_path)
 
+    remaining_file = None
+    if video is not None:
+        remaining_file_query = select(VideoFile.id).where(VideoFile.video_id == video.id)
+        if video_file is not None:
+            remaining_file_query = remaining_file_query.where(VideoFile.id != video_file.id)
+        remaining_file = db.scalar(remaining_file_query.limit(1))
+
+    item.video_file_id = None
+    if video is None or remaining_file is None:
+        item.video_id = None
+    db.flush()
+
     if video_file:
         db.delete(video_file)
         db.flush()
 
-    video = db.get(Video, item.video_id)
     if video is not None:
-        remaining_file = db.scalar(select(VideoFile.id).where(VideoFile.video_id == video.id).limit(1))
         if remaining_file is None:
             _delete_video_dependencies(db, video)
         else:
             _refresh_video_availability(db, video.id)
 
     item.video_id = None
-    item.video_file_id = None
     item.status = "deleted"
     item.last_error = None
     item.run_token = None

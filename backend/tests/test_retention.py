@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.timezone import server_timezone_name
@@ -20,6 +20,19 @@ from app.services.subtitles import generated_subtitle_path
 
 def make_session(tmp_path: Path) -> Session:
     engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}", future=True)
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)()
+
+
+def make_foreign_key_session(tmp_path: Path) -> Session:
+    engine = create_engine(f"sqlite:///{tmp_path / 'fk-test.db'}", future=True)
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)()
 
@@ -272,6 +285,34 @@ def test_delete_pending_retention_items_removes_staged_files(tmp_path: Path):
         assert db.get(VideoFile, video_file.id) is None
 
         deleted_item = db.scalar(select(RetentionItem).where(RetentionItem.id == staged_item.id))
+        assert deleted_item is not None
+        assert deleted_item.status == "deleted"
+        assert deleted_item.video_id is None
+        assert deleted_item.video_file_id is None
+
+
+def test_delete_pending_retention_items_detaches_history_before_file_delete_with_foreign_keys(tmp_path: Path):
+    with make_foreign_key_session(tmp_path) as db:
+        video, video_file, source_path = create_video_with_file(db, tmp_path)
+        video.created_at = datetime.utcnow().replace(year=2024)
+        settings_row = get_or_create_retention_settings(db)
+        settings_row.enabled = True
+        settings_row.retention_days = 30
+        settings_row.staging_folder_path = str(tmp_path / "retention-staging")
+        db.commit()
+
+        run_retention_cycle(db, trigger="manual", force=True)
+        staged_item = db.scalar(select(RetentionItem).where(RetentionItem.video_file_id == video_file.id))
+        assert staged_item is not None
+        staged_path = Path(staged_item.staged_absolute_path)
+
+        delete_result = delete_pending_retention_items(db)
+
+        deleted_item = db.scalar(select(RetentionItem).where(RetentionItem.id == staged_item.id))
+        assert delete_result["deleted"] == 1
+        assert not source_path.exists()
+        assert not staged_path.exists()
+        assert db.get(VideoFile, video_file.id) is None
         assert deleted_item is not None
         assert deleted_item.status == "deleted"
         assert deleted_item.video_id is None
