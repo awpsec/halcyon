@@ -118,9 +118,28 @@ def _retention_scan_excluded_roots(db: Session, mounted_roots: list[Path]) -> li
     return excluded_roots
 
 
+def _detach_retention_history_for_video_files(db: Session, *, video_file_ids: list[int], video_id: int | None = None) -> None:
+    video_file_id_set = set(video_file_ids)
+    filters = []
+    if video_file_id_set:
+        filters.append(RetentionItem.video_file_id.in_(video_file_id_set))
+    if video_id is not None:
+        filters.append(RetentionItem.video_id == video_id)
+    if filters:
+        items = db.scalars(select(RetentionItem).where(or_(*filters))).all()
+        for item in items:
+            if item.video_file_id in video_file_id_set:
+                item.video_file_id = None
+            if video_id is not None and item.video_id == video_id:
+                item.video_id = None
+        db.flush()
+
+
 def _delete_video_dependencies(db: Session, video: Video) -> None:
     match = db.scalar(select(YouTubeMatch).where(YouTubeMatch.video_id == video.id))
     youtube_video_id = match.youtube_video_id if match else None
+    video_files = db.scalars(select(VideoFile).where(VideoFile.video_id == video.id)).all()
+    video_file_ids = [video_file.id for video_file in video_files]
 
     db.query(WatchProgress).filter(WatchProgress.video_id == video.id).delete(synchronize_session=False)
     db.query(WatchHistory).filter(WatchHistory.video_id == video.id).delete(synchronize_session=False)
@@ -133,7 +152,11 @@ def _delete_video_dependencies(db: Session, video: Video) -> None:
         MetadataOverride.target_id == video.id,
     ).delete(synchronize_session=False)
     db.query(TranscodeJob).filter(TranscodeJob.video_id == video.id).delete(synchronize_session=False)
-    db.query(VideoFile).filter(VideoFile.video_id == video.id).delete(synchronize_session=False)
+    _detach_retention_history_for_video_files(db, video_file_ids=video_file_ids, video_id=video.id)
+    for video_file in video_files:
+        db.delete(video_file)
+    if video_files:
+        db.flush()
     db.query(YouTubeMatch).filter(YouTubeMatch.video_id == video.id).delete(synchronize_session=False)
 
     if youtube_video_id:
@@ -171,6 +194,7 @@ def cleanup_missing_files(db: Session, managed_roots: list[Path], discovered_pat
 
         video = video_file.video
         logger.info("Scan removing missing file path=%s video_id=%s", video_file.absolute_path, video.id if video else None)
+        _detach_retention_history_for_video_files(db, video_file_ids=[video_file.id])
         db.delete(video_file)
         db.flush()
 

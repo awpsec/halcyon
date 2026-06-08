@@ -15,6 +15,7 @@ from app.services.retention import (
     revert_last_retention_run,
     run_retention_cycle,
 )
+from app.services.scanner import _delete_video_dependencies, cleanup_missing_files
 from app.services.subtitles import generated_subtitle_path
 
 
@@ -317,6 +318,70 @@ def test_delete_pending_retention_items_detaches_history_before_file_delete_with
         assert deleted_item.status == "deleted"
         assert deleted_item.video_id is None
         assert deleted_item.video_file_id is None
+
+
+def test_delete_video_dependencies_detaches_retention_history_before_bulk_file_delete(tmp_path: Path):
+    with make_foreign_key_session(tmp_path) as db:
+        video, video_file, source_path = create_video_with_file(db, tmp_path)
+        retention_item = RetentionItem(
+            video_id=video.id,
+            video_file_id=video_file.id,
+            original_absolute_path=str(source_path),
+            staged_absolute_path=str(tmp_path / "retention-staging" / "deleted" / "recent-video.mp4"),
+            original_relative_path=video_file.relative_path,
+            original_video_created_at=video.created_at,
+            file_size_bytes=video_file.file_size,
+            file_fingerprint=video_file.fingerprint,
+            delete_after_at=datetime.utcnow(),
+            status="deleted",
+            run_token=None,
+        )
+        db.add(retention_item)
+        db.commit()
+        retention_item_id = retention_item.id
+
+        _delete_video_dependencies(db, video)
+        db.commit()
+
+        detached_item = db.get(RetentionItem, retention_item_id)
+        assert db.get(Video, video.id) is None
+        assert db.get(VideoFile, video_file.id) is None
+        assert detached_item is not None
+        assert detached_item.video_id is None
+        assert detached_item.video_file_id is None
+
+
+def test_missing_file_cleanup_detaches_retention_history_before_file_delete(tmp_path: Path):
+    with make_foreign_key_session(tmp_path) as db:
+        video, video_file, source_path = create_video_with_file(db, tmp_path)
+        retention_item = RetentionItem(
+            video_id=video.id,
+            video_file_id=video_file.id,
+            original_absolute_path=str(source_path),
+            staged_absolute_path=str(tmp_path / "retention-staging" / "deleted" / "recent-video.mp4"),
+            original_relative_path=video_file.relative_path,
+            original_video_created_at=video.created_at,
+            file_size_bytes=video_file.file_size,
+            file_fingerprint=video_file.fingerprint,
+            delete_after_at=datetime.utcnow(),
+            status="deleted",
+            run_token=None,
+        )
+        db.add(retention_item)
+        db.commit()
+        retention_item_id = retention_item.id
+        source_path.unlink()
+
+        removed = cleanup_missing_files(db, [tmp_path / "library"], set())
+        db.commit()
+
+        detached_item = db.get(RetentionItem, retention_item_id)
+        assert removed == 1
+        assert db.get(Video, video.id) is None
+        assert db.get(VideoFile, video_file.id) is None
+        assert detached_item is not None
+        assert detached_item.video_id is None
+        assert detached_item.video_file_id is None
 
 
 def test_delete_pending_retention_items_removes_generated_subtitle_sidecars(tmp_path: Path):
