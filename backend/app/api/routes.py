@@ -112,6 +112,7 @@ from app.services.app_update import build_update_status
 from app.services.auth import hash_password, hash_session_token, verify_password, verify_recovery_phrase
 from app.services.auth_rate_limit import clear_failures, is_limited, register_failure
 from app.services.feed import build_home_feed, build_suggested_feed, summarize_video
+from app.services.recommendations import CANDIDATE_POOL_LIMIT, rank_suggestions
 from app.services.media import download_thumbnail, find_caption_tracks, generate_preview_clip, generate_thumbnail, is_video_file, placeholder_thumbnail_svg, probe_media, srt_to_vtt
 from app.services.playback import (
     ensure_compatible_stream,
@@ -1391,7 +1392,6 @@ def _video_ref_for(db: Session, video: Video) -> str:
 
 
 def _next_up_for_video(db: Session, video: Video, *, user_id: int | None = None) -> Video | None:
-    next_up = None
     watched_video_ids: set[int] = set()
     if user_id is not None:
         watched_video_ids = set(
@@ -1402,6 +1402,8 @@ def _next_up_for_video(db: Session, video: Video, *, user_id: int | None = None)
                 )
             ).all()
         )
+
+    # 1) In a series, "next" is unambiguous: the next unwatched episode.
     if video.series_id:
         next_up = db.scalars(
             _video_query()
@@ -1413,8 +1415,38 @@ def _next_up_for_video(db: Session, video: Video, *, user_id: int | None = None)
             )
             .order_by(Video.episode_number.asc())
         ).unique().first()
-    if next_up is None and video.channel_id:
-        next_up = db.scalars(
+        if next_up is not None:
+            return next_up
+
+    # 2) Otherwise pick the top-ranked suggestion (topic + affinity aware,
+    #    unwatched) instead of blindly "latest from the same channel".
+    if user_id is not None:
+        pool = db.scalars(
+            _video_query()
+            .where(
+                Video.is_available.is_(True),
+                Video.id != video.id,
+                Video.id.not_in(
+                    select(WatchProgress.video_id).where(
+                        WatchProgress.user_id == user_id,
+                        WatchProgress.completed.is_(True),
+                    )
+                ),
+            )
+            .order_by(
+                func.coalesce(Video.published_at, Video.created_at).desc(),
+                Video.id.desc(),
+            )
+            .limit(CANDIDATE_POOL_LIMIT)
+        ).unique().all()
+        ranked = rank_suggestions(db, video, pool, user_id)
+        if ranked:
+            return ranked[0]
+
+    # 3) Fall back to latest unwatched from the same channel so autoplay still
+    #    has somewhere to go.
+    if video.channel_id:
+        return db.scalars(
             _video_query()
             .where(
                 Video.channel_id == video.channel_id,
@@ -1423,7 +1455,9 @@ def _next_up_for_video(db: Session, video: Video, *, user_id: int | None = None)
             )
             .order_by(Video.created_at.desc())
         ).unique().first()
-    return next_up
+    return None
+
+
 
 
 def _watch_suggestion_filters(
@@ -1506,18 +1540,39 @@ def _watch_suggestions_page(
     )
     bounded_offset = max(0, int(offset))
     bounded_limit = max(1, min(int(limit), 25))
-    total = db.scalar(select(func.count(Video.id)).where(*filters)) or 0
-    videos = (
-        db.scalars(
-            _video_query()
-            .where(*filters)
-            .order_by(*_watch_suggestion_order(video))
-            .offset(bounded_offset)
-            .limit(bounded_limit)
+    if normalized_mode == "suggested":
+        # Content-based + affinity ranking with a channel-diversity pass, so the
+        # rail surfaces other creators on the same topic instead of clustering
+        # the current channel. Pool is bounded for per-request cost.
+        pool = (
+            db.scalars(
+                _video_query()
+                .where(*filters)
+                .order_by(
+                    func.coalesce(Video.published_at, Video.created_at).desc(),
+                    Video.id.desc(),
+                )
+                .limit(CANDIDATE_POOL_LIMIT)
+            )
+            .unique()
+            .all()
         )
-        .unique()
-        .all()
-    )
+        ranked = rank_suggestions(db, video, pool, current_user.id)
+        total = len(ranked)
+        videos = ranked[bounded_offset : bounded_offset + bounded_limit]
+    else:
+        total = db.scalar(select(func.count(Video.id)).where(*filters)) or 0
+        videos = (
+            db.scalars(
+                _video_query()
+                .where(*filters)
+                .order_by(*_watch_suggestion_order(video))
+                .offset(bounded_offset)
+                .limit(bounded_limit)
+            )
+            .unique()
+            .all()
+        )
     progress_map = (
         {
             item.video_id: item

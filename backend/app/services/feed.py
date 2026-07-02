@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.models.entities import QueueItem, Subscription, Video, WatchProgress, YouTubeChannelSnapshot, YouTubeCommentSnapshot, YouTubeMatch, YouTubeVideoSnapshot
 from app.schemas.common import FeedCard, FeedSection, VideoSummary
 from app.services.overrides import apply_video_override
+from app.services.recommendations import rank_for_user
 from app.services.sync import youtube_channel_matches_local_channel
 from app.services.utils import is_generic_channel_name, parse_episode_number
 
@@ -312,9 +313,8 @@ def build_home_feed(db: Session, user_id: int) -> list[FeedSection]:
     ]
     next_in_series_ids = {video.id for video in next_in_series}
 
-    suggested_videos = sorted(
-        [video for video in random_pool if video.id not in queue_ids],
-        key=lambda video: (_stable_suggested_jitter(user_id, video.id), video.id),
+    suggested_videos = rank_for_user(
+        db, [video for video in random_pool if video.id not in queue_ids], user_id
     )
     suggested_with_series: list[Video] = []
     seen_suggested_ids: set[int] = set()
@@ -358,13 +358,14 @@ def build_suggested_feed(db: Session, user_id: int) -> tuple[list[Video], dict[i
         db.scalars(select(QueueItem.video_id).where(QueueItem.user_id == user_id).order_by(QueueItem.position)).all()
     )
     all_videos = db.scalars(_video_feed_query()).unique().all()
-    suggested_videos = sorted(
+    suggested_videos = rank_for_user(
+        db,
         [
             video
             for video in all_videos
             if video.id not in progress_by_video and video.id not in queue_video_ids
         ],
-        key=lambda video: (_stable_suggested_jitter(user_id, video.id), video.id),
+        user_id,
     )
     return suggested_videos, progress_by_video
 
