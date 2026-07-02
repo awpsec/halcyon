@@ -6219,10 +6219,34 @@ body,
   overflow: hidden;
 }
 
+/* The player box fills the full-bleed strip so the control bar, big play
+   button and overlays reach edge to edge — including across the black-bar
+   area. Instead of shrinking the whole player to the video, we keep the box
+   full width and letterbox the *video* inside it (object-fit: contain), so
+   black bars only ever appear behind the video and never truncate the
+   controls. Height is capped under the masthead so the bottom isn't clipped. */
 .watch-page-theater .watch-player-frame {
-  /* Cap by height (leaving room under the masthead so the bottom is never
-     clipped) AND by width (so there's always real side letterboxing). */
-  max-width: min(calc((100vh - 120px) * 16 / 9), calc(100vw - 160px));
+  width: 100%;
+  max-width: none;
+  height: min(calc(100vh - 96px), calc(100vw * 9 / 16));
+}
+.watch-page-theater .watch-player-frame .halcyon-player-shell,
+.watch-page-theater .watch-player-frame .plyr {
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+  background: #000;
+}
+.watch-page-theater .watch-player-frame .plyr__video-wrapper {
+  height: 100%;
+  aspect-ratio: auto;
+  padding-bottom: 0 !important; /* neutralize Plyr's fixed-ratio padding */
+  background: #000;
+}
+.watch-page-theater .watch-player-frame video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 .watch-page-theater .watch-player-frame .plyr,
 .watch-page-theater .watch-player-frame .plyr__video-wrapper {
