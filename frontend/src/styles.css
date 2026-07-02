@@ -6194,6 +6194,15 @@ body,
   width: 100%;
 }
 
+/* The sidebar still carries `grid-area: sidebar` from older rules, but the
+   stage grid no longer defines that named area — leaving it set spawns
+   phantom column tracks and drops the sidebar onto its own row below the
+   content. Neutralize it so it auto-places: second column beside the content
+   in the default layout, stacked below in the single-column theater grid. */
+.watch-stage-row > .watch-sidebar {
+  grid-area: auto;
+}
+
 /* Theater player — YouTube-style full-bleed strip:
    spans the entire viewport width (breaking out of the content column),
    sits flush under the sticky top bar, letterboxed on black, and capped
