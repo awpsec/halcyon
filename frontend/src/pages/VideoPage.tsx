@@ -25,6 +25,7 @@ import { useAsyncData } from "../hooks/useAsyncData";
 import {
   formatAbsoluteDateTime,
   formatCount,
+  formatDuration,
   formatRelativeDate,
   normalizeImportedText,
 } from "../lib/format";
@@ -672,6 +673,19 @@ function WatchSuggestionRow({
             alt={displayTitle}
           />
           {isWatched ? <span className="watched-badge-overlay">Watched</span> : null}
+          {!isWatched && item.duration_seconds && item.duration_seconds > 0 ? (
+            <span className="suggestion-duration">
+              {formatDuration(item.duration_seconds)}
+            </span>
+          ) : null}
+          {!isWatched && progressPercent > 1 ? (
+            <span className="suggestion-progress" aria-hidden="true">
+              <span
+                className="suggestion-progress-fill"
+                style={{ width: `${progressPercent}%` }}
+              />
+            </span>
+          ) : null}
           </Link>
           <span className="suggestion-copy">
             <Link to={`/video/${item.watch_ref ?? item.id}`} className="suggestion-title-link">
@@ -1038,6 +1052,32 @@ export function VideoPage({
   useEffect(() => {
     setDisplayMode(resolvePlayerModePreference(preferences.defaultPlayerMode));
   }, [preferences.defaultPlayerMode, videoId]);
+
+  useEffect(() => {
+    // YouTube-style "t" toggles theater. Capture phase so it wins over the
+    // app shell's type-to-search handler.
+    function handleTheaterKey(event: KeyboardEvent) {
+      if (event.key !== "t" && event.key !== "T") return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      setDisplayMode((current) => (current === "default" ? "theater" : "default"));
+    }
+    document.addEventListener("keydown", handleTheaterKey, { capture: true });
+    return () =>
+      document.removeEventListener("keydown", handleTheaterKey, {
+        capture: true,
+      });
+  }, []);
 
   useEffect(() => {
     try {
@@ -2159,6 +2199,7 @@ export function VideoPage({
                         setStatsOpen((current) => !current);
                       }}
                       aria-label="Playback stats"
+                      title="Stats for nerds"
                     >
                       <svg
                         viewBox="0 0 24 24"
@@ -2183,6 +2224,7 @@ export function VideoPage({
                         );
                       }}
                       aria-label="Toggle theater mode"
+                      title="Theater mode (t)"
                     >
                       <svg
                         viewBox="0 0 24 24"
@@ -2216,6 +2258,7 @@ export function VideoPage({
                         setMenuOpen((current) => !current);
                       }}
                       aria-label="Player actions"
+                      title="More actions"
                     >
                       <svg
                         viewBox="0 0 24 24"
@@ -2459,12 +2502,13 @@ export function VideoPage({
                       disabled={reactionPending === "like"}
                       onClick={() => void setReaction("like")}
                       type="button"
+                      aria-label="Like"
+                      title="Like"
                     >
                       <ThumbIcon
                         type="like"
                         active={data.video.user_reaction === "like"}
                       />
-                      <span>Like</span>
                       {displayedLikeCount != null ? (
                         <strong>{formatCount(displayedLikeCount)}</strong>
                       ) : null}
@@ -2474,12 +2518,13 @@ export function VideoPage({
                       disabled={reactionPending === "dislike"}
                       onClick={() => void setReaction("dislike")}
                       type="button"
+                      aria-label="Dislike"
+                      title="Dislike"
                     >
                       <ThumbIcon
                         type="dislike"
                         active={data.video.user_reaction === "dislike"}
                       />
-                      <span>Dislike</span>
                       {displayedDislikeCount != null ? (
                         <strong>{formatCount(displayedDislikeCount)}</strong>
                       ) : null}

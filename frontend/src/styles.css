@@ -9644,3 +9644,42 @@ body,
     top: 42px;
   }
 }
+
+/* ============================================================
+   Redesign — watch page reconciliation (flat comments)
+   Applies the flat YouTube-style comment look to main's comment
+   markup (which keeps replies), de-paning the cards.
+   ============================================================ */
+.comment-card.watch-comment-card {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  padding: 0;
+  gap: 14px;
+  overflow: visible;
+}
+
+.comment-card.watch-comment-card::before {
+  content: none;
+}
+
+.comment-stack {
+  gap: 22px;
+}
+
+.watch-comment-preview-row {
+  padding: 0 0 4px;
+}
+
+.watch-comment-preview-row + .watch-comment-preview-row {
+  border-top: 0;
+  padding-top: 4px;
+}
+
+/* Replies read as a nested thread, not a card */
+.watch-comment-replies {
+  border-left: 2px solid var(--line);
+  padding-left: 12px;
+  margin-top: 8px;
+}
