@@ -6166,47 +6166,30 @@ body,
 .watch-stage-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 392px;
-  grid-template-areas:
-    "player sidebar"
-    "meta sidebar"
-    "comments sidebar";
   column-gap: 24px;
-  row-gap: 14px;
   align-items: start;
 }
 
-/* YouTube-style theater: player spans full width on top,
-   title/comments on the left, suggestions on the right below. */
 .watch-page-theater .watch-stage-row {
-  grid-template-columns: minmax(0, 1fr) 402px;
-  grid-template-areas:
-    "player player"
-    "meta sidebar"
-    "comments sidebar";
-  column-gap: 24px;
+  grid-template-columns: minmax(0, 1fr);
+  column-gap: 0;
   row-gap: 16px;
 }
 
-/* Passthrough wrapper so the loading skeleton's column doesn't
-   break the stage grid (real render has no wrapper). */
+/* Tight flex stack (player/meta/comments) in the left column — the
+   suggestions sidebar is the grid's second column, so its height can't
+   stretch the player row and push the title down. */
 .watch-main-column {
-  display: contents;
-}
-
-.watch-player-slot {
-  grid-area: player;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
   min-width: 0;
-  width: 100%;
 }
 
-.watch-meta-slot {
-  grid-area: meta;
-  min-width: 0;
-  width: 100%;
-}
-
+.watch-player-slot,
+.watch-meta-slot,
 .watch-comments-slot {
-  grid-area: comments;
+  grid-area: auto;
   min-width: 0;
   width: 100%;
 }
