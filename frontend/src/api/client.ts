@@ -264,6 +264,7 @@ export type RetentionRun = {
   trigger: string;
   status: string;
   message?: string | null;
+  details?: Record<string, string[]> | null;
   marked_count: number;
   deleted_count: number;
   reverted_count: number;
@@ -338,19 +339,81 @@ export type TranscodeItem = {
   updated_at: string;
 };
 
+function browserTimeZone(): string | null {
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone?.trim();
+  return zone ? zone : null;
+}
+
+export class ApiError extends Error {
+  status: number | null;
+  isNetwork: boolean;
+
+  constructor(message: string, status: number | null, isNetwork = false) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.isNetwork = isNetwork;
+  }
+}
+
+function friendlyErrorMessage(status: number, body: string): string {
+  // Backend errors arrive as {"detail": "..."} — surface the human part,
+  // never the raw JSON.
+  try {
+    const parsed = JSON.parse(body) as { detail?: unknown };
+    if (typeof parsed.detail === "string" && parsed.detail.trim()) {
+      return parsed.detail;
+    }
+    if (Array.isArray(parsed.detail)) {
+      const merged = parsed.detail
+        .map((item) =>
+          item && typeof item === "object" && "msg" in item
+            ? String((item as { msg: unknown }).msg)
+            : "",
+        )
+        .filter(Boolean)
+        .join("; ");
+      if (merged) return merged;
+    }
+  } catch {
+    // non-JSON body — fall through
+  }
+  if (status >= 500) {
+    return "The Halcyon server hit an error. It may still be starting up — try again in a moment.";
+  }
+  if (status === 401) {
+    return "Not signed in.";
+  }
+  return body.trim() || `Request failed (${status})`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {})
-    },
-    ...init
-  });
+  const timezone = browserTimeZone();
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...(timezone ? { "X-Halcyon-Timezone": timezone } : {}),
+        ...(init?.headers ?? {})
+      },
+      ...init
+    });
+  } catch {
+    throw new ApiError(
+      "Can't reach the Halcyon server. Make sure the backend is running, then try again.",
+      null,
+      true,
+    );
+  }
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(body || `Request failed: ${response.status}`);
+    throw new ApiError(
+      friendlyErrorMessage(response.status, body),
+      response.status,
+    );
   }
 
   if (response.status === 204) {
@@ -472,6 +535,7 @@ export const api = {
     auto_time_hour: number;
     auto_time_minute: number;
     auto_weekday: number;
+    auto_timezone?: string | null;
   }) =>
     request<RetentionOverview>("/api/retention/settings", { method: "PUT", body: JSON.stringify(payload) }),
   runRetention: () => request<{ result: { status: string; message: string; marked: number; deleted: number; reverted: number; run_token?: string | null }; settings: RetentionSettings; pending_items: RetentionPendingItem[]; history: RetentionRun[] }>("/api/retention/run", { method: "POST" }),

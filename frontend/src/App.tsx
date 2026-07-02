@@ -1,6 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
-import { api, type Preferences, type Profile, type SessionResponse } from "./api/client";
+import { api, ApiError, type Preferences, type Profile, type SessionResponse } from "./api/client";
 import { AppShell } from "./components/AppShell";
 import { ToastHost } from "./components/ToastHost";
 import { AdminSetupPage } from "./pages/AdminSetupPage";
@@ -147,9 +147,20 @@ function AppRoutes() {
               if (cancelled) return;
               setStoredSessions(rememberSession(restored));
               setProfile(restored.user);
-            } catch {
+            } catch (err) {
               if (cancelled) return;
-              setStoredSessions(discardSession(remembered.session_token));
+              // Only forget the remembered session when the server explicitly
+              // rejected it. A network failure / server error just means the
+              // backend is down — keep the session so the user isn't forced to
+              // re-login once it comes back.
+              const rejected =
+                err instanceof ApiError &&
+                err.status !== null &&
+                err.status >= 400 &&
+                err.status < 500;
+              if (rejected) {
+                setStoredSessions(discardSession(remembered.session_token));
+              }
               setProfile(null);
             }
           } else {

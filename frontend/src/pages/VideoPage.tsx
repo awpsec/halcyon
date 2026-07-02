@@ -26,6 +26,7 @@ import { useAsyncData } from "../hooks/useAsyncData";
 import {
   formatAbsoluteDateTime,
   formatCount,
+  formatDuration,
   formatRelativeDate,
   normalizeImportedText,
 } from "../lib/format";
@@ -38,6 +39,7 @@ import { pushToast } from "../lib/notifications";
 const WATCH_COMPLETION_THRESHOLD = 0.95;
 const SUGGESTION_LOADING_MIN_MS = 180;
 const PLAYER_MODE_STORAGE_KEY = "halcyon.playerMode";
+const COMMENT_PREVIEW_COUNT = 4;
 
 type ParsedChapter = {
   startSeconds: number;
@@ -89,6 +91,15 @@ function parseDescriptionChapters(description: string): ParsedChapter[] {
     .filter((chapter): chapter is ParsedChapter => chapter !== null)
     .sort((left, right) => left.startSeconds - right.startSeconds);
   return parsed.length >= 2 ? parsed : [];
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName;
+  if (tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT") {
+    return true;
+  }
+  return target.isContentEditable;
 }
 
 function ThumbIcon({
@@ -511,6 +522,19 @@ function WatchSuggestionRow({
             alt={displayTitle}
           />
           {isWatched ? <span className="watched-badge-overlay">Watched</span> : null}
+          {!isWatched && item.duration_seconds && item.duration_seconds > 0 ? (
+            <span className="suggestion-duration">
+              {formatDuration(item.duration_seconds)}
+            </span>
+          ) : null}
+          {!isWatched && progressPercent > 1 ? (
+            <span className="suggestion-progress" aria-hidden="true">
+              <span
+                className="suggestion-progress-fill"
+                style={{ width: `${progressPercent}%` }}
+              />
+            </span>
+          ) : null}
           </Link>
           <span className="suggestion-copy">
             <Link to={`/video/${item.watch_ref ?? item.id}`} className="suggestion-title-link">
@@ -759,7 +783,8 @@ export function VideoPage({
     suggested: createSuggestionFeedState(),
     related: createSuggestionFeedState(),
   }));
-  const [commentsExpanded, setCommentsExpanded] = useState(false);
+  const [commentsExpanded, setCommentsExpanded] = useState(true);
+  const [visibleComments, setVisibleComments] = useState(COMMENT_PREVIEW_COUNT);
   const [playlistMenuOpen, setPlaylistMenuOpen] = useState(false);
   const [playlistLoading, setPlaylistLoading] = useState(false);
   const [playlists, setPlaylists] = useState<PlaylistSummary[]>([]);
@@ -789,12 +814,40 @@ export function VideoPage({
   }, [data?.playback.stream_url, videoId]);
 
   useEffect(() => {
-    setCommentsExpanded(false);
+    setCommentsExpanded(true);
+    setVisibleComments(COMMENT_PREVIEW_COUNT);
   }, [videoId]);
 
   useEffect(() => {
     setDisplayMode(resolvePlayerModePreference(preferences.defaultPlayerMode));
   }, [preferences.defaultPlayerMode, videoId]);
+
+  useEffect(() => {
+    // YouTube-style "t" toggles theater. Registered on the capture phase so it
+    // wins over the app shell's type-to-search handler (which checks
+    // event.defaultPrevented on the bubble phase).
+    function handleTheaterKey(event: KeyboardEvent) {
+      if (event.key !== "t" && event.key !== "T") return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      setDisplayMode((current) => (current === "default" ? "theater" : "default"));
+    }
+    document.addEventListener("keydown", handleTheaterKey, { capture: true });
+    return () =>
+      document.removeEventListener("keydown", handleTheaterKey, {
+        capture: true,
+      });
+  }, []);
 
   useEffect(() => {
     try {
@@ -886,6 +939,42 @@ export function VideoPage({
       writePlaybackContext({ ...context, activeVideoId: videoId });
     }
   }, [videoId]);
+
+  useEffect(() => {
+    function handleWatchPageKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+        return;
+      }
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (
+        target?.closest(".card-menu, .modal-backdrop, .modal-shell, .header-search-popover")
+      ) {
+        return;
+      }
+      const video = videoNodeRef.current;
+      if (!video) return;
+      event.preventDefault();
+      const deltaSeconds = event.key === "ArrowLeft" ? -5 : 5;
+      const duration = Number.isFinite(video.duration)
+        ? video.duration
+        : Number.MAX_SAFE_INTEGER;
+      video.currentTime = Math.min(
+        duration,
+        Math.max(0, video.currentTime + deltaSeconds),
+      );
+    }
+
+    document.addEventListener("keydown", handleWatchPageKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleWatchPageKeyDown);
+    };
+  }, []);
 
   const descriptionSource =
     data?.video.description || data?.youtube.snapshot?.description || "";
@@ -1587,9 +1676,8 @@ export function VideoPage({
     >
       <section className="watch-layout">
         <div className="watch-stage-row">
-          <div className="watch-main-column">
-            <div className="watch-player-slot">
-              <div className="video-frame advanced-player watch-player-frame">
+          <div className="watch-player-slot">
+            <div className="video-frame advanced-player watch-player-frame">
                 <HalcyonPlayer
                   source={data.playback.stream_url}
                   autoplay={preferences.autoplay}
@@ -1715,6 +1803,7 @@ export function VideoPage({
                       className={`icon-button floating-control ${statsOpen ? "active-chip" : ""}`}
                       onClick={() => setStatsOpen((current) => !current)}
                       aria-label="Playback stats"
+                      title="Stats for nerds"
                     >
                       <svg
                         viewBox="0 0 24 24"
@@ -1738,6 +1827,7 @@ export function VideoPage({
                         )
                       }
                       aria-label="Toggle theater mode"
+                      title="Theater mode (t)"
                     >
                       <svg
                         viewBox="0 0 24 24"
@@ -1770,6 +1860,7 @@ export function VideoPage({
                         setMenuOpen((current) => !current);
                       }}
                       aria-label="Player actions"
+                      title="More actions"
                     >
                       <svg
                         viewBox="0 0 24 24"
@@ -2009,12 +2100,13 @@ export function VideoPage({
                       disabled={reactionPending === "like"}
                       onClick={() => void setReaction("like")}
                       type="button"
+                      aria-label="Like"
+                      title="Like"
                     >
                       <ThumbIcon
                         type="like"
                         active={data.video.user_reaction === "like"}
                       />
-                      <span>Like</span>
                       {displayedLikeCount != null ? (
                         <strong>{formatCount(displayedLikeCount)}</strong>
                       ) : null}
@@ -2024,12 +2116,13 @@ export function VideoPage({
                       disabled={reactionPending === "dislike"}
                       onClick={() => void setReaction("dislike")}
                       type="button"
+                      aria-label="Dislike"
+                      title="Dislike"
                     >
                       <ThumbIcon
                         type="dislike"
                         active={data.video.user_reaction === "dislike"}
                       />
-                      <span>Dislike</span>
                       {displayedDislikeCount != null ? (
                         <strong>{formatCount(displayedDislikeCount)}</strong>
                       ) : null}
@@ -2178,81 +2271,100 @@ export function VideoPage({
                   </div>
                   <span>{data.youtube.comments.length}</span>
                 </div>
-                <div
-                  className={`comment-stack ${
-                    canCollapseComments && !commentsExpanded ? "is-preview" : ""
-                  }`}
-                >
-                  {data.youtube.comments.length ? (
-                    data.youtube.comments.map((comment: any, index: number) => (
-                      <article
-                        key={`${comment.author_name}-${index}`}
-                        className="comment-card watch-comment-card"
-                      >
-                        <span className="comment-avatar">
-                          <AvatarImage
-                            src={null}
-                            alt={comment.author_name}
-                            seed={`${comment.author_name}-${index}`}
-                            fallbackText={comment.author_name}
-                          />
-                        </span>
-                        <div className="comment-body">
-                          <strong>{comment.author_name}</strong>
-                          <p>{comment.body}</p>
-                          <div className="comment-actions">
-                            <button
-                              className={`comment-reaction-button is-like ${commentReactions[`${comment.author_name}-${index}`] === "like" ? "is-selected" : ""}`}
-                              onClick={() =>
-                                setCommentReaction(
-                                  `${comment.author_name}-${index}`,
-                                  "like",
-                                )
-                              }
-                              type="button"
+                {commentsExpanded || !canCollapseComments ? (
+                  <div className="comment-stack">
+                    {data.youtube.comments.length ? (
+                      <>
+                        {data.youtube.comments
+                          .slice(0, visibleComments)
+                          .map((comment: any, index: number) => (
+                            <article
+                              key={`${comment.author_name}-${index}`}
+                              className="watch-comment"
                             >
-                              <ThumbIcon
-                                type="like"
-                                active={
-                                  commentReactions[
-                                    `${comment.author_name}-${index}`
-                                  ] === "like"
-                                }
-                              />
-                              <span>
-                                {formatCount(comment.like_count) || "0"}
+                              <span className="comment-avatar">
+                                <AvatarImage
+                                  src={null}
+                                  alt={comment.author_name}
+                                  seed={`${comment.author_name}-${index}`}
+                                  fallbackText={comment.author_name}
+                                />
                               </span>
-                            </button>
-                            <button
-                              className={`comment-reaction-button is-dislike ${commentReactions[`${comment.author_name}-${index}`] === "dislike" ? "is-selected" : ""}`}
-                              onClick={() =>
-                                setCommentReaction(
-                                  `${comment.author_name}-${index}`,
-                                  "dislike",
-                                )
-                              }
-                              type="button"
-                            >
-                              <ThumbIcon
-                                type="dislike"
-                                active={
-                                  commentReactions[
-                                    `${comment.author_name}-${index}`
-                                  ] === "dislike"
-                                }
-                              />
-                            </button>
-                          </div>
-                        </div>
-                      </article>
-                    ))
-                  ) : (
-                    <p className="muted-copy">No synced comments yet.</p>
-                  )}
-                </div>
+                              <div className="comment-body">
+                                <strong>{comment.author_name}</strong>
+                                <p>{comment.body}</p>
+                                <div className="comment-actions">
+                                  <button
+                                    className={`comment-reaction-button is-like ${commentReactions[`${comment.author_name}-${index}`] === "like" ? "is-selected" : ""}`}
+                                    onClick={() =>
+                                      setCommentReaction(
+                                        `${comment.author_name}-${index}`,
+                                        "like",
+                                      )
+                                    }
+                                    type="button"
+                                  >
+                                    <ThumbIcon
+                                      type="like"
+                                      active={
+                                        commentReactions[
+                                          `${comment.author_name}-${index}`
+                                        ] === "like"
+                                      }
+                                    />
+                                    <span>
+                                      {formatCount(comment.like_count) || "0"}
+                                    </span>
+                                  </button>
+                                  <button
+                                    className={`comment-reaction-button is-dislike ${commentReactions[`${comment.author_name}-${index}`] === "dislike" ? "is-selected" : ""}`}
+                                    onClick={() =>
+                                      setCommentReaction(
+                                        `${comment.author_name}-${index}`,
+                                        "dislike",
+                                      )
+                                    }
+                                    type="button"
+                                  >
+                                    <ThumbIcon
+                                      type="dislike"
+                                      active={
+                                        commentReactions[
+                                          `${comment.author_name}-${index}`
+                                        ] === "dislike"
+                                      }
+                                    />
+                                  </button>
+                                </div>
+                              </div>
+                            </article>
+                          ))}
+                        {data.youtube.comments.length > visibleComments ? (
+                          <button
+                            type="button"
+                            className="comments-load-more"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setVisibleComments(data.youtube.comments.length);
+                            }}
+                          >
+                            {`Show ${
+                              data.youtube.comments.length - visibleComments
+                            } more comment${
+                              data.youtube.comments.length - visibleComments === 1
+                                ? ""
+                                : "s"
+                            }`}
+                          </button>
+                        ) : null}
+                      </>
+                    ) : (
+                      <p className="muted-copy">No synced comments yet.</p>
+                    )}
+                  </div>
+                ) : null}
               </section>
             </div>
-          </div>
           <aside className="watch-sidebar">
             {data.next_up ? (
               <section className="watch-sidebar-section">
