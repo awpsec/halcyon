@@ -400,23 +400,78 @@ function playbackClientProfile(): "default" | "mobile" | "android" {
   return "default";
 }
 
+export class ApiError extends Error {
+  status: number | null;
+  isNetwork: boolean;
+
+  constructor(message: string, status: number | null, isNetwork = false) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.isNetwork = isNetwork;
+  }
+}
+
+function friendlyErrorMessage(status: number, body: string): string {
+  // Backend errors arrive as {"detail": "..."} — surface the human part,
+  // never the raw JSON.
+  try {
+    const parsed = JSON.parse(body) as { detail?: unknown };
+    if (typeof parsed.detail === "string" && parsed.detail.trim()) {
+      return parsed.detail;
+    }
+    if (Array.isArray(parsed.detail)) {
+      const merged = parsed.detail
+        .map((item) =>
+          item && typeof item === "object" && "msg" in item
+            ? String((item as { msg: unknown }).msg)
+            : "",
+        )
+        .filter(Boolean)
+        .join("; ");
+      if (merged) return merged;
+    }
+  } catch {
+    // non-JSON body — fall through
+  }
+  if (status >= 500) {
+    return "The Halcyon server hit an error. It may still be starting up — try again in a moment.";
+  }
+  if (status === 401) {
+    return "Not signed in.";
+  }
+  return body.trim() || `Request failed (${status})`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const timezone = browserTimeZone();
   const isFormData =
     typeof FormData !== "undefined" && init?.body instanceof FormData;
-  const response = await fetch(path, {
-    credentials: "include",
-    headers: {
-      ...(isFormData ? {} : { "Content-Type": "application/json" }),
-      ...(timezone ? { "X-Halcyon-Timezone": timezone } : {}),
-      ...(init?.headers ?? {})
-    },
-    ...init
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      credentials: "include",
+      headers: {
+        ...(isFormData ? {} : { "Content-Type": "application/json" }),
+        ...(timezone ? { "X-Halcyon-Timezone": timezone } : {}),
+        ...(init?.headers ?? {})
+      },
+      ...init
+    });
+  } catch {
+    throw new ApiError(
+      "Can't reach the Halcyon server. Make sure the backend is running, then try again.",
+      null,
+      true,
+    );
+  }
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(body || `Request failed: ${response.status}`);
+    throw new ApiError(
+      friendlyErrorMessage(response.status, body),
+      response.status,
+    );
   }
 
   if (response.status === 204) {

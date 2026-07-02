@@ -299,6 +299,19 @@ export function HalcyonPlayer({
     playerRef.current = player;
     onReadyRef.current?.(node, player);
 
+    // Plyr ships its volume range with step=0.05 (20 coarse detents).
+    // Loosen it to a free 0-100 style slider.
+    const refineVolumeSlider = () => {
+      const input = shellRef.current?.querySelector<HTMLInputElement>(
+        'input[data-plyr="volume"]',
+      );
+      if (input && input.step !== "0.01") {
+        input.step = "0.01";
+      }
+    };
+    refineVolumeSlider();
+    window.setTimeout(refineVolumeSlider, 50);
+
     const pauseHandler = () => onPauseRef.current?.(node);
     const endedHandler = () => onEndedRef.current?.(node);
     const loadStartHandler = () => {
@@ -543,54 +556,6 @@ export function HalcyonPlayer({
     shell.addEventListener("wheel", handleWheel, { passive: false });
     return () => shell.removeEventListener("wheel", handleWheel);
   }, [mousewheelVolumeControl]);
-
-  useEffect(() => {
-    const shell = shellRef.current;
-    if (!shell) return;
-
-    function handleKeyDown(event: KeyboardEvent) {
-      const node = videoRef.current;
-      if (!node) return;
-      if (event.key === "ArrowLeft") {
-        event.preventDefault();
-        node.currentTime = Math.max(0, node.currentTime - 5);
-        return;
-      }
-      if (event.key === "ArrowRight") {
-        event.preventDefault();
-        const duration = Number.isFinite(node.duration) ? node.duration : Number.MAX_SAFE_INTEGER;
-        node.currentTime = Math.min(duration, node.currentTime + 5);
-        return;
-      }
-      if (event.key === "ArrowUp") {
-        event.preventDefault();
-        node.muted = false;
-        node.volume = Number(Math.min(1, node.volume + 0.05).toFixed(2));
-        return;
-      }
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        node.muted = false;
-        node.volume = Number(Math.max(0, node.volume - 0.05).toFixed(2));
-        return;
-      }
-      if (
-        event.key.toLowerCase() === "c" &&
-        !event.altKey &&
-        !event.ctrlKey &&
-        !event.metaKey
-      ) {
-        if (!captionsAvailable(node)) return;
-        event.preventDefault();
-        const nextEnabled = !captionsCurrentlyEnabled(node);
-        applyCaptionsEnabled(node, nextEnabled);
-        onCaptionsChangeRef.current?.(nextEnabled);
-      }
-    }
-
-    shell.addEventListener("keydown", handleKeyDown);
-    return () => shell.removeEventListener("keydown", handleKeyDown);
-  }, []);
 
   return (
     <div
