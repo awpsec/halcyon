@@ -9683,3 +9683,53 @@ body,
   padding-left: 12px;
   margin-top: 8px;
 }
+
+/* ============================================================
+   Flat comment rows (3750 design) — watch comments render as
+   .watch-comment now; style the body/reactions flat, keep replies.
+   ============================================================ */
+.watch-comment > .comment-avatar {
+  width: 40px;
+  height: 40px;
+}
+
+.watch-comment .comment-body {
+  gap: 3px;
+}
+
+.watch-comment .comment-body > strong {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.005em;
+}
+
+.watch-comment .comment-body > p {
+  font-size: 0.93rem;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.watch-comment .comment-actions {
+  gap: 4px;
+  margin-top: 4px;
+  margin-left: -8px;
+}
+
+.watch-comment .comment-reaction-button {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  padding: 0 10px;
+  border-radius: var(--r-pill);
+  transition:
+    background-color var(--t),
+    color var(--t);
+}
+
+.watch-comment .comment-reaction-button:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+  color: var(--text);
+}

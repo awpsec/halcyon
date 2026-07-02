@@ -954,7 +954,10 @@ export function VideoPage({
     suggested: createSuggestionFeedState(),
     related: createSuggestionFeedState(),
   }));
-  const [commentsExpanded, setCommentsExpanded] = useState(false);
+  const [commentsExpanded, setCommentsExpanded] = useState(true);
+  const [visibleComments, setVisibleComments] = useState(
+    STANDARD_COMMENT_PREVIEW_COUNT,
+  );
   const [expandedReplies, setExpandedReplies] = useState<Record<number, boolean>>(
     {},
   );
@@ -1015,7 +1018,8 @@ export function VideoPage({
   ]);
 
   useEffect(() => {
-    setCommentsExpanded(false);
+    setCommentsExpanded(true);
+    setVisibleComments(STANDARD_COMMENT_PREVIEW_COUNT);
     setExpandedReplies({});
   }, [videoId]);
 
@@ -2693,174 +2697,139 @@ export function VideoPage({
                   </div>
                   <span>{totalComments.length}</span>
                 </div>
-                <div
-                  className={`comment-stack ${
-                    canCollapseComments && !commentsExpanded ? "is-preview" : ""
-                  } ${
-                    !usesCompactCommentPreview && canCollapseComments && !commentsExpanded
-                      ? "is-standard-preview"
-                      : ""
-                  } ${
-                    usesCompactCommentPreview && canCollapseComments && !commentsExpanded
-                      ? "is-compact-preview"
-                      : ""
-                  }`}
-                >
-                  {previewedComments.length ? (
-                    showCollapsedCommentPreview ? (
-                      previewedComments.map((comment, index: number) => (
-                        <article
-                          key={comment.id}
-                          className={`watch-comment-preview-row ${
-                            index === previewOverflowCommentIndex
-                              ? "is-faded-preview"
-                              : ""
-                          }`}
-                        >
-                          <span className="comment-avatar">
-                            <AvatarImage
-                              src={null}
-                              alt={comment.author_name}
-                              seed={`${comment.id}-${comment.author_name}`}
-                              fallbackText={comment.author_name}
-                            />
-                          </span>
-                          <div className="watch-comment-preview-copy">
-                            <strong>{comment.author_name}</strong>
-                            <p>{comment.body}</p>
-                          </div>
-                        </article>
-                      ))
-                    ) : (
-                      previewedComments.map((comment, index: number) => {
-                        const reactionKey = comment.youtube_comment_id ?? String(comment.id);
-                        const visibleReplies = comment.replies ?? [];
-                        const repliesExpanded = Boolean(expandedReplies[comment.id]);
-                        return (
-                          <article
-                            key={comment.id}
-                            className={`comment-card watch-comment-card ${
-                              index === previewOverflowCommentIndex
-                                ? "is-faded-preview"
-                                : ""
-                            }`}
-                          >
-                            <span className="comment-avatar">
-                              <AvatarImage
-                                src={null}
-                                alt={comment.author_name}
-                                seed={`${comment.id}-${comment.author_name}`}
-                                fallbackText={comment.author_name}
-                              />
-                            </span>
-                            <div className="comment-body">
-                              <strong>{comment.author_name}</strong>
-                              <p>{comment.body}</p>
-                              <div className="comment-actions">
-                                <button
-                                  className={`comment-reaction-button is-like ${commentReactions[reactionKey] === "like" ? "is-selected" : ""}`}
-                                  onClick={() =>
-                                    setCommentReaction(
-                                      reactionKey,
-                                      "like",
-                                    )
-                                  }
-                                  type="button"
-                                >
-                                  <ThumbIcon
-                                    type="like"
-                                    active={
-                                      commentReactions[
-                                        reactionKey
-                                      ] === "like"
-                                    }
+                {commentsExpanded || !canCollapseComments ? (
+                  <div className="comment-stack">
+                    {totalComments.length ? (
+                      <>
+                        {totalComments
+                          .slice(0, visibleComments)
+                          .map((comment) => {
+                            const reactionKey =
+                              comment.youtube_comment_id ?? String(comment.id);
+                            const visibleReplies = comment.replies ?? [];
+                            const repliesExpanded = Boolean(
+                              expandedReplies[comment.id],
+                            );
+                            return (
+                              <article key={comment.id} className="watch-comment">
+                                <span className="comment-avatar">
+                                  <AvatarImage
+                                    src={null}
+                                    alt={comment.author_name}
+                                    seed={`${comment.id}-${comment.author_name}`}
+                                    fallbackText={comment.author_name}
                                   />
-                                  <span>
-                                    {formatCount(comment.like_count) || "0"}
-                                  </span>
-                                </button>
-                                <button
-                                  className={`comment-reaction-button is-dislike ${commentReactions[reactionKey] === "dislike" ? "is-selected" : ""}`}
-                                  onClick={() =>
-                                    setCommentReaction(
-                                      reactionKey,
-                                      "dislike",
-                                    )
-                                  }
-                                  type="button"
-                                >
-                                  <ThumbIcon
-                                    type="dislike"
-                                    active={
-                                      commentReactions[
-                                        reactionKey
-                                      ] === "dislike"
-                                    }
-                                  />
-                                </button>
-                              </div>
-                              {visibleReplies.length ? (
-                                <div className="watch-comment-replies">
-                                  <button
-                                    className={`watch-comment-replies-header ${
-                                      repliesExpanded ? "is-expanded" : ""
-                                    }`}
-                                    onClick={() => toggleReplies(comment.id)}
-                                    type="button"
-                                  >
-                                    <strong>
-                                      {comment.reply_count === 1 ? "1 reply" : `${comment.reply_count} replies`}
-                                    </strong>
-                                    {repliesExpanded && comment.reply_count > visibleReplies.length ? (
-                                      <small>
-                                        Showing {visibleReplies.length} of {comment.reply_count}
-                                      </small>
-                                    ) : null}
-                                    <span className="watch-comment-replies-toggle">
-                                      {repliesExpanded ? "Hide" : "Show"}
-                                    </span>
-                                  </button>
-                                  {repliesExpanded ? (
-                                    <div className="watch-comment-replies-list">
-                                      {visibleReplies.map((reply) => (
-                                        <article className="watch-comment-reply" key={reply.id}>
-                                          <span className="comment-avatar is-reply-avatar">
-                                            <AvatarImage
-                                              src={null}
-                                              alt={reply.author_name}
-                                              seed={`${reply.id}-${reply.author_name}`}
-                                              fallbackText={reply.author_name}
-                                            />
-                                          </span>
-                                          <div className="watch-comment-reply-copy">
-                                            <strong>{reply.author_name}</strong>
-                                            <p>{reply.body}</p>
-                                          </div>
-                                        </article>
-                                      ))}
+                                </span>
+                                <div className="comment-body">
+                                  <strong>{comment.author_name}</strong>
+                                  <p>{comment.body}</p>
+                                  <div className="comment-actions">
+                                    <button
+                                      className={`comment-reaction-button is-like ${commentReactions[reactionKey] === "like" ? "is-selected" : ""}`}
+                                      onClick={() =>
+                                        setCommentReaction(reactionKey, "like")
+                                      }
+                                      type="button"
+                                      aria-label="Like"
+                                    >
+                                      <ThumbIcon
+                                        type="like"
+                                        active={
+                                          commentReactions[reactionKey] === "like"
+                                        }
+                                      />
+                                      <span>
+                                        {formatCount(comment.like_count) || "0"}
+                                      </span>
+                                    </button>
+                                    <button
+                                      className={`comment-reaction-button is-dislike ${commentReactions[reactionKey] === "dislike" ? "is-selected" : ""}`}
+                                      onClick={() =>
+                                        setCommentReaction(reactionKey, "dislike")
+                                      }
+                                      type="button"
+                                      aria-label="Dislike"
+                                    >
+                                      <ThumbIcon
+                                        type="dislike"
+                                        active={
+                                          commentReactions[reactionKey] ===
+                                          "dislike"
+                                        }
+                                      />
+                                    </button>
+                                  </div>
+                                  {visibleReplies.length ? (
+                                    <div className="watch-comment-replies">
+                                      <button
+                                        className={`watch-comment-replies-header ${repliesExpanded ? "is-expanded" : ""}`}
+                                        onClick={() => toggleReplies(comment.id)}
+                                        type="button"
+                                      >
+                                        <strong>
+                                          {comment.reply_count === 1
+                                            ? "1 reply"
+                                            : `${comment.reply_count} replies`}
+                                        </strong>
+                                        {repliesExpanded &&
+                                        comment.reply_count >
+                                          visibleReplies.length ? (
+                                          <small>
+                                            Showing {visibleReplies.length} of{" "}
+                                            {comment.reply_count}
+                                          </small>
+                                        ) : null}
+                                        <span className="watch-comment-replies-toggle">
+                                          {repliesExpanded ? "Hide" : "Show"}
+                                        </span>
+                                      </button>
+                                      {repliesExpanded ? (
+                                        <div className="watch-comment-replies-list">
+                                          {visibleReplies.map((reply) => (
+                                            <article
+                                              className="watch-comment-reply"
+                                              key={reply.id}
+                                            >
+                                              <span className="comment-avatar is-reply-avatar">
+                                                <AvatarImage
+                                                  src={null}
+                                                  alt={reply.author_name}
+                                                  seed={`${reply.id}-${reply.author_name}`}
+                                                  fallbackText={reply.author_name}
+                                                />
+                                              </span>
+                                              <div className="watch-comment-reply-copy">
+                                                <strong>
+                                                  {reply.author_name}
+                                                </strong>
+                                                <p>{reply.body}</p>
+                                              </div>
+                                            </article>
+                                          ))}
+                                        </div>
+                                      ) : null}
                                     </div>
                                   ) : null}
                                 </div>
-                              ) : null}
-                            </div>
-                          </article>
-                        );
-                      })
-                    )
-                  ) : totalComments.length === 0 ? (
-                    <p className="muted-copy">No synced comments yet.</p>
-                  ) : null}
-                </div>
-                {canCollapseComments &&
-                !commentsExpanded &&
-                !usesCompactCommentPreview ? (
-                  <button
-                    className="watch-comments-preview-action"
-                    onClick={() => setCommentsExpanded(true)}
-                    type="button"
-                  >
-                    Show all comments
-                  </button>
+                              </article>
+                            );
+                          })}
+                        {totalComments.length > visibleComments ? (
+                          <button
+                            type="button"
+                            className="comments-load-more"
+                            onClick={() =>
+                              setVisibleComments(totalComments.length)
+                            }
+                          >
+                            {`Show ${totalComments.length - visibleComments} more comment${totalComments.length - visibleComments === 1 ? "" : "s"}`}
+                          </button>
+                        ) : null}
+                      </>
+                    ) : (
+                      <p className="muted-copy">No synced comments yet.</p>
+                    )}
+                  </div>
                 ) : null}
               </section>
             </div>
